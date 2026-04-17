@@ -11,6 +11,7 @@ import type {
   ToolNodeData,
   ToolPort,
   MergeNodeData,
+  TransformNodeData,
   MergeStrategy,
   FileType,
 } from '../../src/types/pipeline'
@@ -315,6 +316,114 @@ export interface MergeScriptResult {
   script: string
   outputPath: string
   strategy: Exclude<MergeStrategy, 'auto'>
+}
+
+export interface TransformScriptOpts {
+  nodeId: string
+  nodeSlug?: string
+  transformData: TransformNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  logDir: string
+  connectionDefaults?: ConnectionDefaults
+}
+
+export interface TransformScriptResult {
+  script: string
+  outputs: Record<string, AxedValue>
+  arraySize?: number
+}
+
+export function generateTransformScript(opts: TransformScriptOpts): TransformScriptResult {
+  const { nodeId, transformData, axisPlan, outputDir, logDir, connectionDefaults } = opts
+  const slug = opts.nodeSlug ?? nodeId
+  const isArray = axisPlan.mode === 'array'
+  const arraySize = isArray ? axisPlan.keys!.length : undefined
+  const slurm = transformData.slurmOverride ?? {}
+  const cpus = slurm.cpus ?? 1
+  const memGB = slurm.memoryGB ?? 4
+  const timeH = slurm.timeHours ?? 1
+  const partition = slurm.partition ?? connectionDefaults?.partition
+  const account = connectionDefaults?.account
+  const input = axisPlan.inputs.input
+  const output = axisPlan.outputs.output
+  const inputPaths = input?.kind === 'array' ? input.paths : input?.kind === 'multi' ? input.paths : input ? [input.path] : []
+  const outputPaths = output?.kind === 'array' ? output.paths : output?.kind === 'multi' ? output.paths : output ? [output.path] : []
+
+  const lines: string[] = []
+  lines.push('#!/bin/bash')
+  lines.push(`#SBATCH --job-name=bioflow-${slug}-transform`)
+  if (isArray) {
+    lines.push(`#SBATCH --array=0-${arraySize! - 1}`)
+    lines.push(`#SBATCH --output=${logDir}/${slug}-%A_%a.out`)
+    lines.push(`#SBATCH --error=${logDir}/${slug}-%A_%a.err`)
+  } else {
+    lines.push(`#SBATCH --output=${logDir}/${slug}-%j.out`)
+    lines.push(`#SBATCH --error=${logDir}/${slug}-%j.err`)
+  }
+  lines.push(`#SBATCH --cpus-per-task=${cpus}`)
+  lines.push(`#SBATCH --mem=${memGB}G`)
+  lines.push(`#SBATCH --time=${formatTime(timeH)}`)
+  if (account) lines.push(`#SBATCH --account=${account}`)
+  if (partition) lines.push(`#SBATCH --partition=${partition}`)
+  lines.push('')
+  lines.push('set -euo pipefail')
+  lines.push('')
+  if (connectionDefaults?.modulePreamble) lines.push(connectionDefaults.modulePreamble)
+  lines.push(`mkdir -p ${shellQuote(outputDir)}`)
+  lines.push('')
+  lines.push(`INPUTS=(${inputPaths.map(shellArg).join(' ')})`)
+  lines.push(`OUTPUTS=(${outputPaths.map(shellArg).join(' ')})`)
+  if (isArray) {
+    lines.push('IN="${INPUTS[$SLURM_ARRAY_TASK_ID]}"')
+    lines.push('OUT="${OUTPUTS[$SLURM_ARRAY_TASK_ID]}"')
+  } else {
+    lines.push('IN="${INPUTS[0]}"')
+    lines.push('OUT="${OUTPUTS[0]}"')
+  }
+  lines.push('')
+  lines.push(`python3 - <<'PY' "$IN" "$OUT"`)
+  lines.push('import csv, json, sys')
+  lines.push('in_path, out_path = sys.argv[1], sys.argv[2]')
+  lines.push(`config = json.loads(${JSON.stringify(JSON.stringify({
+    selectedColumns: transformData.selectedColumns ?? [],
+    filters: transformData.filters ?? [],
+    renames: transformData.renames ?? [],
+    fileType: transformData.fileType,
+  }))})`)
+  lines.push('def delimiter(path, preferred):')
+  lines.push('    if preferred == "csv" or path.lower().endswith(".csv"): return ","')
+  lines.push('    return "\\t"')
+  lines.push('def match(row, rule):')
+  lines.push('    raw = row.get(rule.get("column", ""), "")')
+  lines.push('    value = str(rule.get("value", ""))')
+  lines.push('    op = rule.get("op")')
+  lines.push('    if op == "contains": return value.lower() in raw.lower()')
+  lines.push('    if op == "equals": return raw == value')
+  lines.push('    if op == "notEquals": return raw != value')
+  lines.push('    if op == "notEmpty": return raw.strip() != ""')
+  lines.push('    try:')
+  lines.push('        a, b = float(raw), float(value)')
+  lines.push('    except ValueError:')
+  lines.push('        return False')
+  lines.push('    return (op == "gt" and a > b) or (op == "gte" and a >= b) or (op == "lt" and a < b) or (op == "lte" and a <= b)')
+  lines.push('in_delim = delimiter(in_path, "")')
+  lines.push('out_delim = delimiter(out_path, config.get("fileType", ""))')
+  lines.push('with open(in_path, newline="") as src, open(out_path, "w", newline="") as dst:')
+  lines.push('    reader = csv.DictReader(src, delimiter=in_delim)')
+  lines.push('    source_fields = reader.fieldnames or []')
+  lines.push('    requested = [c for c in config.get("selectedColumns", []) if c in source_fields]')
+  lines.push('    fields = requested or source_fields')
+  lines.push('    rename = {r.get("from"): (r.get("to") or r.get("from")) for r in config.get("renames", [])}')
+  lines.push('    out_fields = [rename.get(c, c) for c in fields]')
+  lines.push('    writer = csv.DictWriter(dst, fieldnames=out_fields, delimiter=out_delim, extrasaction="ignore", lineterminator="\\n")')
+  lines.push('    writer.writeheader()')
+  lines.push('    for row in reader:')
+  lines.push('        if all(match(row, rule) for rule in config.get("filters", [])):')
+  lines.push('            writer.writerow({rename.get(c, c): row.get(c, "") for c in fields})')
+  lines.push('PY')
+  lines.push('')
+  return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
 }
 
 export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {

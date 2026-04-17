@@ -30,6 +30,7 @@ interface RunStoreState {
   startRun: (connectionId: string, snapshot: PipelineSnapshot) => Promise<string>
   cancelRun: (runId: string) => Promise<void>
   cancelNode: (runId: string, nodeId: string) => Promise<void>
+  rerunNode: (runId: string, nodeId: string, snapshot: PipelineSnapshot) => Promise<void>
   setActiveRun: (runId: string | null) => void
   setSelectedNode: (nodeId: string | null) => void
   refreshRuns: () => Promise<void>
@@ -59,7 +60,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     // authoritative state arrives via the node-status event channel moments later.
     const pipelineStore = usePipelineStore.getState()
     for (const n of pipelineStore.nodes) {
-      if (n.type === 'tool' || n.type === 'merge') {
+      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
         pipelineStore.setNodeStatus(n.id, 'idle')
       }
     }
@@ -77,7 +78,16 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     await window.api.pipeline.cancelNode(runId, nodeId)
   },
 
-  setActiveRun: (runId) => set({ activeRunId: runId, selectedNodeId: null }),
+  rerunNode: async (runId, nodeId, snapshot) => {
+    await window.api.pipeline.rerunNode(runId, nodeId, snapshot)
+    await get().refreshRuns()
+  },
+
+  setActiveRun: (runId) => {
+    set({ activeRunId: runId, selectedNodeId: null })
+    const run = runId ? get().runs[runId] : null
+    if (run) applyCanvasStatuses(run)
+  },
 
   setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
@@ -86,6 +96,8 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     const byId: Record<string, RunState> = {}
     for (const r of list) byId[r.runId] = r
     set({ runs: byId })
+    const active = get().activeRunId ? byId[get().activeRunId!] : null
+    if (active) applyCanvasStatuses(active)
   },
 
   appendLog: (nodeId, chunk, stream) => {
@@ -129,13 +141,20 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     const offNode = api.onNodeStatus
       ? api.onNodeStatus(({ runId, nodeId, status, jobId, error, node }) => {
           // Mirror into the pipeline store so the canvas badge updates.
+          const current = get()
           const pipelineStore = usePipelineStore.getState()
-          pipelineStore.setNodeStatus(
-            nodeId,
-            (node?.status ?? status) as any,
-            node?.jobId ?? jobId,
-            node ? node.error : error,
-          )
+          const cachedRun = current.runs[runId]
+          if (
+            current.activeRunId === runId &&
+            cachedRun?.pipelineId === pipelineStore.pipelineId
+          ) {
+            pipelineStore.setNodeStatus(
+              nodeId,
+              (node?.status ?? status) as any,
+              node?.jobId ?? jobId,
+              node ? node.error : error,
+            )
+          }
           // Update local run cache.
           set((state) => {
             const run = state.runs[runId]
@@ -153,7 +172,11 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
               ...run.nodes,
               [nodeId]: nextNode,
             }
-            return { runs: { ...state.runs, [runId]: { ...run, nodes, updatedAt: Date.now() } } }
+            const nextRun = { ...run, nodes, updatedAt: Date.now() }
+            if (state.activeRunId === runId && nextRun.pipelineId === usePipelineStore.getState().pipelineId) {
+              applyCanvasStatuses(nextRun)
+            }
+            return { runs: { ...state.runs, [runId]: nextRun } }
           })
         })
       : noop
@@ -163,6 +186,9 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
           set((state) => {
             const run = state.runs[runId]
             if (!run) return state
+            if (status === 'done' || status === 'failed' || status === 'cancelled') {
+              notifyRunFinished(runId, status)
+            }
             return { runs: { ...state.runs, [runId]: { ...run, status: status as RunStatus, updatedAt: Date.now() } } }
           })
         })
@@ -178,6 +204,21 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   },
 }))
 
+function applyCanvasStatuses(run: RunState): void {
+  const pipelineStore = usePipelineStore.getState()
+  if (run.pipelineId !== pipelineStore.pipelineId) return
+  for (const node of pipelineStore.nodes) {
+    if (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform') continue
+    const ns = run.nodes[node.id]
+    pipelineStore.setNodeStatus(
+      node.id,
+      (ns?.status ?? 'idle') as any,
+      ns?.jobId,
+      ns?.error,
+    )
+  }
+}
+
 function mergeFetchedLog(existing: string[], fetched: string[]): string[] {
   const existingText = existing.join('\n')
   const fetchedText = fetched.join('\n')
@@ -187,4 +228,19 @@ function mergeFetchedLog(existing: string[], fetched: string[]): string[] {
   if (fetchedText.includes(existingText)) return fetched
   if (existingText.includes(fetchedText)) return existing
   return [...existing, ...fetched]
+}
+
+function notifyRunFinished(runId: string, status: RunStatus): void {
+  if (typeof window === 'undefined' || !('Notification' in window)) return
+  const title = status === 'done' ? 'BioFlow run finished' : status === 'failed' ? 'BioFlow run failed' : 'BioFlow run cancelled'
+  const body = `Run ${runId.slice(0, 8)} is ${status}.`
+  if (Notification.permission === 'granted') {
+    new Notification(title, { body })
+    return
+  }
+  if (Notification.permission === 'default') {
+    void Notification.requestPermission().then((permission) => {
+      if (permission === 'granted') new Notification(title, { body })
+    })
+  }
 }

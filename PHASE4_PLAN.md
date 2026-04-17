@@ -1,6 +1,6 @@
 # BioFlow Studio — Phase 4 Implementation Plan
 
-**Status:** in progress (items 1, 2, 4, 5, 6, 7, 11, 15 shipped/mostly shipped; items 3, 13, 16, 17 partially shipped)
+**Status:** complete for Phase 4 MVP (items 1-18 shipped or shipped as pragmatic MVPs; future polish remains for richer queue actions, native save dialogs, and full multi-tab pipeline workspaces)
 **Depends on:** Phase 1 (SSH + file explorer + data preview + terminal), Phase 2 (pipeline canvas), Phase 3 (execution runtime + validation + jobs panel + SSH persistence)
 **Owner:** single-developer project
 
@@ -53,22 +53,22 @@ Phase 3's authoritative design doc is [PHASE3_PLAN.md](PHASE3_PLAN.md); shipped 
 | 1b  | Dialog body scrollability                     | ✅ shipped             |
 | 1c  | TopBar crowding (ResizeObserver + compact)    | ✅ shipped             |
 | 2   | Default analysis folder (per-connection)      | ✅ shipped (Browse button deferred) |
-| 3   | FileNode output rework (rename + folder)      | partial — output FileNode sink paths now drive runtime destinations; filename/folder split UI still pending |
+| 3   | FileNode output rework (rename + folder)      | ✅ shipped — output nodes expose filename/folder and drive runtime sink paths |
 | 4   | Per-node output folder override               | ✅ shipped             |
 | 5   | FileExplorer → canvas drag-drop               | ✅ shipped (auto-connects to first compatible tool input; popover still future polish) |
 | 6   | Jobs panel fixes + completed-job summary      | ✅ shipped — selectable run history, summaries, output/log actions |
 | 7   | Data previewer filter / column select / sort  | ✅ shipped             |
-| 8   | Column mapping in tool inspector              | pending               |
-| 9   | Transform node (filter rows, select columns)  | pending               |
-| 10  | Re-run single failed node                     | pending               |
+| 8   | Column mapping in tool inspector              | ✅ shipped — columnRef params use connected tabular headers when available |
+| 9   | Transform node (filter rows, select columns)  | ✅ shipped — graph node, inspector, planner, script generation, validation |
+| 10  | Re-run single failed node                     | ✅ shipped — failed step button reruns selected node + downstream under same run |
 | 11  | Script viewer / dry-run mode                  | ✅ shipped             |
-| 12  | Run history persistence + squeue reattach    | pending               |
-| 13  | Autosave + keyboard shortcuts + templates + notifications | partial — keyboard shortcuts + import/templates shipped; autosave + notifications pending |
-| 14  | Validator warnings carry-over                 | pending               |
+| 12  | Run history persistence + squeue reattach    | ✅ shipped MVP — run states persist in settings and live jobs reattach when connection is alive |
+| 13  | Autosave + keyboard shortcuts + templates + notifications | ✅ shipped MVP — autosave restore, shortcuts, import/templates, system notifications |
+| 14  | Validator warnings carry-over                 | ✅ shipped — transform/schema column checks plus existing orphan/resource warnings |
 | 15  | Log streaming follow-up (stdout/stderr still empty) | ✅ shipped — NodeRunState now carries log paths; terminal refresh uses SFTP |
-| 16  | Live Slurm queue view (squeue -u)             | partial — Jobs panel polls `squeue -u` while open; dedicated Queue tab still pending |
-| 17  | Concurrent runs — start another without waiting | partial — Run button no longer blocked by terminal runs; full per-pipeline badge isolation pending |
-| 18  | Multiple named pipelines (open/switch/new)    | pending               |
+| 16  | Live Slurm queue view (squeue -u)             | ✅ shipped MVP — dedicated Queue tab with sort/filter/auto-refresh |
+| 17  | Concurrent runs — start another without waiting | ✅ shipped MVP — run button stays available and canvas badges follow selected run/pipeline |
+| 18  | Multiple named pipelines (open/switch/new)    | ✅ shipped MVP — named save/open/new/import/template flows, autosave restore |
 
 ---
 
@@ -313,6 +313,13 @@ Open a 500-row TSV. Hide 3 columns. Add a numeric filter (`age > 50`). Sort by `
 
 ## 8. Column mapping in tool inspector
 
+### Shipped
+
+- `ToolParam.columnRef` and `columnSourcePortId` annotate PLINK2/REGENIE phenotype and covariate column params.
+- `dataPreviewStore.schemas` caches previewed/fetched headers; the inspector also fetches `head -1` from connected remote tabular inputs when possible.
+- Column params keep a text field for explicit comma-list editing and add column chips for quick, typo-resistant picks.
+- Transform outputs compute their schema from upstream schema + selected/renamed columns, so downstream column pickers stay useful.
+
 ### Motivation
 
 When a tabular file is connected to a tool that expects column names (PLINK2 `pheno-name`, REGENIE `covarColList`, etc.), those params are currently free-text. Users can — and do — typo column names, leading to `awk`/`plink2` errors at runtime.
@@ -340,6 +347,13 @@ Connect a TSV with headers `FID,IID,pheno,age,sex` to a PLINK2 assoc node. Open 
 ---
 
 ## 9. Transform node (filter rows, select/rename columns)
+
+### Shipped
+
+- Transform is a first-class node type with palette entry, canvas node, inspector, store action, runtime state, validation, dry-run script preview, and Slurm execution.
+- The inspector supports selected columns, row filters, rename rules, output file type, output folder override, Slurm resources, and "copy filters from preview".
+- Script generation materializes TSV/CSV/TXT-style transforms via an inline `python3` CSV script and preserves Slurm array behavior for axed inputs.
+- Axis planning makes transform nodes axis-transparent: axed input becomes axed output with matching keys.
 
 ### Motivation
 
@@ -413,6 +427,12 @@ Build `input.tsv → Transform(filterRows age>50, selectColumns [IID,pheno]) →
 
 ## 10. Re-run single failed node
 
+### Shipped
+
+- New `PipelineRunner.rerunNode(runId, nodeId, snapshot)` recomputes current scripts from the edited graph and reruns the selected node plus downstream dependents in the original run directory.
+- IPC/preload/runStore plumbing exposes `pipeline:rerun-node`.
+- Jobs panel shows **Re-run step** for a selected failed node when the displayed pipeline matches the run.
+
 ### Motivation
 
 A 10-step pipeline where step 7 fails shouldn't require re-running steps 1–6. Re-running only the failed node (and its downstream) saves cluster time and reduces friction.
@@ -477,6 +497,12 @@ Load a valid pipeline. Click Preview scripts. Confirm `#SBATCH` headers are corr
 
 ## 12. Run history persistence + squeue reattach
 
+### Shipped MVP
+
+- Main-process run states persist to the settings store under `pipeline:runs:v1` and are restored on startup.
+- On `pipeline:list-runs`, the runner attempts to reattach queued/running persisted Slurm job ids for currently-live SSH connections and updates terminal state through `JobTracker`.
+- Keeps the most recent 50 runs. Full JSONL event replay remains future polish if audit-grade history becomes necessary.
+
 Closes the last deferred item from PHASE3_PLAN.md §4.5.
 
 ### Storage
@@ -513,6 +539,13 @@ Start a pipeline, close the app mid-run, reopen. Confirm the run appears in the 
 ---
 
 ## 13. Autosave + keyboard shortcuts + templates + notifications
+
+### Shipped MVP
+
+- A debounced renderer autosave writes the latest graph snapshot and restores it on boot when the canvas is empty.
+- Keyboard shortcuts for undo/redo, duplicate, copy, and paste are wired.
+- Import/export/template flows exist in the pipeline toolbar.
+- Browser/Electron notifications fire when a run reaches a terminal state, subject to system permission.
 
 Four small, independent UX items bundled because each is ~a day's work.
 
@@ -558,6 +591,11 @@ In [PipelineCanvas.tsx](src/components/pipeline/PipelineCanvas.tsx), mount a doc
 ---
 
 ## 14. Validator warnings carry-over
+
+### Shipped
+
+- Existing orphan-output and overprovisioned-resource checks now cover transform nodes where applicable.
+- `TRANSFORM_UNKNOWN_COLUMN`, `SCHEMA_COLUMN_MISMATCH`, and `SCHEMA_NOT_LOADED` surface schema-sensitive mistakes when headers are available from preview/inspector cache.
 
 Complete the validator rules listed in PHASE3_PLAN.md that weren't shipped in Phase 3.
 
@@ -611,6 +649,11 @@ Run a fast job (exits in <2s) and a slow job (sleeps 30s). In both cases stdout 
 ---
 
 ## 16. Live Slurm queue view (`squeue -u $USER`)
+
+### Shipped MVP
+
+- Dedicated bottom-panel **Queue** tab calls the existing `slurm.queue(connectionId)` IPC, refreshes immediately, and auto-refreshes every 10s when enabled.
+- Table supports sorting, a "BioFlow only" filter matched against known job ids, manual refresh, and connection/local empty states.
 
 ### Motivation
 
@@ -677,6 +720,12 @@ Submit 3 `sleep 60` jobs via `sbatch` outside the app. Open the Queue tab on the
 
 ## 17. Concurrent runs — start a new pipeline without waiting
 
+### Shipped MVP
+
+- Toolbar Run is only disabled while local submission is starting; Slurm can queue multiple runs.
+- `runStore` only mirrors node status events onto the canvas when the event belongs to the currently selected run and displayed pipeline, preventing unrelated runs from clobbering badges.
+- Selecting a past run in Jobs reapplies that run's statuses to the matching canvas.
+
 ### Motivation
 
 Today when a run is in progress, the Run button logic and UI implicitly assume a single "active" run. Users want to start another run (same or different pipeline) without waiting. Most of the infrastructure already supports multiple runs — `PipelineRunner.runs` is a `Map`, `runStore.runs` is a record keyed by `runId` — but the toolbar + jobs panel treat the active run as singular.
@@ -717,6 +766,11 @@ Start pipeline A. While A's first node is running, open pipeline B (item 18) and
 ---
 
 ## 18. Multiple named pipelines (open / switch / new)
+
+### Shipped MVP
+
+- Toolbar supports New, Save, Open, Import, Export, and Template flows against named `PipelineSnapshot`s in the settings store.
+- Autosave restore prevents losing the last edited graph. A richer tabbed multi-workspace UI remains future polish.
 
 ### Motivation
 

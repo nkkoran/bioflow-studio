@@ -2,6 +2,7 @@ import { useCallback, useRef, useEffect } from 'react'
 import { useUIStore } from '@/stores/uiStore'
 import { useRunStore } from '@/stores/runStore'
 import { useConnectionStore } from '@/stores/connectionStore'
+import { usePipelineStore } from '@/stores/pipelineStore'
 import { TopBar } from './TopBar'
 import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
@@ -81,6 +82,31 @@ export function AppLayout() {
       console.error('[AppLayout] hydrateFromMain failed:', err)
     })
     return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    void window.api.store.get<any>('pipeline:autosave:latest').then((snapshot) => {
+      if (disposed || !snapshot || snapshot.version !== 1) return
+      const state = usePipelineStore.getState()
+      if (!state.dirty && state.nodes.length === 0) state.loadSnapshot(snapshot)
+    }).catch((err) => console.error('[AppLayout] autosave restore failed:', err))
+
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = usePipelineStore.subscribe((state) => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        const snapshot = usePipelineStore.getState().exportSnapshot()
+        void window.api.store.set('pipeline:autosave:latest', snapshot).catch((err) => {
+          console.error('[AppLayout] autosave write failed:', err)
+        })
+      }, 1000)
+    })
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
   }, [])
 
   const startSidebarDrag = useCallback(

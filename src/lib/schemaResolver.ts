@@ -1,0 +1,143 @@
+import type {
+  FileNodeData,
+  PipelineSnapshot,
+  ToolNodeData,
+  TransformNodeData,
+} from '@/types/pipeline'
+import { getTool } from '@/lib/toolRegistry'
+
+export interface ColumnSchema {
+  columns: string[]
+  delimiter: string
+  sourcePath?: string
+}
+
+export type SchemaCache = Record<string, { columns: string[]; delimiter: string; fetchedAt: number }>
+
+export function delimiterForPath(path: string): string {
+  const lower = path.toLowerCase()
+  if (lower.endsWith('.csv')) return ','
+  return '\t'
+}
+
+export function parseHeaderLine(text: string, delimiter: string): string[] {
+  const first = text.split(/\r?\n/).find((line) => line.trim()) ?? ''
+  return first.split(delimiter).map((column) => column.trim()).filter(Boolean)
+}
+
+export function connectedInputSchema(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  portId: string,
+  schemas: SchemaCache,
+): ColumnSchema | null {
+  const edge = snapshot.edges.find((e) => e.target === nodeId && (e.targetHandle ?? 'input') === portId)
+  if (!edge) return null
+  return outputSchema(snapshot, edge.source, edge.sourceHandle ?? 'output', schemas)
+}
+
+export function connectedInputPath(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  portId: string,
+): string | null {
+  const edge = snapshot.edges.find((e) => e.target === nodeId && (e.targetHandle ?? 'input') === portId)
+  if (!edge) return null
+  return outputPath(snapshot, edge.source, edge.sourceHandle ?? 'output')
+}
+
+export function outputSchema(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  _portId: string,
+  schemas: SchemaCache,
+): ColumnSchema | null {
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node) return null
+
+  if (node.type === 'file') {
+    const data = node.data as FileNodeData
+    const cached = schemas[data.path]
+    if (!cached) return null
+    return { columns: cached.columns, delimiter: cached.delimiter, sourcePath: data.path }
+  }
+
+  if (node.type === 'transform') {
+    const upstream = connectedInputSchema(snapshot, nodeId, 'input', schemas)
+    if (!upstream) return null
+    const data = node.data as TransformNodeData
+    const selected = data.selectedColumns?.length ? data.selectedColumns : upstream.columns
+    const renameMap = new Map((data.renames ?? []).map((rule) => [rule.from, rule.to.trim() || rule.from]))
+    return {
+      columns: selected.map((column) => renameMap.get(column) ?? column),
+      delimiter: data.fileType === 'csv' ? ',' : upstream.delimiter,
+      sourcePath: upstream.sourcePath,
+    }
+  }
+
+  return null
+}
+
+function outputPath(snapshot: PipelineSnapshot, nodeId: string, _portId: string): string | null {
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node) return null
+  if (node.type === 'file') return (node.data as FileNodeData).path || null
+  if (node.type === 'transform') {
+    return connectedInputPath(snapshot, nodeId, 'input')
+  }
+  return null
+}
+
+export function columnParamValues(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map(String).map((v) => v.trim()).filter(Boolean)
+  return String(raw ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+}
+
+export function transformInputWarnings(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  schemas: SchemaCache,
+): string[] {
+  const schema = connectedInputSchema(snapshot, nodeId, 'input', schemas)
+  if (!schema) return []
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node || node.type !== 'transform') return []
+  const data = node.data as TransformNodeData
+  const available = new Set(schema.columns)
+  const missing = new Set<string>()
+  for (const column of data.selectedColumns ?? []) {
+    if (!available.has(column)) missing.add(column)
+  }
+  for (const rule of data.filters ?? []) {
+    if (rule.column && !available.has(rule.column)) missing.add(rule.column)
+  }
+  for (const rule of data.renames ?? []) {
+    if (rule.from && !available.has(rule.from)) missing.add(rule.from)
+  }
+  return [...missing]
+}
+
+export function toolColumnWarnings(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  schemas: SchemaCache,
+): Array<{ paramName: string; missing: string[] }> {
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node || node.type !== 'tool') return []
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool) return []
+  const warnings: Array<{ paramName: string; missing: string[] }> = []
+  for (const param of tool.params) {
+    if (!param.columnRef) continue
+    const schema = connectedInputSchema(snapshot, nodeId, param.columnSourcePortId ?? 'input', schemas)
+    if (!schema) continue
+    const available = new Set(schema.columns)
+    const missing = columnParamValues(data.paramValues?.[param.name]).filter((column) => !available.has(column))
+    if (missing.length > 0) warnings.push({ paramName: param.name, missing })
+  }
+  return warnings
+}

@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/Input'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useRunStore } from '@/stores/runStore'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { classNames } from '@/lib/utils'
 import { ValidationBadge } from './ValidationBadge'
 import { validatePipeline, type ValidationIssue, type ValidationResult } from '@/lib/pipelineValidator'
@@ -135,6 +136,7 @@ export function PipelineToolbar() {
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const loadSnapshot = usePipelineStore((s) => s.loadSnapshot)
   const nodes = usePipelineStore((s) => s.nodes)
+  const schemas = useDataPreviewStore((s) => s.schemas)
 
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const activeRunId = useRunStore((s) => s.activeRunId)
@@ -246,7 +248,7 @@ export function PipelineToolbar() {
     if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
     setRunning(true)
     try {
-      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
       await startRun(activeConnectionId, snapshot)
       flashMessage(`Submitting ${runnable.length} node${runnable.length === 1 ? '' : 's'}...`)
     } catch (err: any) {
@@ -260,7 +262,7 @@ export function PipelineToolbar() {
   const handleRun = useCallback(async () => {
     try {
       const snapshot = exportSnapshot()
-      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
       if (runnable.length === 0) { flashMessage('No tools to run'); return }
       if (!activeConnectionId) { flashMessage('No active connection'); return }
       if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection'); return }
@@ -271,7 +273,7 @@ export function PipelineToolbar() {
       // left the toolbar in an inconsistent state.
       let result
       try {
-        result = validatePipeline(snapshot)
+        result = validatePipeline(snapshot, { schemas })
       } catch (err: any) {
         console.error('[PipelineToolbar] validatePipeline threw:', err)
         flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
@@ -290,18 +292,18 @@ export function PipelineToolbar() {
       console.error('[PipelineToolbar] handleRun threw:', err)
       flashMessage(err?.message ?? String(err), true)
     }
-  }, [exportSnapshot, flashMessage, activeConnectionId, submitRun])
+  }, [exportSnapshot, flashMessage, activeConnectionId, submitRun, schemas])
 
   const handlePreviewScripts = useCallback(async () => {
     const snapshot = exportSnapshot()
-    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
     if (runnable.length === 0) { flashMessage('No tools to preview'); return }
     if (!activeConnectionId) { flashMessage('No active connection', true); return }
     if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Script preview requires an SSH connection', true); return }
 
     let result
     try {
-      result = validatePipeline(snapshot)
+      result = validatePipeline(snapshot, { schemas })
     } catch (err: any) {
       flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
       return
@@ -321,7 +323,7 @@ export function PipelineToolbar() {
     } finally {
       setPreviewLoading(false)
     }
-  }, [activeConnectionId, exportSnapshot, flashMessage])
+  }, [activeConnectionId, exportSnapshot, flashMessage, schemas])
 
   const handleCancelRun = useCallback(async () => {
     if (!activeRunId || !activeRunIsCancellable) return

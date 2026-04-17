@@ -7,7 +7,7 @@
  * MIME type carrying the tool id.
  */
 import { useState, useMemo } from 'react'
-import { ChevronRight, Search, FileText, StickyNote, GitMerge } from 'lucide-react'
+import { ChevronRight, Search, FileText, StickyNote, GitMerge, SlidersHorizontal } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { classNames } from '@/lib/utils'
 import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
@@ -43,7 +43,7 @@ function PaletteItem({ tool }: PaletteItemProps) {
 }
 
 interface SpecialItemProps {
-  type: 'file-input' | 'file-output' | 'note' | 'merge'
+  type: 'file-input' | 'file-output' | 'note' | 'merge' | 'transform'
   label: string
   icon: React.ReactNode
 }
@@ -118,6 +118,7 @@ export function ToolPalette() {
       <div className="p-2 flex flex-col gap-0.5 border-b border-border">
         <SpecialItem type="file-input" label="Input File" icon={<FileText size={12} className="text-amber-400" />} />
         <SpecialItem type="file-output" label="Output File" icon={<FileText size={12} className="text-amber-400" />} />
+        <SpecialItem type="transform" label="Transform" icon={<SlidersHorizontal size={12} className="text-teal-400" />} />
         <SpecialItem type="merge" label="Merge (fan-in)" icon={<GitMerge size={12} className="text-indigo-400" />} />
         <SpecialItem type="note" label="Note" icon={<StickyNote size={12} className="text-amber-400" />} />
       </div>

@@ -20,7 +20,7 @@ import { getSettingsStore } from '../store/settingsStore'
 import { JobTracker } from './JobTracker'
 import { topoSort } from './topoSort'
 import { planAxes, resolveNodeOutputDir, type AxisPlan } from './axisPlanner'
-import { generateToolScript, generateMergeScript, type ConnectionDefaults } from './ScriptGenerator'
+import { generateToolScript, generateMergeScript, generateTransformScript, type ConnectionDefaults } from './ScriptGenerator'
 import { getTool } from '../../src/lib/toolRegistry'
 import type {
   PipelineSnapshot,
@@ -30,6 +30,7 @@ import type {
   DryRunScript,
   ToolNodeData,
   MergeNodeData,
+  TransformNodeData,
   FileNodeData,
   NoteNodeData,
 } from '../../src/types/pipeline'
@@ -57,6 +58,12 @@ export class PipelineRunner {
 
   private runs = new Map<string, RunState>()
   private cancelledRuns = new Set<string>()
+  private reattachedJobs = new Set<string>()
+
+  private constructor() {
+    this.loadPersistedRuns()
+    setTimeout(() => void this.reattachPersistedJobs(), 500)
+  }
 
   private get ssh() { return SshManager.getInstance() }
   private get sftp() { return SftpPool.getInstance() }
@@ -104,7 +111,7 @@ export class PipelineRunner {
     const now = Date.now()
     const nodes: Record<string, NodeRunState> = {}
     for (const n of snapshot.nodes) {
-      if (n.type === 'tool' || n.type === 'merge') {
+      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
         nodes[n.id] = { nodeId: n.id, status: 'idle' }
       }
     }
@@ -120,15 +127,16 @@ export class PipelineRunner {
       nodes,
     }
     this.runs.set(runId, runState)
+    this.persistRuns()
     this.emitRunStatus(runId, 'running')
 
     // One exec creates scripts/, logs/, and per-node output dirs (default or
     // override). Overrides are already `~`-expanded by resolveNodeOutputDir.
     const dirs = new Set<string>([`${workDir}/scripts`, `${workDir}/logs`])
     for (const n of snapshot.nodes) {
-      if (n.type === 'tool' || n.type === 'merge') {
+      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
         const slug = nodeSlugs.get(n.id) ?? n.id
-        const override = (n.data as ToolNodeData | MergeNodeData).outputDirOverride
+        const override = (n.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
         dirs.add(resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home))
       }
     }
@@ -181,11 +189,11 @@ export class PipelineRunner {
     for (const nodeId of order) {
       const node = nodeById.get(nodeId)
       const plan = plans.get(nodeId)
-      if (!node || !plan || (node.type !== 'tool' && node.type !== 'merge')) continue
+      if (!node || !plan || (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform')) continue
 
       const slug = nodeSlugs.get(nodeId) ?? nodeId
       const logDir = `${workDir}/logs`
-      const override = (node.data as ToolNodeData | MergeNodeData).outputDirOverride
+      const override = (node.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
       const outputDir = resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home)
 
       if (node.type === 'tool') {
@@ -210,7 +218,7 @@ export class PipelineRunner {
           outputPaths: collectOutputPaths(plan.outputs),
           arraySize: gen.arraySize,
         })
-      } else {
+      } else if (node.type === 'merge') {
         const mergeData = node.data as MergeNodeData
         const inputVal = plan.inputs.input
         if (!inputVal) throw new Error(`Merge node ${nodeId} has no input`)
@@ -234,6 +242,25 @@ export class PipelineRunner {
           mode: plan.mode,
           script: gen.script,
           outputPaths: [gen.outputPath],
+        })
+      } else {
+        const transformData = node.data as TransformNodeData
+        const gen = generateTransformScript({
+          nodeId,
+          nodeSlug: slug,
+          transformData,
+          axisPlan: plan,
+          outputDir,
+          logDir,
+          connectionDefaults,
+        })
+        scripts.push({
+          nodeId,
+          label: transformData.label || 'Transform',
+          mode: plan.mode,
+          script: gen.script,
+          outputPaths: collectOutputPaths(plan.outputs),
+          arraySize: gen.arraySize,
         })
       }
     }
@@ -278,12 +305,106 @@ export class PipelineRunner {
     await this.tracker.cancel(run.connectionId, ns.jobId)
   }
 
+  async rerunNode(runId: string, nodeId: string, snapshot: PipelineSnapshot): Promise<void> {
+    const run = this.runs.get(runId)
+    if (!run) throw new Error(`Run ${runId} not found`)
+    if (run.pipelineId !== snapshot.id) {
+      throw new Error('This run belongs to a different pipeline. Open that pipeline before rerunning a step.')
+    }
+
+    const connectionDefaults = await this.loadConnectionDefaults(run.connectionId)
+    const nodeSlugs = buildNodeSlugs(snapshot)
+    topoSort(snapshot)
+    const plans = planAxes(snapshot, {
+      outputRoot: `${run.workDir}/outputs`,
+      getTool,
+      nodeSlug: (id) => nodeSlugs.get(id) ?? id,
+      homeDir: run.homeDir,
+    })
+
+    const affected = downstreamOf(snapshot, nodeId)
+    if (!affected.has(nodeId)) affected.add(nodeId)
+
+    const dirs = new Set<string>([`${run.workDir}/scripts`, `${run.workDir}/logs`])
+    for (const id of affected) {
+      const node = snapshot.nodes.find((candidate) => candidate.id === id)
+      if (!node || (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform')) continue
+      const slug = nodeSlugs.get(id) ?? id
+      const override = (node.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
+      dirs.add(resolveNodeOutputDir(override, `${run.workDir}/outputs`, slug, run.homeDir))
+      const plan = plans.get(id)
+      if (plan) {
+        for (const path of collectOutputPaths(plan.outputs)) dirs.add(pathDirname(path))
+      }
+    }
+    await this.ssh.exec(run.connectionId, [...dirs].map((d) => `mkdir -p ${shellQuote(d)}`).join(' && '))
+
+    run.status = 'running'
+    run.updatedAt = Date.now()
+    this.emitRunStatus(runId, 'running')
+    for (const id of affected) {
+      const existing = run.nodes[id] ?? { nodeId: id, status: 'idle' as const }
+      if (existing.jobId && (existing.status === 'queued' || existing.status === 'running')) {
+        await this.tracker.cancel(run.connectionId, existing.jobId)
+      }
+      run.nodes[id] = { nodeId: id, status: 'idle' }
+      this.emitNodeStatus(runId, id, 'idle')
+    }
+
+    void this.executeRunSubset(run, snapshot, plans, connectionDefaults, nodeSlugs, affected)
+  }
+
   listRuns(): RunState[] {
     return [...this.runs.values()].sort((a, b) => b.createdAt - a.createdAt)
   }
 
   getRun(runId: string): RunState | null {
     return this.runs.get(runId) ?? null
+  }
+
+  async reattachPersistedJobs(): Promise<void> {
+    const liveConnections = new Set(this.ssh.listConnections().filter((c) => c.connected).map((c) => c.id))
+    for (const run of this.runs.values()) {
+      if (!liveConnections.has(run.connectionId)) continue
+      if (run.status !== 'running' && run.status !== 'queued') continue
+      for (const ns of Object.values(run.nodes)) {
+        if (!ns.jobId || (ns.status !== 'queued' && ns.status !== 'running')) continue
+        const key = `${run.runId}:${ns.jobId}`
+        if (this.reattachedJobs.has(key)) continue
+        this.reattachedJobs.add(key)
+        this.tracker.watch({
+          connectionId: run.connectionId,
+          jobId: ns.jobId,
+          isArray: ns.isArray,
+          onStart: () => {
+            ns.status = 'running'
+            ns.startedAt = ns.startedAt ?? Date.now()
+            this.emitNodeStatus(run.runId, ns.nodeId, 'running', ns.jobId)
+          },
+          onFinish: (outcome) => {
+            ns.finishedAt = Date.now()
+            if (outcome.kind === 'done') {
+              ns.status = 'done'
+              ns.exitCode = outcome.exitCode
+              this.emitNodeStatus(run.runId, ns.nodeId, 'done', ns.jobId)
+            } else if (outcome.kind === 'cancelled') {
+              ns.status = 'cancelled'
+              this.emitNodeStatus(run.runId, ns.nodeId, 'cancelled', ns.jobId)
+            } else {
+              ns.status = 'failed'
+              ns.exitCode = outcome.exitCode
+              ns.error = outcome.reason
+              this.emitNodeStatus(run.runId, ns.nodeId, 'failed', ns.jobId, outcome.reason)
+            }
+            const nodes = Object.values(run.nodes)
+            if (nodes.every((node) => node.status === 'done')) run.status = 'done'
+            else if (nodes.some((node) => node.status === 'failed')) run.status = 'failed'
+            run.updatedAt = Date.now()
+            this.emitRunStatus(run.runId, run.status)
+          },
+        })
+      }
+    }
   }
 
   /**
@@ -369,6 +490,42 @@ export class PipelineRunner {
     }
   }
 
+  private async executeRunSubset(
+    run: RunState,
+    snapshot: PipelineSnapshot,
+    plans: Map<string, AxisPlan>,
+    connectionDefaults: ConnectionDefaults,
+    nodeSlugs: Map<string, string>,
+    affected: Set<string>,
+  ): Promise<void> {
+    const { layers } = topoSort(snapshot)
+    const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
+    try {
+      for (const layer of layers) {
+        if (this.cancelledRuns.has(run.runId)) return
+        const pending: Promise<void>[] = []
+        for (const nodeId of layer) {
+          if (!affected.has(nodeId)) continue
+          const node = nodeById.get(nodeId)!
+          if (node.type === 'file' || node.type === 'note') continue
+          pending.push(this.runNode(run, node, plans, connectionDefaults, nodeSlugs))
+        }
+        await Promise.all(pending)
+        if (layer.some((id) => affected.has(id) && run.nodes[id]?.status === 'failed')) {
+          run.status = 'failed'
+          this.emitRunStatus(run.runId, 'failed')
+          return
+        }
+      }
+      run.status = Object.values(run.nodes).some((node) => node.status === 'failed') ? 'failed' : 'done'
+      this.emitRunStatus(run.runId, run.status)
+    } catch (err) {
+      run.status = 'failed'
+      this.emitRunStatus(run.runId, 'failed')
+      console.error(`[PipelineRunner] rerun ${run.runId} crashed:`, err)
+    }
+  }
+
   private async runNode(
     run: RunState,
     node: PipelineSnapshot['nodes'][number],
@@ -386,7 +543,9 @@ export class PipelineRunner {
         ? (node.data as ToolNodeData).outputDirOverride
         : node.type === 'merge'
           ? (node.data as MergeNodeData).outputDirOverride
-          : undefined
+          : node.type === 'transform'
+            ? (node.data as TransformNodeData).outputDirOverride
+            : undefined
     const outputDir = resolveNodeOutputDir(override, `${run.workDir}/outputs`, slug, run.homeDir)
     const scriptPath = `${run.workDir}/scripts/${slug}.sbatch`
     const ns = run.nodes[node.id]
@@ -428,6 +587,19 @@ export class PipelineRunner {
         outputDir, logDir, connectionDefaults,
       })
       script = gen.script
+    } else if (node.type === 'transform') {
+      const transformData = node.data as TransformNodeData
+      const gen = generateTransformScript({
+        nodeId: node.id,
+        nodeSlug: slug,
+        transformData,
+        axisPlan: plan,
+        outputDir,
+        logDir,
+        connectionDefaults,
+      })
+      script = gen.script
+      arraySize = gen.arraySize
     } else {
       return
     }
@@ -558,12 +730,41 @@ export class PipelineRunner {
     if (win) {
       win.webContents.send('pipeline:node-status', { runId, nodeId, status, jobId, error, node })
     }
+    this.persistRuns()
   }
 
   private emitRunStatus(runId: string, status: RunStatus): void {
     const win = BrowserWindow.getAllWindows()[0]
-    if (!win) return
-    win.webContents.send('pipeline:run-status', { runId, status })
+    const run = this.runs.get(runId)
+    if (run) {
+      run.updatedAt = Date.now()
+      run.status = status
+    }
+    if (win) win.webContents.send('pipeline:run-status', { runId, status })
+    this.persistRuns()
+  }
+
+  private loadPersistedRuns(): void {
+    try {
+      const store = getSettingsStore() as unknown as { get: (k: string) => unknown }
+      const raw = store.get('pipeline:runs:v1')
+      if (!Array.isArray(raw)) return
+      for (const run of raw as RunState[]) {
+        if (run?.runId) this.runs.set(run.runId, run)
+      }
+    } catch (err) {
+      console.error('[PipelineRunner] loadPersistedRuns failed:', err)
+    }
+  }
+
+  private persistRuns(): void {
+    try {
+      const store = getSettingsStore() as unknown as { set: (k: string, v: unknown) => void }
+      const runs = [...this.runs.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50)
+      store.set('pipeline:runs:v1', runs)
+    } catch (err) {
+      console.error('[PipelineRunner] persistRuns failed:', err)
+    }
   }
 
   private loadAnalysisFolder(connectionId: string): string | undefined {
@@ -674,6 +875,7 @@ function buildNodeSlugs(snapshot: PipelineSnapshot): Map<string, string> {
     let label: string
     if (n.type === 'tool') label = (n.data as ToolNodeData).label || (n.data as ToolNodeData).toolId
     else if (n.type === 'merge') label = (n.data as MergeNodeData).label || 'merge'
+    else if (n.type === 'transform') label = (n.data as TransformNodeData).label || 'transform'
     else if (n.type === 'file') label = (n.data as FileNodeData).label || 'file'
     else label = (n.data as NoteNodeData).text?.slice(0, 20) || 'node'
 
@@ -686,6 +888,20 @@ function buildNodeSlugs(snapshot: PipelineSnapshot): Map<string, string> {
     }
     used.add(candidate)
     out.set(n.id, candidate)
+  }
+  return out
+}
+
+function downstreamOf(snapshot: PipelineSnapshot, nodeId: string): Set<string> {
+  const out = new Set<string>()
+  const queue = [nodeId]
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    if (out.has(current)) continue
+    out.add(current)
+    for (const edge of snapshot.edges) {
+      if (edge.source === current) queue.push(edge.target)
+    }
   }
   return out
 }

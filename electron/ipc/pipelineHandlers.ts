@@ -20,7 +20,12 @@ export function registerPipelineHandlers(): void {
     return runner.cancelNode(args.runId, args.nodeId)
   })
 
+  ipcMain.handle('pipeline:rerun-node', async (_event, args: { runId: string; nodeId: string; snapshot: PipelineSnapshot }) => {
+    return runner.rerunNode(args.runId, args.nodeId, args.snapshot)
+  })
+
   ipcMain.handle('pipeline:list-runs', async () => {
+    await runner.reattachPersistedJobs()
     return runner.listRuns()
   })
 

@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo } from 'react'
 import { useRunStore } from '@/stores/runStore'
+import { usePipelineStore } from '@/stores/pipelineStore'
 import { Button } from '@/components/ui/Button'
 import { RefreshCw, X } from 'lucide-react'
 import { NodeRunList } from './NodeRunList'
@@ -18,8 +19,11 @@ export function JobsPanel() {
   const activeRunId = useRunStore((s) => s.activeRunId)
   const setActiveRun = useRunStore((s) => s.setActiveRun)
   const cancelRun = useRunStore((s) => s.cancelRun)
+  const rerunNode = useRunStore((s) => s.rerunNode)
   const refreshRuns = useRunStore((s) => s.refreshRuns)
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
+  const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const pipelineId = usePipelineStore((s) => s.pipelineId)
 
   // Sort runs most-recent-first for the selector
   const sortedRuns = useMemo(
@@ -75,6 +79,17 @@ export function JobsPanel() {
         >
           Refresh
         </Button>
+
+        {activeRun && selectedNodeId && activeRun.nodes[selectedNodeId]?.status === 'failed' && activeRun.pipelineId === pipelineId && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void rerunNode(activeRun.runId, selectedNodeId, exportSnapshot())}
+            className="h-6 text-xs"
+          >
+            Re-run step
+          </Button>
+        )}
 
         {isRunning && activeRunId && (
           <Button

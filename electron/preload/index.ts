@@ -181,6 +181,8 @@ const api = {
       ipcRenderer.invoke('pipeline:cancel', runId),
     cancelNode: (runId: string, nodeId: string): Promise<void> =>
       ipcRenderer.invoke('pipeline:cancel-node', { runId, nodeId }),
+    rerunNode: (runId: string, nodeId: string, snapshot: PipelineSnapshot): Promise<void> =>
+      ipcRenderer.invoke('pipeline:rerun-node', { runId, nodeId, snapshot }),
     listRuns: (): Promise<RunState[]> =>
       ipcRenderer.invoke('pipeline:list-runs'),
     getRun: (runId: string): Promise<RunState | null> =>

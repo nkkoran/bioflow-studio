@@ -13,11 +13,12 @@ import type {
   MergeNodeData,
   NoteNodeData,
   PipelineSnapshot,
+  TransformNodeData,
   ToolNodeData,
 } from '@/types/pipeline'
 import { getTool } from '@/lib/toolRegistry'
 
-export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | NoteNodeData, BioflowNodeType>
+export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
 export type BioflowEdge = Edge
 
 interface HistoryEntry {
@@ -59,9 +60,10 @@ interface PipelineState {
   addToolNode: (toolId: string, position: { x: number; y: number }) => string
   addFileNode: (position: { x: number; y: number }, data?: Partial<FileNodeData>) => string
   addMergeNode: (position: { x: number; y: number }, data?: Partial<MergeNodeData>) => string
+  addTransformNode: (position: { x: number; y: number }, data?: Partial<TransformNodeData>) => string
   addNoteNode: (position: { x: number; y: number }) => string
 
-  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | NoteNodeData>) => void
+  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData>) => void
   deleteNode: (nodeId: string) => void
   deleteEdge: (edgeId: string) => void
   duplicateNode: (nodeId: string) => void
@@ -215,6 +217,31 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       data: {
         label: data?.label ?? 'Merge',
         strategy: data?.strategy ?? 'auto',
+        slurmOverride: data?.slurmOverride,
+        status: 'idle',
+      },
+    }
+    set((state) => ({
+      nodes: [...state.nodes, node],
+      selectedNodeId: id,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  addTransformNode: (position, data) => {
+    const id = makeId('transform')
+    const node: BioflowNode = {
+      id,
+      type: 'transform',
+      position,
+      data: {
+        label: data?.label ?? 'Transform',
+        fileType: data?.fileType ?? 'tsv',
+        selectedColumns: data?.selectedColumns,
+        filters: data?.filters ?? [],
+        renames: data?.renames ?? [],
         slurmOverride: data?.slurmOverride,
         status: 'idle',
       },
@@ -407,7 +434,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         id: n.id,
         type: (n.type ?? 'tool') as BioflowNodeType,
         position: n.position,
-        data: n.data as ToolNodeData | FileNodeData | NoteNodeData,
+        data: n.data as ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData,
       })),
       edges: state.edges.map((e) => ({
         id: e.id,
@@ -436,10 +463,10 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   setNodeStatus: (nodeId, status, jobId, error) => {
     set((state) => ({
       nodes: state.nodes.map((n) =>
-        n.id === nodeId && (n.type === 'tool' || n.type === 'merge')
+        n.id === nodeId && (n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
           ? {
               ...n,
-              data: { ...(n.data as ToolNodeData | MergeNodeData), status, jobId, error } as BioflowNode['data'],
+              data: { ...(n.data as ToolNodeData | MergeNodeData | TransformNodeData), status, jobId, error } as BioflowNode['data'],
             }
           : n,
       ),

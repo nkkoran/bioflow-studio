@@ -23,6 +23,7 @@ export function NodeRunList({ run }: Props) {
     if (!n) return nodeId
     if (n.type === 'tool') return (n.data as { label: string }).label
     if (n.type === 'merge') return (n.data as { label: string }).label
+    if (n.type === 'transform') return (n.data as { label: string }).label
     return nodeId
   }
 

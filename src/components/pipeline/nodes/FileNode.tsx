@@ -11,6 +11,8 @@ import type { FileNodeData } from '@/types/pipeline'
 function FileNodeInner({ data, selected }: NodeProps) {
   const nodeData = data as FileNodeData
   const isInput = nodeData.isInput
+  const outputLabel = nodeData.outputFilename || nodeData.path?.split('/').pop()
+  const outputFolder = nodeData.outputDir || (nodeData.path?.includes('/') ? nodeData.path.slice(0, nodeData.path.lastIndexOf('/')) : '')
 
   return (
     <div
@@ -28,12 +30,20 @@ function FileNodeInner({ data, selected }: NodeProps) {
           <div className="text-xs font-semibold text-text-primary truncate">
             {nodeData.label}
           </div>
-          {nodeData.path && (
+          {isInput && nodeData.path && (
             <div
               className="text-[10px] text-text-muted font-mono truncate"
               title={nodeData.path}
             >
               {nodeData.path}
+            </div>
+          )}
+          {!isInput && outputLabel && (
+            <div
+              className="text-[10px] text-text-muted font-mono truncate"
+              title={outputFolder || 'Default output folder'}
+            >
+              → {outputLabel}
             </div>
           )}
         </div>

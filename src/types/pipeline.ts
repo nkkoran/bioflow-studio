@@ -31,6 +31,10 @@ export interface ToolParam {
   min?: number
   max?: number
   step?: number
+  /** Render this param as a schema-aware column picker when possible. */
+  columnRef?: boolean
+  /** Prefer columns from this connected input port (e.g. "pheno", "covar"). */
+  columnSourcePortId?: string
 }
 
 /** Input/output port on a tool. */
@@ -142,6 +146,8 @@ export interface FileNodeData {
   path: string                  // remote path; used when split is absent
   fileType: FileType
   isInput: boolean              // true = source, false = sink
+  outputFilename?: string
+  outputDir?: string
   /** When set, this node is an axed source (per-chrom, per-sample, etc.). */
   split?: FileNodeSplit
   [key: string]: unknown
@@ -176,7 +182,49 @@ export interface MergeNodeData {
   [key: string]: unknown
 }
 
-export type BioflowNodeType = 'tool' | 'file' | 'note' | 'merge'
+export type TransformFilterOp =
+  | 'contains'
+  | 'equals'
+  | 'notEquals'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'notEmpty'
+
+export interface TransformFilterRule {
+  id: string
+  column: string
+  op: TransformFilterOp
+  value?: string
+}
+
+export interface TransformRenameRule {
+  from: string
+  to: string
+}
+
+export interface TransformNodeData {
+  label: string
+  fileType: Extract<FileType, 'tsv' | 'csv' | 'txt' | 'any'>
+  selectedColumns?: string[]
+  filters?: TransformFilterRule[]
+  renames?: TransformRenameRule[]
+  /** See ToolNodeData.outputDirOverride. */
+  outputDirOverride?: string
+  slurmOverride?: {
+    cpus?: number
+    memoryGB?: number
+    timeHours?: number
+    partition?: string
+  }
+  status?: ToolNodeData['status']
+  jobId?: string
+  error?: string
+  [key: string]: unknown
+}
+
+export type BioflowNodeType = 'tool' | 'file' | 'note' | 'merge' | 'transform'
 
 /** Data payload for a note/comment node. */
 export interface NoteNodeData {
@@ -197,7 +245,7 @@ export interface PipelineSnapshot {
     id: string
     type: BioflowNodeType
     position: { x: number; y: number }
-    data: ToolNodeData | FileNodeData | NoteNodeData | MergeNodeData
+    data: ToolNodeData | FileNodeData | NoteNodeData | MergeNodeData | TransformNodeData
   }>
   edges: Array<{
     id: string

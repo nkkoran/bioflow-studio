@@ -10,6 +10,7 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransformNodeData,
   ToolDef,
   FileType,
   MergeStrategy,
@@ -25,7 +26,7 @@ export type NodeMode = 'single' | 'array' | 'fanIn' | 'skip'
 
 export interface AxisPlan {
   nodeId: string
-  nodeType: 'tool' | 'merge' | 'file' | 'note'
+  nodeType: 'tool' | 'merge' | 'transform' | 'file' | 'note'
   mode: NodeMode
   /** For 'array': the axis being looped over. */
   axis?: string
@@ -128,8 +129,31 @@ function connectedOutputSink(
   const target = snapshot.nodes.find((n) => n.id === edge.target)
   if (!target || target.type !== 'file') return null
   const data = target.data as FileNodeData
-  if (data.isInput || !data.path?.trim()) return null
+  if (data.isInput) return null
   return data
+}
+
+function resolveSinkPath(sink: FileNodeData | null, fallbackDir: string, fallbackPath: string, homeDir?: string): string {
+  if (!sink) return fallbackPath
+  const legacyPath = sink.path?.trim() ?? ''
+  const filename = sink.outputFilename?.trim() || pathBasename(legacyPath) || pathBasename(fallbackPath)
+  const rawFolder = (sink.outputDir?.trim() || pathDirname(legacyPath) || fallbackDir).replace(/\/+$/, '')
+  const folder =
+    homeDir && rawFolder === '~' ? homeDir :
+    homeDir && rawFolder.startsWith('~/') ? `${homeDir}/${rawFolder.slice(2)}` :
+    rawFolder
+  return `${folder}/${filename}`
+}
+
+function pathDirname(path: string): string {
+  const idx = path.lastIndexOf('/')
+  if (idx <= 0) return ''
+  return path.slice(0, idx)
+}
+
+function pathBasename(path: string): string {
+  const idx = path.lastIndexOf('/')
+  return idx === -1 ? path : path.slice(idx + 1)
 }
 
 export interface PlannerContext {
@@ -201,7 +225,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       continue
     }
 
-    // ----- tool or merge -----
+    // ----- runnable node (tool, transform, or merge) -----
     const dependsOnArrayNodeIds = new Set<string>()
     const resolvedInputs: Record<string, AxedValue> = {}
 
@@ -256,6 +280,52 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     }
 
     // Decide mode based on resolved inputs
+    if (node.type === 'transform') {
+      const data = node.data as TransformNodeData
+      const input = resolvedInputs.input
+      const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
+      const outputDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const sink = connectedOutputSink(snapshot, nodeId, 'output')
+      const fallbackOut = outputPath(outputDir, slug, 'output', null, data.fileType)
+      if (input?.kind === 'array') {
+        plans.set(nodeId, {
+          nodeId,
+          nodeType: 'transform',
+          mode: 'array',
+          axis: input.axis,
+          keys: input.keys,
+          arrayPortId: 'input',
+          dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+          inputs: resolvedInputs,
+          outputs: {
+            output: {
+              kind: 'array',
+              axis: input.axis,
+              keys: input.keys,
+              paths: input.keys.map((key) =>
+                outputPathFromTemplate(resolveSinkPath(sink, outputDir, fallbackOut, ctx.homeDir), key),
+              ),
+            },
+          },
+        })
+      } else {
+        plans.set(nodeId, {
+          nodeId,
+          nodeType: 'transform',
+          mode: dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single',
+          dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+          inputs: resolvedInputs,
+          outputs: {
+            output: {
+              kind: 'single',
+              path: resolveSinkPath(sink, outputDir, fallbackOut, ctx.homeDir),
+            },
+          },
+        })
+      }
+      continue
+    }
+
     if (node.type === 'merge') {
       // Merge always collapses. If its input port is kind 'array', it's a fanIn.
       // Otherwise it's a trivial single job.
@@ -267,7 +337,8 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
       const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
-      const outPath = sink?.path ?? `${mergeOutDir}/${slug}.output${outExt}`
+      const fallbackOut = `${mergeOutDir}/${slug}.output${outExt}`
+      const outPath = resolveSinkPath(sink, mergeOutDir, fallbackOut, ctx.homeDir)
       plans.set(nodeId, {
         nodeId,
         nodeType: 'merge',
@@ -354,21 +425,20 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
       const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
+      const fallbackOut = outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType)
       if (mode === 'array' && keys) {
         outputs[outPort.id] = {
           kind: 'array',
           axis: axis!,
           keys,
           paths: keys.map((k) =>
-            sink
-              ? outputPathFromTemplate(sink.path, k)
-              : outputPath(perNodeOutputDir, slug, outPort.id, k, outPort.fileType),
+            outputPathFromTemplate(resolveSinkPath(sink, perNodeOutputDir, fallbackOut, ctx.homeDir), k),
           ),
         }
       } else {
         outputs[outPort.id] = {
           kind: 'single',
-          path: sink?.path ?? outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType),
+          path: resolveSinkPath(sink, perNodeOutputDir, fallbackOut, ctx.homeDir),
         }
       }
     }
@@ -403,6 +473,9 @@ function portIsMulti(
     const tool = ctx.getTool(toolData.toolId)
     const portDef = tool?.inputs.find((p) => p.id === portId)
     return Boolean(portDef?.multi)
+  }
+  if (node.type === 'transform') {
+    return false
   }
   return false
 }
@@ -442,6 +515,9 @@ function inferMergeOutputType(
     const tool = ctx.getTool((srcNode.data as ToolNodeData).toolId)
     const port = tool?.outputs.find((p) => p.id === (incomingEdge.sourceHandle ?? 'output'))
     return port?.fileType ?? null
+  }
+  if (srcNode.type === 'transform') {
+    return (srcNode.data as TransformNodeData).fileType
   }
   return null
 }

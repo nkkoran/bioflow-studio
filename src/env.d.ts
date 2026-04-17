@@ -70,6 +70,7 @@ interface Window {
       run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string) => Promise<{ runId: string }>
       cancel: (runId: string) => Promise<void>
       cancelNode: (runId: string, nodeId: string) => Promise<void>
+      rerunNode: (runId: string, nodeId: string, snapshot: import('./types/pipeline').PipelineSnapshot) => Promise<void>
       listRuns: () => Promise<import('./types/pipeline').RunState[]>
       getRun: (runId: string) => Promise<import('./types/pipeline').RunState | null>
       listOutputs: (runId: string, nodeId: string) => Promise<Array<{ name: string; path: string; size: number; modified: number }>>

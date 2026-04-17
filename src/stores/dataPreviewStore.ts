@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { TransformFilterRule } from '@/types/pipeline'
 
 interface DataPreviewData {
   headers: string[]
@@ -18,16 +19,18 @@ interface DataPreviewStore {
   tabs: DataPreviewTab[]
   activeTabId: string | null
   visibleColumns: Record<string, string[]>
-  filters: Record<string, string>
+  filters: Record<string, TransformFilterRule[]>
   sort: Record<string, { column: string; dir: 'asc' | 'desc' } | undefined>
+  schemas: Record<string, { columns: string[]; delimiter: string; fetchedAt: number }>
 
   openFile: (filePath: string, fileName: string) => void
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
   setTabData: (id: string, data: DataPreviewData) => void
   setVisibleColumns: (filePath: string, columns: string[]) => void
-  setFilter: (filePath: string, filter: string) => void
+  setFilters: (filePath: string, filters: TransformFilterRule[]) => void
   setSort: (filePath: string, sort: { column: string; dir: 'asc' | 'desc' } | undefined) => void
+  setSchema: (filePath: string, schema: { columns: string[]; delimiter: string }) => void
 }
 
 let nextPreviewId = 1
@@ -38,6 +41,7 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
   visibleColumns: {},
   filters: {},
   sort: {},
+  schemas: {},
 
   openFile: (filePath, fileName) => {
     set((state) => {
@@ -69,24 +73,48 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
   setActiveTab: (id) => set({ activeTabId: id }),
 
   setTabData: (id, data) =>
-    set((state) => ({
-      tabs: state.tabs.map((t) =>
-        t.id === id ? { ...t, data, loading: false } : t
-      ),
-    })),
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === id)
+      return {
+        tabs: state.tabs.map((t) =>
+          t.id === id ? { ...t, data, loading: false } : t
+        ),
+        schemas: tab
+          ? {
+              ...state.schemas,
+              [tab.filePath]: {
+                columns: data.headers,
+                delimiter: data.delimiter,
+                fetchedAt: Date.now(),
+              },
+            }
+          : state.schemas,
+      }
+    }),
 
   setVisibleColumns: (filePath, columns) =>
     set((state) => ({
       visibleColumns: { ...state.visibleColumns, [filePath]: columns },
     })),
 
-  setFilter: (filePath, filter) =>
+  setFilters: (filePath, filters) =>
     set((state) => ({
-      filters: { ...state.filters, [filePath]: filter },
+      filters: { ...state.filters, [filePath]: filters },
     })),
 
   setSort: (filePath, sort) =>
     set((state) => ({
       sort: { ...state.sort, [filePath]: sort },
+    })),
+
+  setSchema: (filePath, schema) =>
+    set((state) => ({
+      schemas: {
+        ...state.schemas,
+        [filePath]: {
+          ...schema,
+          fetchedAt: Date.now(),
+        },
+      },
     })),
 }))

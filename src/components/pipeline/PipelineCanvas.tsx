@@ -26,6 +26,7 @@ import { ToolNode } from './nodes/ToolNode'
 import { FileNode } from './nodes/FileNode'
 import { NoteNode } from './nodes/NoteNode'
 import { MergeNode } from './nodes/MergeNode'
+import { TransformNode } from './nodes/TransformNode'
 import { DRAG_MIME } from './ToolPalette'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
@@ -40,6 +41,7 @@ const nodeTypes: NodeTypes = {
   file: FileNode,
   note: NoteNode,
   merge: MergeNode,
+  transform: TransformNode,
 }
 
 const proOptions = { hideAttribution: true }
@@ -57,6 +59,7 @@ function CanvasInner() {
   const addFileNode = usePipelineStore((s) => s.addFileNode)
   const addNoteNode = usePipelineStore((s) => s.addNoteNode)
   const addMergeNode = usePipelineStore((s) => s.addMergeNode)
+  const addTransformNode = usePipelineStore((s) => s.addTransformNode)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
   const undo = usePipelineStore((s) => s.undo)
   const redo = usePipelineStore((s) => s.redo)
@@ -121,11 +124,12 @@ function CanvasInner() {
         else if (kind === 'file-output') addFileNode(position, { isInput: false, label: 'Output file' })
         else if (kind === 'note') addNoteNode(position)
         else if (kind === 'merge') addMergeNode(position)
+        else if (kind === 'transform') addTransformNode(position)
       } else {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, onConnect],
+    [screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, addTransformNode, onConnect],
   )
 
   /**
@@ -149,6 +153,8 @@ function CanvasInner() {
         if (port) sourceType = port.fileType
       } else if (sourceNode.type === 'file') {
         sourceType = (sourceNode.data as any).fileType
+      } else if (sourceNode.type === 'transform') {
+        sourceType = (sourceNode.data as any).fileType
       }
       // merge nodes pass through — their output type matches upstream
 
@@ -160,6 +166,8 @@ function CanvasInner() {
         if (port) targetType = port.fileType
       } else if (targetNode.type === 'file') {
         targetType = (targetNode.data as any).fileType
+      } else if (targetNode.type === 'transform') {
+        targetType = 'any'
       }
       // merge nodes accept any input — validation happens at plan time
 
@@ -253,6 +261,7 @@ function CanvasInner() {
             if (n.type === 'file') return '#f59e0b'
             if (n.type === 'note') return '#fbbf24'
             if (n.type === 'merge') return '#818cf8'
+            if (n.type === 'transform') return '#2dd4bf'
             return '#888'
           }}
           maskColor="rgba(0,0,0,0.5)"

@@ -9,13 +9,20 @@
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
 import { X, Trash2, Copy, Plus, Folder } from 'lucide-react'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { getTool } from '@/lib/toolRegistry'
+import {
+  connectedInputPath,
+  connectedInputSchema,
+  delimiterForPath,
+  parseHeaderLine,
+} from '@/lib/schemaResolver'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -24,6 +31,9 @@ import type {
   NoteNodeData,
   ToolNodeData,
   ToolParam,
+  TransformFilterOp,
+  TransformFilterRule,
+  TransformNodeData,
 } from '@/types/pipeline'
 import { classNames } from '@/lib/utils'
 
@@ -103,6 +113,67 @@ function ParamField({
   }
 }
 
+function ColumnParamField({
+  param,
+  value,
+  columns,
+  loading,
+  onChange,
+}: {
+  param: ToolParam
+  value: unknown
+  columns: string[]
+  loading: boolean
+  onChange: (v: unknown) => void
+}) {
+  const current = String(value ?? '')
+  const selected = current.split(',').map((v) => v.trim()).filter(Boolean)
+  const toggleColumn = (column: string) => {
+    const next = selected.includes(column)
+      ? selected.filter((value) => value !== column)
+      : [...selected, column]
+    onChange(next.join(','))
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <Input
+        label={param.label + (param.required ? ' *' : '')}
+        type="text"
+        value={current}
+        placeholder={columns.length > 0 ? 'Pick columns below or type names' : (loading ? 'Loading columns...' : param.placeholder)}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {columns.length > 0 ? (
+        <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+          {columns.map((column) => {
+            const active = selected.includes(column)
+            return (
+              <button
+                key={column}
+                type="button"
+                onClick={() => toggleColumn(column)}
+                className={classNames(
+                  'rounded border px-1.5 py-0.5 text-[10px]',
+                  active
+                    ? 'border-accent/50 bg-accent/10 text-text-primary'
+                    : 'border-border bg-bg-primary text-text-muted hover:text-text-primary',
+                )}
+              >
+                {active ? '✓ ' : ''}{column}
+              </button>
+            )
+          })}
+        </div>
+      ) : (
+        <p className="text-[10px] text-text-muted">
+          {loading ? 'Reading the upstream header…' : 'Connect a tabular input or preview it once to enable column picks.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function ShellScriptField({
   value,
   onChange,
@@ -138,7 +209,13 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
+  const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const schemas = useDataPreviewStore((s) => s.schemas)
+  const setSchema = useDataPreviewStore((s) => s.setSchema)
   const tool = getTool(data.toolId)
+  const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
+  const loadingSchemaKey = useMemo(() => `${nodeId}:${Object.keys(schemas).length}`, [nodeId, schemas])
 
   /**
    * Inputs whose upstream source carries an axis — either a file node with
@@ -182,6 +259,30 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     [nodeId, data.slurmOverride, updateNodeData],
   )
 
+  useEffect(() => {
+    if (!activeConnectionId || !tool) return
+    const refs = tool.params.filter((param) => param.columnRef)
+    if (refs.length === 0) return
+    let cancelled = false
+    async function loadSchemas() {
+      for (const param of refs) {
+        const path = connectedInputPath(snapshot, nodeId, param.columnSourcePortId ?? 'input')
+        if (!path || schemas[path]) continue
+        try {
+          const delimiter = delimiterForPath(path)
+          const text = await window.api.sftp.head(activeConnectionId!, path, 1)
+          if (cancelled) return
+          const columns = parseHeaderLine(text, delimiter)
+          if (columns.length > 0) setSchema(path, { columns, delimiter })
+        } catch {
+          // Missing schema is non-blocking; users can still type values.
+        }
+      }
+    }
+    void loadSchemas()
+    return () => { cancelled = true }
+  }, [activeConnectionId, loadingSchemaKey, nodeId, schemas, setSchema, snapshot, tool])
+
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
@@ -211,8 +312,14 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           Parameters
         </h4>
         <div className="flex flex-col gap-2">
-          {tool.params.map((p) => (
-            tool.id === 'custom.shell' && p.name === 'script'
+          {tool.params.map((p) => {
+            const schema = p.columnRef
+              ? connectedInputSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+              : null
+            const inputPath = p.columnRef
+              ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+              : null
+            return tool.id === 'custom.shell' && p.name === 'script'
               ? (
                   <ShellScriptField
                     key={p.name}
@@ -220,6 +327,17 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                     onChange={(v) => setParam(p.name, v)}
                   />
                 )
+              : p.columnRef
+                ? (
+                    <ColumnParamField
+                      key={p.name}
+                      param={p}
+                      value={data.paramValues[p.name]}
+                      columns={schema?.columns ?? []}
+                      loading={Boolean(inputPath && !schema)}
+                      onChange={(v) => setParam(p.name, v)}
+                    />
+                  )
               : (
                   <ParamField
                     key={p.name}
@@ -228,7 +346,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                     onChange={(v) => setParam(p.name, v)}
                   />
                 )
-          ))}
+          })}
           {tool.params.length === 0 && (
             <div className="text-xs text-text-muted italic">No parameters</div>
           )}
@@ -360,6 +478,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
 
   const split = data.split
+  const outputParts = !data.isInput ? splitOutputPath(data) : null
 
   const setSplit = useCallback(
     (next: FileNodeSplit | undefined) => {
@@ -455,41 +574,69 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
         value={data.label}
         onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
       />
-      <div className="flex flex-col gap-1">
-        <label className="text-text-secondary text-xs font-medium">
-          {data.isInput ? 'Input file path' : 'Output destination path'}
-        </label>
-        <div className="flex items-end gap-1.5">
-          <Input
-            value={data.path}
-            placeholder={data.isInput ? '/project/username/data/input.vcf.gz' : '/project/username/results/output.txt'}
-            onChange={(e) => updateNodeData(nodeId, { path: e.target.value })}
-            className="flex-1"
-          />
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-8 px-2 shrink-0"
-            title="Pick a file from the sidebar"
-            disabled={!data.isInput}
-            onClick={() =>
-              useUIStore.getState().startFilePick({
-                nodeId,
-                requesterLabel: data.label,
-                accept: data.fileType !== 'any' ? [data.fileType] : undefined,
-              })
-            }
-          >
-            <Folder size={12} className="mr-1" />
-            Pick…
-          </Button>
+      {data.isInput ? (
+        <div className="flex flex-col gap-1">
+          <label className="text-text-secondary text-xs font-medium">Input file path</label>
+          <div className="flex items-end gap-1.5">
+            <Input
+              value={data.path}
+              placeholder="/project/username/data/input.vcf.gz"
+              onChange={(e) => updateNodeData(nodeId, { path: e.target.value })}
+              className="flex-1"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-8 px-2 shrink-0"
+              title="Pick a file from the sidebar"
+              onClick={() =>
+                useUIStore.getState().startFilePick({
+                  nodeId,
+                  requesterLabel: data.label,
+                  accept: data.fileType !== 'any' ? [data.fileType] : undefined,
+                })
+              }
+            >
+              <Folder size={12} className="mr-1" />
+              Pick…
+            </Button>
+          </div>
         </div>
-        {!data.isInput && (
+      ) : (
+        <div className="flex flex-col gap-2">
+          <Input
+            label="Output filename"
+            value={outputParts?.filename ?? ''}
+            placeholder="results.tsv"
+            onChange={(e) => {
+              const filename = e.target.value
+              const folder = outputParts?.folder ?? ''
+              updateNodeData(nodeId, {
+                outputFilename: filename,
+                outputDir: folder || undefined,
+                path: joinOutputPath(folder, filename),
+              })
+            }}
+          />
+          <Input
+            label="Output folder"
+            value={outputParts?.folder ?? ''}
+            placeholder="(default — connected tool output folder)"
+            onChange={(e) => {
+              const folder = e.target.value
+              const filename = outputParts?.filename ?? ''
+              updateNodeData(nodeId, {
+                outputFilename: filename || undefined,
+                outputDir: folder || undefined,
+                path: joinOutputPath(folder, filename),
+              })
+            }}
+          />
           <p className="text-[10px] text-text-muted">
-            Connect a tool output to this node to write that output here.
+            Connect a tool output to this node to name where that output should be written. Leave folder blank to use the tool's output folder.
           </p>
-        )}
-      </div>
+        </div>
+      )}
       <div className="flex flex-col gap-1">
         <label className="text-text-secondary text-xs font-medium">File type</label>
         <select
@@ -618,6 +765,22 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       </div>
     </div>
   )
+}
+
+function splitOutputPath(data: FileNodeData): { folder: string; filename: string } {
+  if (data.outputFilename || data.outputDir) {
+    return { folder: data.outputDir ?? '', filename: data.outputFilename ?? '' }
+  }
+  const path = data.path ?? ''
+  const idx = path.lastIndexOf('/')
+  if (idx < 0) return { folder: '', filename: path }
+  return { folder: path.slice(0, idx), filename: path.slice(idx + 1) }
+}
+
+function joinOutputPath(folder: string, filename: string): string {
+  if (!folder.trim()) return filename.trim()
+  if (!filename.trim()) return folder.trim()
+  return `${folder.replace(/\/+$/, '')}/${filename.trim()}`
 }
 
 const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] = [
@@ -753,6 +916,275 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
   )
 }
 
+const TRANSFORM_FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
+  { value: 'contains', label: 'contains', needsValue: true },
+  { value: 'equals', label: 'equals', needsValue: true },
+  { value: 'notEquals', label: 'does not equal', needsValue: true },
+  { value: 'gt', label: '>', needsValue: true },
+  { value: 'gte', label: '>=', needsValue: true },
+  { value: 'lt', label: '<', needsValue: true },
+  { value: 'lte', label: '<=', needsValue: true },
+  { value: 'notEmpty', label: 'is not empty', needsValue: false },
+]
+
+function makeTransformFilter(column: string): TransformFilterRule {
+  return {
+    id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    column,
+    op: 'contains',
+    value: '',
+  }
+}
+
+function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformNodeData }) {
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
+  const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const schemas = useDataPreviewStore((s) => s.schemas)
+  const previewFilters = useDataPreviewStore((s) => s.filters)
+  const setSchema = useDataPreviewStore((s) => s.setSchema)
+  const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
+  const inputPath = connectedInputPath(snapshot, nodeId, 'input')
+  const schema = connectedInputSchema(snapshot, nodeId, 'input', schemas)
+  const columns = schema?.columns ?? []
+  const selected = data.selectedColumns?.length ? data.selectedColumns : columns
+  const filters = data.filters ?? []
+  const renames = data.renames ?? []
+
+  useEffect(() => {
+    if (!activeConnectionId || !inputPath || schemas[inputPath]) return
+    let cancelled = false
+    async function loadSchema() {
+      try {
+        const delimiter = delimiterForPath(inputPath!)
+        const text = await window.api.sftp.head(activeConnectionId!, inputPath!, 1)
+        if (cancelled) return
+        const parsed = parseHeaderLine(text, delimiter)
+        if (parsed.length > 0) setSchema(inputPath!, { columns: parsed, delimiter })
+      } catch {
+        // A transform remains editable without schema; command generation will still run.
+      }
+    }
+    void loadSchema()
+    return () => { cancelled = true }
+  }, [activeConnectionId, inputPath, schemas, setSchema])
+
+  const setSlurm = useCallback(
+    (patch: Partial<NonNullable<TransformNodeData['slurmOverride']>>) => {
+      updateNodeData(nodeId, {
+        slurmOverride: { ...data.slurmOverride, ...patch },
+      })
+    },
+    [nodeId, data.slurmOverride, updateNodeData],
+  )
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <Input
+          label="Label"
+          value={data.label}
+          onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
+        />
+        <p className="text-xs text-text-muted mt-2">
+          Materializes preview-style row filters and column selection as a pipeline step.
+        </p>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Columns
+        </h4>
+        {columns.length > 0 ? (
+          <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
+            {columns.map((column) => {
+              const active = selected.includes(column)
+              return (
+                <button
+                  key={column}
+                  onClick={() => {
+                    const next = active
+                      ? selected.filter((value) => value !== column)
+                      : [...selected, column]
+                    updateNodeData(nodeId, { selectedColumns: next.length > 0 ? next : [column] })
+                  }}
+                  className={classNames(
+                    'rounded border px-1.5 py-0.5 text-[10px]',
+                    active
+                      ? 'border-accent/50 bg-accent/10 text-text-primary'
+                      : 'border-border bg-bg-primary text-text-muted hover:text-text-primary',
+                  )}
+                >
+                  {active ? '✓ ' : ''}{column}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="rounded-md border border-border bg-bg-primary px-2 py-2 text-[11px] text-text-muted">
+            Connect a tabular input to load column names. You can still run the transform with row filters that do not need column picks.
+          </div>
+        )}
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            className="text-[11px] text-accent hover:underline"
+            onClick={() => updateNodeData(nodeId, { selectedColumns: columns })}
+            disabled={columns.length === 0}
+          >
+            Select all
+          </button>
+          <button
+            className="text-[11px] text-text-muted hover:text-text-primary"
+            onClick={() => updateNodeData(nodeId, { selectedColumns: columns.slice(0, 8) })}
+            disabled={columns.length === 0}
+          >
+            First 8
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+            Row filters
+          </h4>
+          <button
+            className="text-[11px] text-accent hover:underline"
+            onClick={() => updateNodeData(nodeId, { filters: [...filters, makeTransformFilter(columns[0] ?? '')] })}
+          >
+            Add filter
+          </button>
+        </div>
+        <div className="flex flex-col gap-1">
+          {filters.map((rule) => {
+            const op = TRANSFORM_FILTER_OPS.find((candidate) => candidate.value === rule.op) ?? TRANSFORM_FILTER_OPS[0]
+            return (
+              <div key={rule.id} className="flex items-center gap-1">
+                <select
+                  value={rule.column}
+                  onChange={(e) => updateNodeData(nodeId, { filters: filters.map((r) => r.id === rule.id ? { ...r, column: e.target.value } : r) })}
+                  className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+                >
+                  {(columns.length > 0 ? columns : [rule.column]).map((column) => <option key={column} value={column}>{column || '(column)'}</option>)}
+                </select>
+                <select
+                  value={rule.op}
+                  onChange={(e) => {
+                    const nextOp = e.target.value as TransformFilterOp
+                    const nextMeta = TRANSFORM_FILTER_OPS.find((candidate) => candidate.value === nextOp)
+                    updateNodeData(nodeId, { filters: filters.map((r) => r.id === rule.id ? { ...r, op: nextOp, value: nextMeta?.needsValue === false ? undefined : (r.value ?? '') } : r) })
+                  }}
+                  className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+                >
+                  {TRANSFORM_FILTER_OPS.map((candidate) => <option key={candidate.value} value={candidate.value}>{candidate.label}</option>)}
+                </select>
+                {op.needsValue && (
+                  <input
+                    value={rule.value ?? ''}
+                    placeholder="value"
+                    onChange={(e) => updateNodeData(nodeId, { filters: filters.map((r) => r.id === rule.id ? { ...r, value: e.target.value } : r) })}
+                    className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+                  />
+                )}
+                <button
+                  onClick={() => updateNodeData(nodeId, { filters: filters.filter((r) => r.id !== rule.id) })}
+                  className="h-7 px-1.5 rounded text-text-muted hover:bg-error/10 hover:text-error"
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            )
+          })}
+          {filters.length === 0 && (
+            <div className="rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[11px] text-text-muted">
+              No row filters. All rows pass through.
+            </div>
+          )}
+        </div>
+        {inputPath && previewFilters[inputPath]?.length > 0 && (
+          <button
+            className="mt-2 text-[11px] text-accent hover:underline"
+            onClick={() => updateNodeData(nodeId, { filters: previewFilters[inputPath] })}
+          >
+            Copy filters from current preview
+          </button>
+        )}
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Rename columns
+        </h4>
+        <div className="flex flex-col gap-1">
+          {renames.map((rule, idx) => (
+            <div key={`${rule.from}-${idx}`} className="flex items-center gap-1">
+              <select
+                value={rule.from}
+                onChange={(e) => updateNodeData(nodeId, { renames: renames.map((r, i) => i === idx ? { ...r, from: e.target.value } : r) })}
+                className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+              >
+                {(columns.length > 0 ? columns : [rule.from]).map((column) => <option key={column} value={column}>{column || '(column)'}</option>)}
+              </select>
+              <input
+                value={rule.to}
+                placeholder="new name"
+                onChange={(e) => updateNodeData(nodeId, { renames: renames.map((r, i) => i === idx ? { ...r, to: e.target.value } : r) })}
+                className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+              />
+              <button
+                onClick={() => updateNodeData(nodeId, { renames: renames.filter((_, i) => i !== idx) })}
+                className="h-7 px-1.5 rounded text-text-muted hover:bg-error/10 hover:text-error"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          className="mt-2 text-[11px] text-accent hover:underline"
+          onClick={() => updateNodeData(nodeId, { renames: [...renames, { from: columns[0] ?? '', to: '' }] })}
+        >
+          Add rename
+        </button>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Output
+        </h4>
+        <select
+          value={data.fileType}
+          onChange={(e) => updateNodeData(nodeId, { fileType: e.target.value as TransformNodeData['fileType'] })}
+          className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+        >
+          {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <Input
+          type="text"
+          value={(data.outputDirOverride as string | undefined) ?? ''}
+          placeholder="(default — run's outputs folder)"
+          onChange={(e) => updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })}
+          className="mt-2"
+        />
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Slurm Resources
+        </h4>
+        <div className="grid grid-cols-2 gap-2">
+          <Input label="CPUs" type="number" min={1} value={data.slurmOverride?.cpus ?? ''} placeholder="1" onChange={(e) => setSlurm({ cpus: e.target.value ? Number(e.target.value) : undefined })} />
+          <Input label="Memory (GB)" type="number" min={1} value={data.slurmOverride?.memoryGB ?? ''} placeholder="4" onChange={(e) => setSlurm({ memoryGB: e.target.value ? Number(e.target.value) : undefined })} />
+          <Input label="Time (hours)" type="number" min={0.1} step={0.5} value={data.slurmOverride?.timeHours ?? ''} placeholder="1" onChange={(e) => setSlurm({ timeHours: e.target.value ? Number(e.target.value) : undefined })} />
+          <Input label="Partition" type="text" value={data.slurmOverride?.partition ?? ''} placeholder="default" onChange={(e) => setSlurm({ partition: e.target.value || undefined })} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function NoteInspector({ nodeId, data }: { nodeId: string; data: NoteNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const colors = ['#fbbf24', '#f87171', '#60a5fa', '#34d399', '#c084fc']
@@ -847,6 +1279,9 @@ export function NodeInspector() {
         )}
         {node.type === 'merge' && (
           <MergeInspector nodeId={node.id} data={node.data as MergeNodeData} />
+        )}
+        {node.type === 'transform' && (
+          <TransformInspector nodeId={node.id} data={node.data as TransformNodeData} />
         )}
         {node.type === 'note' && (
           <NoteInspector nodeId={node.id} data={node.data as NoteNodeData} />

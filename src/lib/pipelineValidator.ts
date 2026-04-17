@@ -12,8 +12,10 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransformNodeData,
 } from '@/types/pipeline'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { connectedInputSchema, toolColumnWarnings, transformInputWarnings, type SchemaCache } from '@/lib/schemaResolver'
 
 export type ValidationSeverity = 'error' | 'warning' | 'info'
 
@@ -38,12 +40,13 @@ export interface ValidationResult {
   infoCount: number
 }
 
-export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
+export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: SchemaCache }): ValidationResult {
   const issues: ValidationIssue[] = []
   const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
+  const schemas = opts?.schemas ?? {}
 
   // ---------- Pipeline-level ----------
-  const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+  const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
   if (runnable.length === 0) {
     issues.push({
       severity: 'error',
@@ -210,6 +213,16 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
         }
       }
 
+      for (const warning of toolColumnWarnings(snapshot, node.id, schemas)) {
+        const param = tool.params.find((p) => p.name === warning.paramName)
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'SCHEMA_COLUMN_MISMATCH',
+          message: `Parameter "${param?.label ?? warning.paramName}" references missing column${warning.missing.length === 1 ? '' : 's'}: ${warning.missing.join(', ')}.`,
+          suggestion: 'Pick from the connected input columns or update the upstream transform.',
+        })
+      }
+
       // Overprovisioned Slurm — informational
       const defCpus = tool.slurm?.cpus ?? 1
       const defMem = tool.slurm?.memoryGB ?? 4
@@ -234,6 +247,50 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
             suggestion: 'Results will still land on disk, but nothing consumes them.',
           })
         }
+      }
+      continue
+    }
+
+    // TRANSFORM
+    if (node.type === 'transform') {
+      const d = node.data as TransformNodeData
+      labelCounts.set(d.label, (labelCounts.get(d.label) ?? 0) + 1)
+      const inMap = incomingByPort.get(node.id)!
+      const edges = inMap.get('input')
+      if (!edges || edges.length === 0) {
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'TRANSFORM_NO_INPUT',
+          message: `Transform "${d.label}" has no input connected.`,
+          suggestion: 'Connect a tabular file or upstream transform to its input.',
+        })
+      }
+      if (!hasOutgoing.has(`${node.id}:output`)) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'ORPHAN_OUTPUT',
+          message: `Transform "${d.label}" output is not connected downstream.`,
+          suggestion: 'The transformed file will still be written to disk.',
+        })
+      }
+      const schema = connectedInputSchema(snapshot, node.id, 'input', schemas)
+      if (schema) {
+        const missing = transformInputWarnings(snapshot, node.id, schemas)
+        if (missing.length > 0) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'TRANSFORM_UNKNOWN_COLUMN',
+            message: `Transform "${d.label}" references missing column${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.`,
+            suggestion: 'Update selected columns, filters, or rename rules from the inspector.',
+          })
+        }
+      } else if (edges && edges.length > 0 && ((d.selectedColumns?.length ?? 0) > 0 || (d.filters?.length ?? 0) > 0 || (d.renames?.length ?? 0) > 0)) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'SCHEMA_NOT_LOADED',
+          message: `Transform "${d.label}" has column rules, but the upstream header is not loaded yet.`,
+          suggestion: 'Open the input in Data Preview or keep the typed column names if you are sure.',
+        })
       }
       continue
     }
@@ -308,6 +365,9 @@ function sourcePortType(
     // Merge output type is inferred at run time from its upstream; we can't
     // know it here without walking the graph, so skip strict checking.
     return 'any'
+  }
+  if (node.type === 'transform') {
+    return (node.data as TransformNodeData).fileType
   }
   return null
 }

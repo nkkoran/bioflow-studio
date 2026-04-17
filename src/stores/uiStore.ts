@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-type BottomPanelMode = 'terminal' | 'data' | 'jobs'
+type BottomPanelMode = 'terminal' | 'data' | 'jobs' | 'queue'
 type Theme = 'dark'
 
 /**
