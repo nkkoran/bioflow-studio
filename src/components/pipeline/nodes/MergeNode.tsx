@@ -66,6 +66,7 @@ function MergeNodeInner({ data, selected }: NodeProps) {
         style={{
           left: -8,
           top: '50%',
+          transform: 'translateY(-50%)',
           width: 10,
           height: 10,
           background: 'var(--color-accent)',
@@ -79,6 +80,7 @@ function MergeNodeInner({ data, selected }: NodeProps) {
         style={{
           right: -8,
           top: '50%',
+          transform: 'translateY(-50%)',
           width: 10,
           height: 10,
           background: 'var(--color-success, #10b981)',

@@ -19,7 +19,7 @@ import { SftpPool } from '../ssh/SftpPool'
 import { getSettingsStore } from '../store/settingsStore'
 import { JobTracker } from './JobTracker'
 import { topoSort } from './topoSort'
-import { planAxes, type AxisPlan } from './axisPlanner'
+import { planAxes, resolveNodeOutputDir, type AxisPlan } from './axisPlanner'
 import { generateToolScript, generateMergeScript, type ConnectionDefaults } from './ScriptGenerator'
 import { getTool } from '../../src/lib/toolRegistry'
 import type {
@@ -44,7 +44,7 @@ export interface StartOptions {
  * We resolve `$HOME` to an absolute path at run start so SFTP (which does NOT
  * shell-expand `~`) can write scripts successfully.
  */
-const DEFAULT_WORKDIR_SUBPATH = 'bioflow/runs'
+const DEFAULT_WORKDIR_SUBPATH_PARENT = 'bioflow'
 const MODULE_PREAMBLE = 'module --force purge && module load StdEnv/2023'
 
 export class PipelineRunner {
@@ -68,18 +68,23 @@ export class PipelineRunner {
     const connectionDefaults = await this.loadConnectionDefaults(connectionId)
     if (!connectionDefaults.account) {
       throw new Error(
-        `No Slurm account configured for this connection. Set connection:${connectionId}:slurmAccount in settings.`,
+        'No Slurm account set. Click the connection name in the top bar → Slurm Settings to add one.',
       )
     }
+    const analysisFolder = this.loadAnalysisFolder(connectionId)
 
     // Resolve $HOME to an absolute path. SFTP does not shell-expand `~`, so
     // every path we hand to SftpPool.write must be absolute; SSH exec does
     // expand it, but keeping both paths consistent here avoids foot-guns.
     const home = await this.resolveHome(connectionId)
 
-    // Human-readable run directory: <home>/bioflow/runs/<pipeline-slug>-<YYYYMMDD-HHmmss>
+    // Human-readable run directory: <root>/runs/<pipeline-slug>-<YYYYMMDD-HHmmss>
+    // Root is the user's configured default analysis folder, or ~/bioflow.
     const runFolder = `${slugify(snapshot.name || 'pipeline')}-${timestampStamp()}`
-    const workDir = (opts.workDir ?? `${home}/${DEFAULT_WORKDIR_SUBPATH}/${runFolder}`).replace(/\/+$/, '')
+    const workRoot = analysisFolder
+      ? expandHome(analysisFolder, home)
+      : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`
+    const workDir = (opts.workDir ?? `${workRoot}/runs/${runFolder}`).replace(/\/+$/, '')
 
     // Pre-compute human-readable slugs for every node (label-based with a short
     // id tail for uniqueness). Same slug feeds the planner and the script
@@ -92,6 +97,7 @@ export class PipelineRunner {
       outputRoot: `${workDir}/outputs`,
       getTool,
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
+      homeDir: home,
     })
 
     const now = Date.now()
@@ -106,6 +112,7 @@ export class PipelineRunner {
       pipelineId: snapshot.id,
       connectionId,
       workDir,
+      homeDir: home,
       createdAt: now,
       updatedAt: now,
       status: 'running',
@@ -114,12 +121,14 @@ export class PipelineRunner {
     this.runs.set(runId, runState)
     this.emitRunStatus(runId, 'running')
 
-    // One exec creates scripts/, logs/, and per-node outputs/<slug>/ dirs.
+    // One exec creates scripts/, logs/, and per-node output dirs (default or
+    // override). Overrides are already `~`-expanded by resolveNodeOutputDir.
     const dirs = new Set<string>([`${workDir}/scripts`, `${workDir}/logs`])
     for (const n of snapshot.nodes) {
       if (n.type === 'tool' || n.type === 'merge') {
         const slug = nodeSlugs.get(n.id) ?? n.id
-        dirs.add(`${workDir}/outputs/${slug}`)
+        const override = (n.data as ToolNodeData | MergeNodeData).outputDirOverride
+        dirs.add(resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home))
       }
     }
     const mkdirCmd = [...dirs].map((d) => `mkdir -p ${shellQuote(d)}`).join(' && ')
@@ -177,6 +186,31 @@ export class PipelineRunner {
     return this.runs.get(runId) ?? null
   }
 
+  /**
+   * SFTP-list the output directory for one node in a run. Returns an empty
+   * array if the node hasn't recorded an outputDir yet (not submitted) or the
+   * dir doesn't exist. Intended for the Jobs panel summary card.
+   */
+  async listNodeOutputs(
+    runId: string,
+    nodeId: string,
+  ): Promise<Array<{ name: string; size: number; modified: number }>> {
+    const run = this.runs.get(runId)
+    if (!run) return []
+    const ns = run.nodes[nodeId]
+    if (!ns?.outputDir) return []
+    try {
+      const entries = await this.sftp.ls(run.connectionId, ns.outputDir)
+      return entries
+        .filter((e) => !e.isDirectory)
+        .map((e) => ({ name: e.name, size: e.size, modified: e.modified }))
+    } catch (err: any) {
+      const msg = String(err?.message ?? err)
+      if (msg.includes('No such file') || msg.includes('code 2')) return []
+      throw err
+    }
+  }
+
   // ---- internals --------------------------------------------------------
 
   private async executeRun(
@@ -232,7 +266,13 @@ export class PipelineRunner {
 
     const slug = nodeSlugs.get(node.id) ?? node.id
     const logDir = `${run.workDir}/logs`
-    const outputDir = `${run.workDir}/outputs/${slug}`
+    const override =
+      node.type === 'tool'
+        ? (node.data as ToolNodeData).outputDirOverride
+        : node.type === 'merge'
+          ? (node.data as MergeNodeData).outputDirOverride
+          : undefined
+    const outputDir = resolveNodeOutputDir(override, `${run.workDir}/outputs`, slug, run.homeDir)
     const scriptPath = `${run.workDir}/scripts/${slug}.sbatch`
     const ns = run.nodes[node.id]
 
@@ -279,6 +319,7 @@ export class PipelineRunner {
 
     await this.sftp.write(run.connectionId, scriptPath, script)
     ns.scriptPath = scriptPath
+    ns.outputDir = outputDir
     ns.submittedAt = Date.now()
     ns.isArray = plan.mode === 'array'
     ns.arraySize = arraySize
@@ -316,6 +357,10 @@ export class PipelineRunner {
     this.emitNodeStatus(run.runId, node.id, 'queued', jobId)
 
     await new Promise<void>((resolve) => {
+      // Cancellers for the log tails — populated in onStart, called in onFinish.
+      let cancelTailOut: (() => void) | null = null
+      let cancelTailErr: (() => void) | null = null
+
       this.tracker.watch({
         connectionId: run.connectionId,
         jobId,
@@ -324,8 +369,29 @@ export class PipelineRunner {
           ns.status = 'running'
           ns.startedAt = Date.now()
           this.emitNodeStatus(run.runId, node.id, 'running', jobId)
+
+          // Stream logs for single + fanIn jobs. Array jobs have per-task log
+          // files (22+ for per-chrom pipelines) so we leave them on SFTP polling.
+          if (plan.mode !== 'array' && ns.stdoutPath && ns.stderrPath) {
+            const { cancel: co } = this.ssh.execStream(
+              run.connectionId,
+              // -n +1 reads the file from the start; -F follows new lines and
+              // waits for the file to appear if it doesn't exist yet.
+              `tail -F -n +1 ${shellQuote(ns.stdoutPath)} 2>/dev/null`,
+              (chunk) => this.emitJobLog(run.runId, node.id, chunk, 'stdout'),
+            )
+            const { cancel: ce } = this.ssh.execStream(
+              run.connectionId,
+              `tail -F -n +1 ${shellQuote(ns.stderrPath)} 2>/dev/null`,
+              (chunk) => this.emitJobLog(run.runId, node.id, chunk, 'stderr'),
+            )
+            cancelTailOut = co
+            cancelTailErr = ce
+          }
         },
         onFinish: (outcome) => {
+          cancelTailOut?.()
+          cancelTailErr?.()
           ns.finishedAt = Date.now()
           if (outcome.kind === 'done') {
             ns.status = 'done'
@@ -352,6 +418,13 @@ export class PipelineRunner {
     this.emitNodeStatus(run.runId, ns.nodeId, 'failed', ns.jobId, error)
   }
 
+  private emitJobLog(runId: string, nodeId: string, chunk: string, stream: 'stdout' | 'stderr'): void {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      win.webContents.send('pipeline:job-log', { runId, nodeId, chunk, stream })
+    }
+  }
+
   private emitNodeStatus(runId: string, nodeId: string, status: RunStatus | 'idle', jobId?: string, error?: string): void {
     const win = BrowserWindow.getAllWindows()[0]
     if (win) {
@@ -365,6 +438,17 @@ export class PipelineRunner {
     const win = BrowserWindow.getAllWindows()[0]
     if (!win) return
     win.webContents.send('pipeline:run-status', { runId, status })
+  }
+
+  private loadAnalysisFolder(connectionId: string): string | undefined {
+    try {
+      const store = getSettingsStore() as unknown as { get: (k: string) => unknown }
+      const raw = store.get(`connection:${connectionId}:defaultAnalysisFolder`)
+      return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined
+    } catch (err) {
+      console.error('[PipelineRunner] loadAnalysisFolder failed:', err)
+      return undefined
+    }
   }
 
   private async loadConnectionDefaults(connectionId: string): Promise<ConnectionDefaults> {
@@ -383,6 +467,18 @@ export class PipelineRunner {
       return { modulePreamble: MODULE_PREAMBLE }
     }
   }
+}
+
+/**
+ * Expand a leading `~` or `~/` in a user-configured path using the resolved
+ * remote $HOME. Absolute paths pass through unchanged. SFTP does not expand
+ * `~`, so every path that crosses the SFTP boundary must be absolute.
+ */
+function expandHome(path: string, home: string): string {
+  const p = path.trim().replace(/\/+$/, '')
+  if (p === '~') return home
+  if (p.startsWith('~/')) return `${home}/${p.slice(2)}`
+  return p
 }
 
 function shellQuote(s: string): string {

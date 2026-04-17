@@ -140,13 +140,13 @@ export function PipelineToolbar() {
   const cancelRun = useRunStore((s) => s.cancelRun)
 
   const [editingName, setEditingName] = useState(false)
-  const [savedMessage, setSavedMessage] = useState<string | null>(null)
+  const [savedMessage, setSavedMessage] = useState<{ text: string; isError: boolean } | null>(null)
   const [running, setRunning] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
 
-  const flashMessage = useCallback((msg: string) => {
-    setSavedMessage(msg)
-    setTimeout(() => setSavedMessage(null), 2000)
+  const flashMessage = useCallback((msg: string, isError = false) => {
+    setSavedMessage({ text: msg, isError })
+    setTimeout(() => setSavedMessage(null), isError ? 7000 : 2000)
   }, [])
 
   const handleNew = useCallback(() => {
@@ -201,8 +201,8 @@ export function PipelineToolbar() {
 
   /** Actually submit the run (called directly if no issues, or via modal "Run anyway"). */
   const submitRun = useCallback(async (snapshot: PipelineSnapshot) => {
-    if (!activeConnectionId) { flashMessage('No active connection'); return }
-    if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection'); return }
+    if (!activeConnectionId) { flashMessage('No active connection', true); return }
+    if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
     setRunning(true)
     try {
       const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
@@ -210,29 +210,45 @@ export function PipelineToolbar() {
       flashMessage(`Submitting ${runnable.length} node${runnable.length === 1 ? '' : 's'}...`)
     } catch (err: any) {
       console.error('Run failed:', err)
-      flashMessage(`Run failed: ${err?.message ?? err}`)
+      flashMessage(err?.message ?? String(err), true)
     } finally {
       setRunning(false)
     }
   }, [activeConnectionId, startRun, flashMessage])
 
   const handleRun = useCallback(async () => {
-    const snapshot = exportSnapshot()
-    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
-    if (runnable.length === 0) { flashMessage('No tools to run'); return }
-    if (!activeConnectionId) { flashMessage('No active connection'); return }
-    if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection'); return }
+    try {
+      const snapshot = exportSnapshot()
+      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+      if (runnable.length === 0) { flashMessage('No tools to run'); return }
+      if (!activeConnectionId) { flashMessage('No active connection'); return }
+      if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection'); return }
 
-    const result = validatePipeline(snapshot)
+      // Validation is pure but still wrapped — a throw here used to bubble out
+      // of the async click handler as an unhandled rejection, which on its own
+      // isn't fatal, but combined with other state updates before the throw it
+      // left the toolbar in an inconsistent state.
+      let result
+      try {
+        result = validatePipeline(snapshot)
+      } catch (err: any) {
+        console.error('[PipelineToolbar] validatePipeline threw:', err)
+        flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
+        return
+      }
 
-    // No issues → run immediately.
-    if (result.issues.length === 0) {
-      await submitRun(snapshot)
-      return
+      // No issues → run immediately.
+      if (result.issues.length === 0) {
+        await submitRun(snapshot)
+        return
+      }
+
+      // Issues exist → show confirmation modal; the modal handles the "run anyway" path.
+      setConfirmDialog({ result, snapshot })
+    } catch (err: any) {
+      console.error('[PipelineToolbar] handleRun threw:', err)
+      flashMessage(err?.message ?? String(err), true)
     }
-
-    // Issues exist → show confirmation modal; the modal handles the "run anyway" path.
-    setConfirmDialog({ result, snapshot })
   }, [exportSnapshot, flashMessage, activeConnectionId, submitRun])
 
   const handleCancelRun = useCallback(async () => {
@@ -275,10 +291,17 @@ export function PipelineToolbar() {
           <ValidationBadge />
         </div>
 
-        {/* Feedback message */}
+        {/* Feedback message — errors shown in red for 7s, info in accent for 2s */}
         {savedMessage && (
-          <span className="ml-2 px-2 py-0.5 text-[10px] rounded bg-accent/10 text-accent animate-pulse">
-            {savedMessage}
+          <span
+            className={`ml-2 px-2 py-0.5 text-[10px] rounded max-w-[420px] truncate ${
+              savedMessage.isError
+                ? 'bg-error/10 text-error'
+                : 'bg-accent/10 text-accent animate-pulse'
+            }`}
+            title={savedMessage.isError ? savedMessage.text : undefined}
+          >
+            {savedMessage.text}
           </span>
         )}
 

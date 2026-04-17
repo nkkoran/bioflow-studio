@@ -1,6 +1,7 @@
 import { useCallback, useRef, useEffect } from 'react'
 import { useUIStore } from '@/stores/uiStore'
 import { useRunStore } from '@/stores/runStore'
+import { useConnectionStore } from '@/stores/connectionStore'
 import { TopBar } from './TopBar'
 import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
@@ -57,10 +58,29 @@ export function AppLayout() {
   // Subscribe to pipeline run events from the main process. This forwards
   // per-node status transitions into pipelineStore so canvas badges update
   // live, and mirrors run state into runStore for the Jobs panel / toolbar.
+  //
+  // Wrapped in try/catch: if the preload is stale and a listener function is
+  // missing, we'd throw synchronously from the effect body. React 18 would
+  // unmount the tree and the user would see a blank window. Swallow the error
+  // (runStore.subscribeToEvents already guards each listener individually;
+  // this is belt-and-suspenders for the refreshRuns call and any future ones).
   useEffect(() => {
-    const unsubscribe = useRunStore.getState().subscribeToEvents()
-    void useRunStore.getState().refreshRuns()
-    return unsubscribe
+    let unsubscribe: (() => void) | undefined
+    try {
+      unsubscribe = useRunStore.getState().subscribeToEvents()
+      void useRunStore.getState().refreshRuns().catch((err) => {
+        console.error('[AppLayout] refreshRuns failed:', err)
+      })
+    } catch (err) {
+      console.error('[AppLayout] subscribeToEvents failed:', err)
+    }
+    // Re-populate the connection store from whatever ssh2 Clients the main
+    // process is still holding. After a renderer reload, the UI would
+    // otherwise show "not connected" even though the SSH session is alive.
+    void useConnectionStore.getState().hydrateFromMain().catch((err) => {
+      console.error('[AppLayout] hydrateFromMain failed:', err)
+    })
+    return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
   }, [])
 
   const startSidebarDrag = useCallback(

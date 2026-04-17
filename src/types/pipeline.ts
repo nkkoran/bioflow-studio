@@ -108,6 +108,13 @@ export interface ToolNodeData {
    * Null      → force a single job even if an axed input is connected.
    */
   arrayOver?: string | null
+  /**
+   * Optional absolute output directory override. When set, this node's outputs
+   * land under `<outputDirOverride>/<slug>/...` instead of the run's default
+   * `<workDir>/outputs/<slug>`. Downstream references to this node's outputs
+   * are resolved from the same path by axisPlanner.
+   */
+  outputDirOverride?: string
   /** Execution status — populated by runtime, not user-editable */
   status?: 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
   /** Slurm job id when running */
@@ -155,6 +162,8 @@ export type MergeStrategy =
 export interface MergeNodeData {
   label: string
   strategy: MergeStrategy
+  /** See ToolNodeData.outputDirOverride. */
+  outputDirOverride?: string
   slurmOverride?: {
     cpus?: number
     memoryGB?: number
@@ -210,6 +219,8 @@ export interface NodeRunState {
   scriptPath?: string           // remote path to the submitted sbatch script
   stdoutPath?: string           // pattern; for arrays contains %A_%a
   stderrPath?: string
+  /** Absolute remote dir where this node's outputs land. */
+  outputDir?: string
   submittedAt?: number
   startedAt?: number
   finishedAt?: number
@@ -226,6 +237,8 @@ export interface RunState {
   pipelineId: string
   connectionId: string
   workDir: string
+  /** Resolved `$HOME` on the remote — used to expand `~` in user-supplied path overrides. */
+  homeDir?: string
   createdAt: number
   updatedAt: number
   status: RunStatus

@@ -5,7 +5,12 @@ import { Wifi, WifiOff, ChevronDown, Settings, Server } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 
-export function ConnectionStatus() {
+interface ConnectionStatusProps {
+  /** When true, collapse to an icon-only pill (used in narrow TopBar widths). */
+  compact?: boolean
+}
+
+export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [slurmOpen, setSlurmOpen] = useState(false)
@@ -61,12 +66,17 @@ export function ConnectionStatus() {
 
   return (
     <>
-      <div className="relative" ref={dropdownRef}>
+      <div className="relative flex items-center" ref={dropdownRef}>
         <button
           onClick={handleClick}
-          className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors text-sm"
+          className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors text-sm min-w-0"
+          title={
+            status === 'connected' && activeEntry
+              ? `${activeEntry.config.name} (${activeEntry.config.username}@${activeEntry.config.host})`
+              : undefined
+          }
         >
-          <span className="relative flex items-center">
+          <span className="relative flex items-center shrink-0">
             <span
               className={`w-2 h-2 rounded-full ${dotColor} ${isAnimated ? 'animate-pulse' : ''}`}
             />
@@ -74,34 +84,46 @@ export function ConnectionStatus() {
 
           {status === 'connected' && activeEntry && (
             <>
-              <span className="text-text-primary">
-                {activeEntry.config.name}
-              </span>
-              <span className="text-text-muted">
-                ({activeEntry.config.username}@{activeEntry.config.host})
-              </span>
-              <ChevronDown size={14} className="text-text-muted" />
+              {compact ? (
+                <>
+                  <span className="text-text-primary text-xs font-mono truncate max-w-[120px]">
+                    {activeEntry.config.name}
+                  </span>
+                  <ChevronDown size={12} className="text-text-muted shrink-0" />
+                </>
+              ) : (
+                <>
+                  <span className="text-text-primary truncate">
+                    {activeEntry.config.name}
+                  </span>
+                  <span className="text-text-muted truncate">
+                    ({activeEntry.config.username}@{activeEntry.config.host})
+                  </span>
+                  <ChevronDown size={14} className="text-text-muted shrink-0" />
+                </>
+              )}
             </>
           )}
 
           {status === 'connecting' && (
-            <span className="text-text-secondary">Connecting...</span>
+            <span className="text-text-secondary">{compact ? '...' : 'Connecting...'}</span>
           )}
 
           {status === 'reconnecting' && (
-            <span className="text-text-secondary">Reconnecting...</span>
+            <span className="text-text-secondary">{compact ? '...' : 'Reconnecting...'}</span>
           )}
 
           {status === 'error' && (
-            <span className="text-error">Connection error</span>
+            <span className="text-error">{compact ? 'Err' : 'Connection error'}</span>
           )}
 
-          {status === 'disconnected' && (
+          {status === 'disconnected' && !compact && (
             <span className="text-text-muted">Not connected</span>
           )}
         </button>
 
-        {/* Disconnected/Error: show Connect + Local buttons */}
+        {/* Disconnected/Error: show Connect + Local buttons. In compact mode
+            collapse the labels to icons to save space. */}
         {(status === 'disconnected' || status === 'error') && (
           <>
             <Button
@@ -109,17 +131,19 @@ export function ConnectionStatus() {
               size="sm"
               icon={<Wifi size={14} />}
               onClick={() => setDialogOpen(true)}
-              className="ml-1"
+              className="ml-1 shrink-0"
+              title="Connect"
             >
-              Connect
+              {!compact && 'Connect'}
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => connectLocal()}
-              className="ml-1"
+              className="ml-1 shrink-0"
+              title="Use local filesystem"
             >
-              Local
+              {compact ? <Server size={14} /> : 'Local'}
             </Button>
           </>
         )}
@@ -198,6 +222,7 @@ export function ConnectionStatus() {
 function SlurmSettings({ connectionId }: { connectionId: string }) {
   const [account, setAccount] = useState('')
   const [partition, setPartition] = useState('')
+  const [analysisFolder, setAnalysisFolder] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
 
@@ -205,13 +230,15 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const [a, p] = await Promise.all([
+      const [a, p, f] = await Promise.all([
         window.api.store.get<string>(`connection:${connectionId}:slurmAccount`),
         window.api.store.get<string>(`connection:${connectionId}:slurmPartition`),
+        window.api.store.get<string>(`connection:${connectionId}:defaultAnalysisFolder`),
       ])
       if (cancelled) return
       setAccount(a ?? '')
       setPartition(p ?? '')
+      setAnalysisFolder(f ?? '')
       setLoaded(true)
     })()
     return () => { cancelled = true }
@@ -225,6 +252,7 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
       await Promise.all([
         window.api.store.set(`connection:${connectionId}:slurmAccount`, account.trim()),
         window.api.store.set(`connection:${connectionId}:slurmPartition`, partition.trim()),
+        window.api.store.set(`connection:${connectionId}:defaultAnalysisFolder`, analysisFolder.trim()),
       ])
       setSaveMsg('Saved')
     } catch (err: any) {
@@ -232,7 +260,7 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
       setSaveMsg(`Error: ${err?.message ?? err}`)
     }
     setTimeout(() => setSaveMsg(null), 2500)
-  }, [connectionId, account, partition])
+  }, [connectionId, account, partition, analysisFolder])
 
   if (!loaded) {
     return (
@@ -253,6 +281,12 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
         value={partition}
         onChange={(e) => setPartition(e.target.value)}
         placeholder="(optional)"
+      />
+      <Input
+        label="Default analysis folder"
+        value={analysisFolder}
+        onChange={(e) => setAnalysisFolder(e.target.value)}
+        placeholder="(optional, e.g. /scratch/username/bioflow)"
       />
       <div className="flex items-center gap-2 mt-1">
         <Button variant="primary" size="sm" onClick={save} className="h-7 px-3 text-xs">

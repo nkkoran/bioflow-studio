@@ -23,6 +23,7 @@ interface Window {
       disconnect: (id: string) => Promise<void>
       status: (id: string) => Promise<import('./types/ssh').ConnectionStatus | null>
       exec: (id: string, command: string) => Promise<import('./types/ssh').ExecResult>
+      listConnections: () => Promise<Array<{ id: string; config: Omit<import('./types/ssh').ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }>>
       onStatusChange: (callback: (event: any, data: { connectionId: string; status: string }) => void) => () => void
       onPrompt: (callback: (data: { promptId: string; title: string; message: string; isPassword: boolean }) => void) => () => void
       respondToPrompt: (promptId: string, value: string | null) => void
@@ -71,8 +72,10 @@ interface Window {
       cancelNode: (runId: string, nodeId: string) => Promise<void>
       listRuns: () => Promise<import('./types/pipeline').RunState[]>
       getRun: (runId: string) => Promise<import('./types/pipeline').RunState | null>
+      listOutputs: (runId: string, nodeId: string) => Promise<Array<{ name: string; size: number; modified: number }>>
       onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: import('./types/pipeline').RunStatus | 'idle'; jobId?: string; error?: string }) => void) => () => void
       onRunStatus: (callback: (data: { runId: string; status: import('./types/pipeline').RunStatus }) => void) => () => void
+      onJobLog: (callback: (data: { runId: string; nodeId: string; chunk: string; stream: 'stdout' | 'stderr' }) => void) => () => void
     }
   }
 }

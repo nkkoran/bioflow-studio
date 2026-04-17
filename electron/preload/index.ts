@@ -60,6 +60,13 @@ const api = {
       ipcRenderer.invoke('ssh:status', id),
     exec: (id: string, command: string): Promise<ExecResult> =>
       ipcRenderer.invoke('ssh:exec', id, command),
+    /**
+     * List every live SSH connection held by the main process. Used by the
+     * renderer on mount to re-hydrate its connection store after a window
+     * reload (main-process connections survive renderer reloads).
+     */
+    listConnections: (): Promise<Array<{ id: string; config: Omit<ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }>> =>
+      ipcRenderer.invoke('ssh:list-connections'),
     onStatusChange: (callback: (event: any, data: { connectionId: string; status: string }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(_event, data)
       ipcRenderer.on('ssh:status-change', handler)
@@ -168,6 +175,8 @@ const api = {
       ipcRenderer.invoke('pipeline:list-runs'),
     getRun: (runId: string): Promise<RunState | null> =>
       ipcRenderer.invoke('pipeline:get-run', runId),
+    listOutputs: (runId: string, nodeId: string): Promise<Array<{ name: string; size: number; modified: number }>> =>
+      ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId }),
     onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: RunStatus | 'idle'; jobId?: string; error?: string }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('pipeline:node-status', handler)
@@ -177,6 +186,11 @@ const api = {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('pipeline:run-status', handler)
       return () => ipcRenderer.removeListener('pipeline:run-status', handler)
+    },
+    onJobLog: (callback: (data: { runId: string; nodeId: string; chunk: string; stream: 'stdout' | 'stderr' }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('pipeline:job-log', handler)
+      return () => ipcRenderer.removeListener('pipeline:job-log', handler)
     },
   }
 }

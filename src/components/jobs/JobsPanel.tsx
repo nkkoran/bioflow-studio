@@ -10,12 +10,14 @@ import { Button } from '@/components/ui/Button'
 import { X } from 'lucide-react'
 import { NodeRunList } from './NodeRunList'
 import { LogViewer } from './LogViewer'
+import { JobSummary } from './JobSummary'
 
 export function JobsPanel() {
   const runs = useRunStore((s) => s.runs)
   const activeRunId = useRunStore((s) => s.activeRunId)
   const setActiveRun = useRunStore((s) => s.setActiveRun)
   const cancelRun = useRunStore((s) => s.cancelRun)
+  const selectedNodeId = useRunStore((s) => s.selectedNodeId)
 
   // Sort runs most-recent-first for the selector
   const sortedRuns = useMemo(
@@ -78,7 +80,13 @@ export function JobsPanel() {
           <div className="w-[40%] min-w-[220px] max-w-[420px] border-r border-border-light overflow-y-auto">
             <NodeRunList run={activeRun} />
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 flex flex-col">
+            {(() => {
+              const ns = selectedNodeId ? activeRun.nodes[selectedNodeId] : null
+              const isTerminal =
+                !!ns && (ns.status === 'done' || ns.status === 'failed' || ns.status === 'cancelled')
+              return isTerminal && ns ? <JobSummary runId={activeRun.runId} ns={ns} /> : null
+            })()}
             {activeConnectionId ? (
               <LogViewer run={activeRun} connectionId={activeConnectionId} />
             ) : (

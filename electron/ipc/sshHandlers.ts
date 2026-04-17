@@ -22,4 +22,10 @@ export function registerSshHandlers(): void {
   ipcMain.handle('ssh:exec', async (_event, id: string, command: string) => {
     return manager.exec(id, command)
   })
+
+  // Renderer hydration on reload — returns every live connection so the
+  // connectionStore can re-populate without forcing the user to reconnect.
+  ipcMain.handle('ssh:list-connections', async () => {
+    return manager.listConnections()
+  })
 }

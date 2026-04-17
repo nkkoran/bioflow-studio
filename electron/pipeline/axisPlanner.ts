@@ -78,6 +78,29 @@ function extForFileType(ft: string): string {
   }
 }
 
+/**
+ * Resolve the per-node output directory. When an override is set, the node's
+ * files land at `<override>/<slug>` so concurrent nodes don't collide on
+ * shared names. Leading `~` / `~/` is expanded against the passed home so
+ * downstream SFTP writes (which do NOT shell-expand) still work.
+ */
+export function resolveNodeOutputDir(
+  override: string | undefined,
+  defaultOutputRoot: string,
+  slug: string,
+  homeDir?: string,
+): string {
+  if (override && override.trim()) {
+    const raw = override.trim().replace(/\/+$/, '')
+    const absolute =
+      homeDir && raw === '~' ? homeDir :
+      homeDir && raw.startsWith('~/') ? `${homeDir}/${raw.slice(2)}` :
+      raw
+    return `${absolute}/${slug}`
+  }
+  return `${defaultOutputRoot}/${slug}`
+}
+
 /** Output path convention: <outputDir>/<slug>.<portId>[.<key>]<ext>. */
 function outputPath(outputDir: string, slug: string, portId: string, key: string | null, ft: string): string {
   const ext = extForFileType(ft)
@@ -96,6 +119,11 @@ export interface PlannerContext {
    * "node_abc12345"). If omitted, nodeId is used as-is.
    */
   nodeSlug?: (nodeId: string) => string
+  /**
+   * Resolved `$HOME` on the remote. Used to expand `~` / `~/…` in user-provided
+   * outputDirOverride values before they cross the SFTP boundary.
+   */
+  homeDir?: string
 }
 
 export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<string, AxisPlan> {
@@ -213,7 +241,8 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const resolvedStrategy = resolveMergeStrategyStatic(data.strategy, upstreamFt)
       const outExt = mergeOutputExt(resolvedStrategy)
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-      const outPath = `${ctx.outputRoot}/${slug}/${slug}.output${outExt}`
+      const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const outPath = `${mergeOutDir}/${slug}.output${outExt}`
       plans.set(nodeId, {
         nodeId,
         nodeType: 'merge',
@@ -297,7 +326,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     // Compute outputs
     const outputs: Record<string, AxedValue> = {}
     const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-    const perNodeOutputDir = `${ctx.outputRoot}/${slug}`
+    const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
       if (mode === 'array' && keys) {
         outputs[outPort.id] = {

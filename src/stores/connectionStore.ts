@@ -20,6 +20,13 @@ interface ConnectionStore {
   setActiveConnection: (id: string | null) => void
   updateStatus: (id: string, status: ConnectionState) => void
   isLocalConnection: () => boolean
+  /**
+   * Re-populate the store from live connections held in the main process.
+   * Call this on renderer mount — after a window reload the main-process
+   * ssh2 Clients are still open, but the renderer's Zustand state was wiped,
+   * so the UI would show "not connected" even though SSH is alive.
+   */
+  hydrateFromMain: () => Promise<void>
 }
 
 export const useConnectionStore = create<ConnectionStore>((set, get) => ({
@@ -133,6 +140,41 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
   isLocalConnection: () => {
     return get().activeConnectionId === LOCAL_CONNECTION_ID
+  },
+
+  hydrateFromMain: async () => {
+    // Main-process ssh2 Clients survive renderer reloads, but the Zustand
+    // store starts empty on mount. Ask the main process for its live
+    // connections and re-populate so the UI reflects reality.
+    if (typeof window === 'undefined' || !window.api?.ssh?.listConnections) return
+    try {
+      const live = await window.api.ssh.listConnections()
+      if (!live || live.length === 0) return
+      set((state) => {
+        const next = { ...state.connections }
+        for (const entry of live) {
+          // Don't clobber an existing local entry, and don't overwrite a
+          // connection that already exists (preserve any unsaved state).
+          if (next[entry.id]) continue
+          next[entry.id] = {
+            config: entry.config as ConnectionConfig,
+            status: entry.connected ? 'connected' : 'disconnected',
+            connectedAt: entry.connectedAt,
+            isLocal: false,
+          }
+        }
+        // If nothing is active and we hydrated at least one connection, pick
+        // the most recently connected as the active one.
+        let activeId = state.activeConnectionId
+        if (!activeId) {
+          const sorted = [...live].sort((a, b) => b.connectedAt - a.connectedAt)
+          if (sorted[0]) activeId = sorted[0].id
+        }
+        return { connections: next, activeConnectionId: activeId }
+      })
+    } catch (err) {
+      console.error('[connectionStore] hydrateFromMain failed:', err)
+    }
   },
 }))
 

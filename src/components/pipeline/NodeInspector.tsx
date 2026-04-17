@@ -234,6 +234,24 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         </div>
       )}
 
+      {/* Output folder override */}
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Output folder
+        </h4>
+        <Input
+          type="text"
+          value={(data.outputDirOverride as string | undefined) ?? ''}
+          placeholder="(default — run's outputs folder)"
+          onChange={(e) =>
+            updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })
+          }
+        />
+        <p className="text-[10px] text-text-muted mt-1">
+          Absolute path or <code className="font-mono">~/…</code>. Applies to this node only.
+        </p>
+      </div>
+
       {/* Slurm resources */}
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
@@ -607,6 +625,23 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
         {selectedStrategy && (
           <p className="text-[10px] text-text-muted mt-1">{selectedStrategy.hint}</p>
         )}
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Output folder
+        </h4>
+        <Input
+          type="text"
+          value={(data.outputDirOverride as string | undefined) ?? ''}
+          placeholder="(default — run's outputs folder)"
+          onChange={(e) =>
+            updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })
+          }
+        />
+        <p className="text-[10px] text-text-muted mt-1">
+          Absolute path or <code className="font-mono">~/…</code>. Applies to this merge only.
+        </p>
       </div>
 
       <div>

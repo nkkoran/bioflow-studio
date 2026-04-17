@@ -80,18 +80,21 @@ function ToolNodeInner({ data, selected }: NodeProps) {
         <StatusBadge status={nodeData.status} />
       </div>
 
-      {/* Ports */}
-      <div className="px-3 py-2 flex flex-col gap-1 text-[11px]">
+      {/* Ports — each row is a fixed-height flex container with the Handle
+          absolutely positioned relative to that row so the circle lines up
+          exactly with the port label. */}
+      <div className="px-3 py-2 flex flex-col text-[11px]">
         {/* Inputs on the left */}
-        {tool.inputs.map((port, idx) => (
-          <div key={port.id} className="relative flex items-center">
+        {tool.inputs.map((port) => (
+          <div key={port.id} className="relative flex items-center h-6">
             <Handle
               type="target"
               position={Position.Left}
               id={port.id}
               style={{
                 left: -8,
-                top: `${(idx + 0.5) * 20 + 4}px`,
+                top: '50%',
+                transform: 'translateY(-50%)',
                 width: 10,
                 height: 10,
                 background: 'var(--color-accent)',
@@ -111,8 +114,8 @@ function ToolNodeInner({ data, selected }: NodeProps) {
         )}
 
         {/* Outputs on the right */}
-        {tool.outputs.map((port, idx) => (
-          <div key={port.id} className="relative flex items-center justify-end">
+        {tool.outputs.map((port) => (
+          <div key={port.id} className="relative flex items-center justify-end h-6">
             <span className="text-text-secondary">
               {port.label}
               <span className="text-text-muted"> ▶</span>
@@ -123,7 +126,8 @@ function ToolNodeInner({ data, selected }: NodeProps) {
               id={port.id}
               style={{
                 right: -8,
-                top: `${(tool.inputs.length + (tool.inputs.length > 0 ? 1 : 0) + idx + 0.5) * 20 + 4}px`,
+                top: '50%',
+                transform: 'translateY(-50%)',
                 width: 10,
                 height: 10,
                 background: 'var(--color-success, #10b981)',

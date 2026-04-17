@@ -318,6 +318,29 @@ export class SshManager {
     return conn ? conn.client : null
   }
 
+  /**
+   * Snapshot of every live connection. Used by the renderer on mount to
+   * rehydrate its connection store after a window reload — the main process
+   * keeps ssh2 Clients across renderer reloads, so there's no need to
+   * re-authenticate; we just need to re-publish the list.
+   *
+   * Credentials (password / passphrase) are stripped so they never cross the
+   * IPC boundary on list.
+   */
+  listConnections(): Array<{ id: string; config: Omit<ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }> {
+    const out: Array<{ id: string; config: Omit<ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }> = []
+    for (const [id, conn] of this.connections) {
+      const { password: _p, passphrase: _pp, ...safeConfig } = conn.config
+      out.push({
+        id,
+        config: safeConfig,
+        connectedAt: conn.connectedAt,
+        connected: !conn.reconnecting,
+      })
+    }
+    return out
+  }
+
   exec(id: string, command: string): Promise<ExecResult> {
     return new Promise((resolve, reject) => {
       const conn = this.connections.get(id)
@@ -348,6 +371,52 @@ export class SshManager {
         })
       })
     })
+  }
+
+  /**
+   * Open a persistent exec channel and stream output chunks via a callback.
+   * Unlike `exec()`, this does NOT buffer output — each chunk fires `onData`
+   * as it arrives. Designed for long-running commands like `tail -F`.
+   *
+   * Returns a `cancel()` function. Calling it destroys the channel, which
+   * sends SIGHUP to the remote process.
+   */
+  execStream(
+    id: string,
+    command: string,
+    onData: (chunk: string, stream: 'stdout' | 'stderr') => void,
+  ): { cancel: () => void } {
+    const conn = this.connections.get(id)
+    if (!conn) return { cancel: () => {} }
+
+    let active = true
+    let streamRef: ClientChannel | null = null
+
+    conn.client.exec(command, (err, stream) => {
+      if (err || !active) return
+      streamRef = stream
+
+      stream.on('data', (data: Buffer) => {
+        if (active) onData(data.toString(), 'stdout')
+      })
+      stream.stderr.on('data', (data: Buffer) => {
+        if (active) onData(data.toString(), 'stderr')
+      })
+      stream.on('close', () => {
+        active = false
+        streamRef = null
+      })
+    })
+
+    return {
+      cancel: () => {
+        active = false
+        if (streamRef) {
+          try { streamRef.destroy() } catch { /* ignore */ }
+          streamRef = null
+        }
+      },
+    }
   }
 
   shell(id: string): Promise<ClientChannel> {
