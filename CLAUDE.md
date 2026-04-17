@@ -66,6 +66,21 @@ The data model has three axis states on a data flow:
 - `activeConnectionId` is latched at `startRun` time — a run survives the user switching connections.
 - Slurm account is read from electron-store key `connection:<id>:slurmAccount` via `getSettingsStore()`. **Always use `getSettingsStore()`** — the named-stores API is not interchangeable with the default electron-store.
 
+### SSH authentication & MFA
+
+Alliance Canada / Compute Canada clusters (Rorqual) require **publickey + keyboard-interactive TOTP** (partial-success auth). The flow:
+
+1. `SshManager.buildConnectOptions` sets `tryKeyboard: true` alongside whatever primary method (key/password/agent) is configured. `~` in key paths is expanded via `expandPath()` — ssh2 does not do this itself.
+2. On the `keyboard-interactive` event: if the prompt text contains `"password"` and `config.password` is set, auto-respond with it. Otherwise call `promptUser()`, which emits a `ssh:prompt` IPC event (with a generated `promptId`) to the renderer and awaits a matching `ssh:prompt-response` (60s timeout).
+3. **Compute Canada's TOTP prompt is labelled `"Password:"`** — this is misleading but authentic. `MfaPrompt.tsx` (a global dialog that listens for `ssh:prompt`) surfaces a hint clarifying that the "Password" prompt actually wants the 6-digit TOTP code.
+4. Server banners (MFA enrollment notices, MOTD) are forwarded via `ssh:banner` events so they can appear in the connection UI.
+
+Algorithm allowlist (`ALGORITHMS` constant in `SshManager.ts`) is **explicit**, not defaulted — HPC servers often run older/stricter crypto configs. Note: `chacha20-poly1305@openssh.com` was removed from the cipher list because it caused handshake failures on Rorqual. Don't re-add it without testing.
+
+**`scripts/test-ssh.mjs`** mirrors the same algorithm allowlist and MFA prompt loop outside Electron — use it to isolate ssh2-library issues from Electron integration when auth breaks.
+
+**Native modules:** `ssh2` pulls in `cpu-features` / native crypto bindings. If you bump Electron, run `npx electron-rebuild` or connections will fail at load time with an ABI mismatch.
+
 ### Tool registry & validation
 
 - **`src/lib/toolRegistry.ts`** — static `TOOLS: ToolDef[]`. To add a tool, append an entry; the palette and ScriptGenerator pick it up automatically. `areTypesCompatible` treats `'any'` as permissive on either side.
@@ -92,6 +107,10 @@ Don't call `pipelineStore.updateNodeData` from the explorer directly — always 
 - When threading new per-node metadata through execution, follow the existing `nodeSlug` pattern: compute once in `PipelineRunner`, pass via `PlannerContext` to `axisPlanner`, pass via script-gen opts to `ScriptGenerator`. Don't derive it ad-hoc in two places.
 - Output paths are computed by `axisPlanner` from node metadata only — never by listing the remote filesystem. This keeps downstream resolution deterministic across reconnects.
 - `custom.shell` tool param uses `flag: '-c'` so the generated command is `bash -c '<script>'`. Don't "simplify" this — without `-c`, bash treats the script as a filename.
+- **React Flow 12 data typing:** every node-data interface (`ToolNodeData`, `FileNodeData`, `MergeNodeData`, `NoteNodeData`) must include `[key: string]: unknown` — React Flow's `Node<T>` constrains `T extends Record<string, unknown>`. Without the index signature, TypeScript rejects the node in `nodes: BioflowNode[]`.
+- **`pipelineStore` history discipline:** only *structural* `NodeChange`/`EdgeChange` variants (`add`, `remove`) push to the undo stack. Position drags and selection changes do not — otherwise every pixel of a drag would fill the 50-entry history. Mutating actions (`updateNodeData`, `addToolNode`, etc.) push explicitly before applying the change.
+- **`dirty` flag:** set on every mutation in `pipelineStore`; cleared only by `loadSnapshot` and `reset`. Save does *not* currently clear it — the toolbar just flashes a "Saved" toast. If you add true save-state tracking, thread it through `exportSnapshot` consumers too.
+- **Renderer CSP:** `index.html` allows `font-src 'self' data:` (for `@fontsource` inlined fonts) and `connect-src 'self' ws://localhost:*` (for Vite HMR). Tightening CSP will break dev HMR unless the ws rule is preserved.
 # CLAUDE.md
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
