@@ -1,0 +1,21 @@
+# Dependencies — npm install re-creates this; it's huge (~500MB)
+node_modules/
+
+# Built output — generated files, not source
+dist/
+dist-electron/
+out/
+
+# Electron-store data — contains your saved SSH credentials/passwords
+electron/store/
+
+# macOS junk
+.DS_Store
+
+# Environment secrets
+.env
+*.pem
+*.key
+
+# Claude personal overrides
+CLAUDE.local.md

@@ -1,0 +1,186 @@
+import { contextBridge, ipcRenderer } from 'electron'
+import type { PipelineSnapshot, RunState, RunStatus } from '../../src/types/pipeline'
+
+// Types matching src/types/
+export interface ConnectionConfig {
+  name: string
+  host: string
+  port: number
+  username: string
+  authMethod: 'key' | 'password' | 'agent'
+  privateKeyPath?: string
+  passphrase?: string
+  password?: string
+  defaultDirectory?: string
+}
+
+export interface ConnectionResult {
+  id: string
+  host: string
+  username: string
+}
+
+export interface ConnectionStatus {
+  connected: boolean
+  host: string
+  username: string
+  uptime: number
+}
+
+export interface ExecResult {
+  stdout: string
+  stderr: string
+  exitCode: number
+}
+
+export interface RemoteFileEntry {
+  name: string
+  path: string
+  isDirectory: boolean
+  size: number
+  modified: number  // timestamp
+  permissions: string
+  extension: string
+}
+
+export interface FileStat {
+  size: number
+  modified: number
+  isDirectory: boolean
+  permissions: string
+}
+
+const api = {
+  ssh: {
+    connect: (config: ConnectionConfig): Promise<ConnectionResult> =>
+      ipcRenderer.invoke('ssh:connect', config),
+    disconnect: (id: string): Promise<void> =>
+      ipcRenderer.invoke('ssh:disconnect', id),
+    status: (id: string): Promise<ConnectionStatus | null> =>
+      ipcRenderer.invoke('ssh:status', id),
+    exec: (id: string, command: string): Promise<ExecResult> =>
+      ipcRenderer.invoke('ssh:exec', id, command),
+    onStatusChange: (callback: (event: any, data: { connectionId: string; status: string }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(_event, data)
+      ipcRenderer.on('ssh:status-change', handler)
+      return () => ipcRenderer.removeListener('ssh:status-change', handler)
+    },
+    /** Listen for MFA/2FA prompts from the main process */
+    onPrompt: (callback: (data: { promptId: string; title: string; message: string; isPassword: boolean }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('ssh:prompt', handler)
+      return () => ipcRenderer.removeListener('ssh:prompt', handler)
+    },
+    /** Send the user's response to a prompt */
+    respondToPrompt: (promptId: string, value: string | null): void => {
+      ipcRenderer.send('ssh:prompt-response', { promptId, value })
+    },
+    /** Listen for server banners (e.g., MFA enrollment messages) */
+    onBanner: (callback: (data: { connectionId: string; message: string }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('ssh:banner', handler)
+      return () => ipcRenderer.removeListener('ssh:banner', handler)
+    },
+  },
+  sftp: {
+    ls: (id: string, remotePath: string): Promise<RemoteFileEntry[]> =>
+      ipcRenderer.invoke('sftp:ls', id, remotePath),
+    stat: (id: string, remotePath: string): Promise<FileStat> =>
+      ipcRenderer.invoke('sftp:stat', id, remotePath),
+    read: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
+      ipcRenderer.invoke('sftp:read', id, remotePath, offset, length),
+    head: (id: string, remotePath: string, lines: number): Promise<string> =>
+      ipcRenderer.invoke('sftp:head', id, remotePath, lines),
+    mkdir: (id: string, remotePath: string): Promise<void> =>
+      ipcRenderer.invoke('sftp:mkdir', id, remotePath),
+    rename: (id: string, oldPath: string, newPath: string): Promise<void> =>
+      ipcRenderer.invoke('sftp:rename', id, oldPath, newPath),
+    delete: (id: string, remotePath: string): Promise<void> =>
+      ipcRenderer.invoke('sftp:delete', id, remotePath),
+    write: (id: string, remotePath: string, content: string): Promise<void> =>
+      ipcRenderer.invoke('sftp:write', id, remotePath, content)
+  },
+  terminal: {
+    create: (connectionId: string): Promise<string> =>
+      ipcRenderer.invoke('terminal:create', connectionId),
+    resize: (terminalId: string, cols: number, rows: number): void => {
+      ipcRenderer.send('terminal:resize', terminalId, cols, rows)
+    },
+    write: (terminalId: string, data: string): void => {
+      ipcRenderer.send('terminal:write', terminalId, data)
+    },
+    close: (terminalId: string): void => {
+      ipcRenderer.send('terminal:close', terminalId)
+    },
+    onData: (terminalId: string, callback: (data: string) => void): (() => void) => {
+      const channel = `terminal:data:${terminalId}`
+      const handler = (_event: any, data: string) => callback(data)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onClose: (terminalId: string, callback: () => void): (() => void) => {
+      const channel = `terminal:close:${terminalId}`
+      const handler = () => callback()
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    }
+  },
+  store: {
+    get: <T>(key: string): Promise<T | undefined> =>
+      ipcRenderer.invoke('store:get', key),
+    set: <T>(key: string, value: T): Promise<void> =>
+      ipcRenderer.invoke('store:set', key, value)
+  },
+  local: {
+    ls: (dirPath: string): Promise<RemoteFileEntry[]> =>
+      ipcRenderer.invoke('local:ls', dirPath),
+    stat: (filePath: string): Promise<FileStat> =>
+      ipcRenderer.invoke('local:stat', filePath),
+    read: (filePath: string, offset?: number, length?: number): Promise<string> =>
+      ipcRenderer.invoke('local:read', filePath, offset, length),
+    head: (filePath: string, lines: number): Promise<string> =>
+      ipcRenderer.invoke('local:head', filePath, lines),
+    mkdir: (dirPath: string): Promise<void> =>
+      ipcRenderer.invoke('local:mkdir', dirPath),
+    rename: (oldPath: string, newPath: string): Promise<void> =>
+      ipcRenderer.invoke('local:rename', oldPath, newPath),
+    delete: (filePath: string): Promise<void> =>
+      ipcRenderer.invoke('local:delete', filePath),
+    write: (filePath: string, content: string): Promise<void> =>
+      ipcRenderer.invoke('local:write', filePath, content),
+    homedir: (): Promise<string> =>
+      ipcRenderer.invoke('local:homedir'),
+  },
+  dialog: {
+    openFile: (options?: { filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:openFile', options),
+    openDirectory: (options?: { defaultPath?: string }): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:openDirectory', options),
+  },
+  pipeline: {
+    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<{ runId: string }> =>
+      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir }),
+    cancel: (runId: string): Promise<void> =>
+      ipcRenderer.invoke('pipeline:cancel', runId),
+    cancelNode: (runId: string, nodeId: string): Promise<void> =>
+      ipcRenderer.invoke('pipeline:cancel-node', { runId, nodeId }),
+    listRuns: (): Promise<RunState[]> =>
+      ipcRenderer.invoke('pipeline:list-runs'),
+    getRun: (runId: string): Promise<RunState | null> =>
+      ipcRenderer.invoke('pipeline:get-run', runId),
+    onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: RunStatus | 'idle'; jobId?: string; error?: string }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('pipeline:node-status', handler)
+      return () => ipcRenderer.removeListener('pipeline:node-status', handler)
+    },
+    onRunStatus: (callback: (data: { runId: string; status: RunStatus }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('pipeline:run-status', handler)
+      return () => ipcRenderer.removeListener('pipeline:run-status', handler)
+    },
+  }
+}
+
+contextBridge.exposeInMainWorld('api', api)
+
+export type BioflowAPI = typeof api

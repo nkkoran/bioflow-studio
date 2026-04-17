@@ -1,0 +1,30 @@
+import { ipcMain } from 'electron'
+import { PipelineRunner } from '../pipeline/PipelineRunner'
+import type { PipelineSnapshot } from '../../src/types/pipeline'
+
+export function registerPipelineHandlers(): void {
+  const runner = PipelineRunner.getInstance()
+
+  ipcMain.handle('pipeline:run', async (
+    _event,
+    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string },
+  ) => {
+    return runner.start(args)
+  })
+
+  ipcMain.handle('pipeline:cancel', async (_event, runId: string) => {
+    return runner.cancel(runId)
+  })
+
+  ipcMain.handle('pipeline:cancel-node', async (_event, args: { runId: string; nodeId: string }) => {
+    return runner.cancelNode(args.runId, args.nodeId)
+  })
+
+  ipcMain.handle('pipeline:list-runs', async () => {
+    return runner.listRuns()
+  })
+
+  ipcMain.handle('pipeline:get-run', async (_event, runId: string) => {
+    return runner.getRun(runId)
+  })
+}

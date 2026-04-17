@@ -1,0 +1,395 @@
+/**
+ * Pipeline state store.
+ *
+ * Holds React Flow nodes/edges, selection, and pipeline metadata.
+ * Supports undo/redo via a simple history stack (last 50 snapshots).
+ */
+import { create } from 'zustand'
+import type { Node, Edge, NodeChange, EdgeChange, Connection } from '@xyflow/react'
+import { applyNodeChanges, applyEdgeChanges, addEdge } from '@xyflow/react'
+import type {
+  BioflowNodeType,
+  FileNodeData,
+  MergeNodeData,
+  NoteNodeData,
+  PipelineSnapshot,
+  ToolNodeData,
+} from '@/types/pipeline'
+import { getTool } from '@/lib/toolRegistry'
+
+export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | NoteNodeData, BioflowNodeType>
+export type BioflowEdge = Edge
+
+interface HistoryEntry {
+  nodes: BioflowNode[]
+  edges: BioflowEdge[]
+}
+
+interface PipelineState {
+  /** Pipeline metadata */
+  pipelineId: string
+  pipelineName: string
+  pipelineDescription: string
+
+  /** Graph */
+  nodes: BioflowNode[]
+  edges: BioflowEdge[]
+
+  /** Selected node id (for the inspector panel) */
+  selectedNodeId: string | null
+
+  /** Undo/redo stacks */
+  past: HistoryEntry[]
+  future: HistoryEntry[]
+
+  /** Dirty flag (has unsaved changes) */
+  dirty: boolean
+
+  // --- actions ---
+  setPipelineName: (name: string) => void
+  setPipelineDescription: (desc: string) => void
+
+  onNodesChange: (changes: NodeChange[]) => void
+  onEdgesChange: (changes: EdgeChange[]) => void
+  onConnect: (connection: Connection) => void
+
+  addToolNode: (toolId: string, position: { x: number; y: number }) => string
+  addFileNode: (position: { x: number; y: number }, data?: Partial<FileNodeData>) => string
+  addMergeNode: (position: { x: number; y: number }, data?: Partial<MergeNodeData>) => string
+  addNoteNode: (position: { x: number; y: number }) => string
+
+  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | NoteNodeData>) => void
+  deleteNode: (nodeId: string) => void
+  deleteEdge: (edgeId: string) => void
+  duplicateNode: (nodeId: string) => void
+
+  setSelectedNode: (nodeId: string | null) => void
+
+  undo: () => void
+  redo: () => void
+
+  loadSnapshot: (snapshot: PipelineSnapshot) => void
+  exportSnapshot: () => PipelineSnapshot
+  reset: () => void
+
+  setNodeStatus: (nodeId: string, status: ToolNodeData['status'], jobId?: string, error?: string) => void
+}
+
+const HISTORY_LIMIT = 50
+
+function makeId(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+/** Build default paramValues from tool definition. */
+function defaultParamValues(toolId: string): Record<string, unknown> {
+  const tool = getTool(toolId)
+  if (!tool) return {}
+  const values: Record<string, unknown> = {}
+  for (const p of tool.params) {
+    if (p.default !== undefined) values[p.name] = p.default
+  }
+  return values
+}
+
+/** Push the current state onto the `past` stack before a mutation. */
+function pushHistory(state: PipelineState): Pick<PipelineState, 'past' | 'future'> {
+  const entry: HistoryEntry = {
+    nodes: state.nodes,
+    edges: state.edges,
+  }
+  const past = [...state.past, entry].slice(-HISTORY_LIMIT)
+  return { past, future: [] }
+}
+
+export const usePipelineStore = create<PipelineState>()((set, get) => ({
+  pipelineId: makeId('pipeline'),
+  pipelineName: 'Untitled pipeline',
+  pipelineDescription: '',
+
+  nodes: [],
+  edges: [],
+  selectedNodeId: null,
+
+  past: [],
+  future: [],
+  dirty: false,
+
+  setPipelineName: (name) => set({ pipelineName: name, dirty: true }),
+  setPipelineDescription: (description) => set({ pipelineDescription: description, dirty: true }),
+
+  onNodesChange: (changes) => {
+    // Only push history for structural changes (add/remove), not position/selection drags
+    const structural = changes.some((c) => c.type === 'add' || c.type === 'remove')
+    set((state) => {
+      const next = applyNodeChanges(changes, state.nodes) as BioflowNode[]
+      return {
+        nodes: next,
+        ...(structural ? pushHistory(state) : {}),
+        dirty: state.dirty || structural,
+      }
+    })
+  },
+
+  onEdgesChange: (changes) => {
+    const structural = changes.some((c) => c.type === 'add' || c.type === 'remove')
+    set((state) => {
+      const next = applyEdgeChanges(changes, state.edges)
+      return {
+        edges: next,
+        ...(structural ? pushHistory(state) : {}),
+        dirty: state.dirty || structural,
+      }
+    })
+  },
+
+  onConnect: (connection) => {
+    set((state) => ({
+      edges: addEdge({ ...connection, animated: false }, state.edges),
+      ...pushHistory(state),
+      dirty: true,
+    }))
+  },
+
+  addToolNode: (toolId, position) => {
+    const tool = getTool(toolId)
+    if (!tool) {
+      console.error(`Tool not found: ${toolId}`)
+      return ''
+    }
+    const id = makeId('node')
+    const node: BioflowNode = {
+      id,
+      type: 'tool',
+      position,
+      data: {
+        toolId,
+        label: tool.name,
+        paramValues: defaultParamValues(toolId),
+        status: 'idle',
+      },
+    }
+    set((state) => ({
+      nodes: [...state.nodes, node],
+      selectedNodeId: id,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  addFileNode: (position, data) => {
+    const id = makeId('file')
+    const node: BioflowNode = {
+      id,
+      type: 'file',
+      position,
+      data: {
+        label: data?.label ?? 'File',
+        path: data?.path ?? '',
+        fileType: data?.fileType ?? 'any',
+        isInput: data?.isInput ?? true,
+      },
+    }
+    set((state) => ({
+      nodes: [...state.nodes, node],
+      selectedNodeId: id,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  addMergeNode: (position, data) => {
+    const id = makeId('merge')
+    const node: BioflowNode = {
+      id,
+      type: 'merge',
+      position,
+      data: {
+        label: data?.label ?? 'Merge',
+        strategy: data?.strategy ?? 'auto',
+        slurmOverride: data?.slurmOverride,
+        status: 'idle',
+      },
+    }
+    set((state) => ({
+      nodes: [...state.nodes, node],
+      selectedNodeId: id,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  addNoteNode: (position) => {
+    const id = makeId('note')
+    const node: BioflowNode = {
+      id,
+      type: 'note',
+      position,
+      data: { text: 'Note', color: '#fbbf24' },
+    }
+    set((state) => ({
+      nodes: [...state.nodes, node],
+      selectedNodeId: id,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  updateNodeData: (nodeId, patch) => {
+    set((state) => ({
+      nodes: state.nodes.map((n) =>
+        n.id === nodeId ? { ...n, data: { ...n.data, ...patch } as BioflowNode['data'] } : n,
+      ),
+      dirty: true,
+    }))
+  },
+
+  deleteNode: (nodeId) => {
+    set((state) => ({
+      nodes: state.nodes.filter((n) => n.id !== nodeId),
+      edges: state.edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+      selectedNodeId: state.selectedNodeId === nodeId ? null : state.selectedNodeId,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+  },
+
+  deleteEdge: (edgeId) => {
+    set((state) => ({
+      edges: state.edges.filter((e) => e.id !== edgeId),
+      ...pushHistory(state),
+      dirty: true,
+    }))
+  },
+
+  duplicateNode: (nodeId) => {
+    set((state) => {
+      const node = state.nodes.find((n) => n.id === nodeId)
+      if (!node) return state
+      const newNode: BioflowNode = {
+        ...node,
+        id: makeId('node'),
+        position: { x: node.position.x + 40, y: node.position.y + 40 },
+        selected: false,
+        data: { ...node.data } as BioflowNode['data'],
+      }
+      return {
+        nodes: [...state.nodes, newNode],
+        ...pushHistory(state),
+        dirty: true,
+      }
+    })
+  },
+
+  setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
+
+  undo: () => {
+    const state = get()
+    const prev = state.past[state.past.length - 1]
+    if (!prev) return
+    set({
+      nodes: prev.nodes,
+      edges: prev.edges,
+      past: state.past.slice(0, -1),
+      future: [{ nodes: state.nodes, edges: state.edges }, ...state.future],
+      dirty: true,
+    })
+  },
+
+  redo: () => {
+    const state = get()
+    const next = state.future[0]
+    if (!next) return
+    set({
+      nodes: next.nodes,
+      edges: next.edges,
+      past: [...state.past, { nodes: state.nodes, edges: state.edges }],
+      future: state.future.slice(1),
+      dirty: true,
+    })
+  },
+
+  loadSnapshot: (snapshot) => {
+    const nodes: BioflowNode[] = snapshot.nodes.map((n) => ({
+      id: n.id,
+      type: n.type,
+      position: n.position,
+      data: n.data as BioflowNode['data'],
+    }))
+    set({
+      pipelineId: snapshot.id,
+      pipelineName: snapshot.name,
+      pipelineDescription: snapshot.description ?? '',
+      nodes,
+      edges: snapshot.edges,
+      selectedNodeId: null,
+      past: [],
+      future: [],
+      dirty: false,
+    })
+  },
+
+  exportSnapshot: (): PipelineSnapshot => {
+    const state = get()
+    return {
+      version: 1,
+      id: state.pipelineId,
+      name: state.pipelineName,
+      description: state.pipelineDescription,
+      createdAt: Date.now(), // caller may overwrite
+      updatedAt: Date.now(),
+      nodes: state.nodes.map((n) => ({
+        id: n.id,
+        type: (n.type ?? 'tool') as BioflowNodeType,
+        position: n.position,
+        data: n.data as ToolNodeData | FileNodeData | NoteNodeData,
+      })),
+      edges: state.edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        sourceHandle: e.sourceHandle ?? undefined,
+        target: e.target,
+        targetHandle: e.targetHandle ?? undefined,
+      })),
+    }
+  },
+
+  reset: () => {
+    set({
+      pipelineId: makeId('pipeline'),
+      pipelineName: 'Untitled pipeline',
+      pipelineDescription: '',
+      nodes: [],
+      edges: [],
+      selectedNodeId: null,
+      past: [],
+      future: [],
+      dirty: false,
+    })
+  },
+
+  setNodeStatus: (nodeId, status, jobId, error) => {
+    set((state) => ({
+      nodes: state.nodes.map((n) =>
+        n.id === nodeId && (n.type === 'tool' || n.type === 'merge')
+          ? {
+              ...n,
+              data: { ...(n.data as ToolNodeData | MergeNodeData), status, jobId, error } as BioflowNode['data'],
+            }
+          : n,
+      ),
+    }))
+  },
+}))
+
+/** Selector helper: find the currently selected node. */
+export function useSelectedNode(): BioflowNode | null {
+  return usePipelineStore((s) => {
+    if (!s.selectedNodeId) return null
+    return s.nodes.find((n) => n.id === s.selectedNodeId) ?? null
+  })
+}
