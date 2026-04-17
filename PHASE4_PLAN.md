@@ -1,6 +1,6 @@
 # BioFlow Studio — Phase 4 Implementation Plan
 
-**Status:** in progress (items 1, 2, 4, 6 shipped — visual polish, folder routing, jobs-panel fixes + summary card)
+**Status:** in progress (items 1, 2, 4, 5, 6, 7, 11, 15 shipped/mostly shipped; items 3, 13, 16, 17 partially shipped)
 **Depends on:** Phase 1 (SSH + file explorer + data preview + terminal), Phase 2 (pipeline canvas), Phase 3 (execution runtime + validation + jobs panel + SSH persistence)
 **Owner:** single-developer project
 
@@ -53,21 +53,21 @@ Phase 3's authoritative design doc is [PHASE3_PLAN.md](PHASE3_PLAN.md); shipped 
 | 1b  | Dialog body scrollability                     | ✅ shipped             |
 | 1c  | TopBar crowding (ResizeObserver + compact)    | ✅ shipped             |
 | 2   | Default analysis folder (per-connection)      | ✅ shipped (Browse button deferred) |
-| 3   | FileNode output rework (rename + folder)      | pending               |
+| 3   | FileNode output rework (rename + folder)      | partial — output FileNode sink paths now drive runtime destinations; filename/folder split UI still pending |
 | 4   | Per-node output folder override               | ✅ shipped             |
-| 5   | FileExplorer → canvas drag-drop               | pending               |
-| 6   | Jobs panel fixes + completed-job summary      | partial — summary + list-outputs shipped; stdout/stderr still empty (see 6.1 follow-up) |
-| 7   | Data previewer filter / column select / sort  | pending               |
+| 5   | FileExplorer → canvas drag-drop               | ✅ shipped (auto-connects to first compatible tool input; popover still future polish) |
+| 6   | Jobs panel fixes + completed-job summary      | ✅ shipped — selectable run history, summaries, output/log actions |
+| 7   | Data previewer filter / column select / sort  | ✅ shipped             |
 | 8   | Column mapping in tool inspector              | pending               |
 | 9   | Transform node (filter rows, select columns)  | pending               |
 | 10  | Re-run single failed node                     | pending               |
-| 11  | Script viewer / dry-run mode                  | pending               |
+| 11  | Script viewer / dry-run mode                  | ✅ shipped             |
 | 12  | Run history persistence + squeue reattach    | pending               |
-| 13  | Autosave + keyboard shortcuts + templates + notifications | pending   |
+| 13  | Autosave + keyboard shortcuts + templates + notifications | partial — keyboard shortcuts + import/templates shipped; autosave + notifications pending |
 | 14  | Validator warnings carry-over                 | pending               |
-| 15  | Log streaming follow-up (stdout/stderr still empty) | pending          |
-| 16  | Live Slurm queue view (squeue -u)             | pending               |
-| 17  | Concurrent runs — start another without waiting | pending             |
+| 15  | Log streaming follow-up (stdout/stderr still empty) | ✅ shipped — NodeRunState now carries log paths; terminal refresh uses SFTP |
+| 16  | Live Slurm queue view (squeue -u)             | partial — Jobs panel polls `squeue -u` while open; dedicated Queue tab still pending |
+| 17  | Concurrent runs — start another without waiting | partial — Run button no longer blocked by terminal runs; full per-pipeline badge isolation pending |
 | 18  | Multiple named pipelines (open/switch/new)    | pending               |
 
 ---

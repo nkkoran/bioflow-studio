@@ -29,6 +29,11 @@ import { MergeNode } from './nodes/MergeNode'
 import { DRAG_MIME } from './ToolPalette'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { inferFileType } from '@/lib/fileTypeInference'
+import { pathBasename } from '@/lib/utils'
+import type { FileType } from '@/types/pipeline'
+
+const FILE_DRAG_MIME = 'application/x-bioflow-path'
 
 const nodeTypes: NodeTypes = {
   tool: ToolNode,
@@ -55,6 +60,9 @@ function CanvasInner() {
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
   const undo = usePipelineStore((s) => s.undo)
   const redo = usePipelineStore((s) => s.redo)
+  const duplicateNode = usePipelineStore((s) => s.duplicateNode)
+  const copySelection = usePipelineStore((s) => s.copySelection)
+  const pasteClipboard = usePipelineStore((s) => s.pasteClipboard)
 
   /** Accept drop events from the tool palette */
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -66,12 +74,46 @@ function CanvasInner() {
     (event: React.DragEvent) => {
       event.preventDefault()
       const payload = event.dataTransfer.getData(DRAG_MIME)
-      if (!payload) return
+      const filePath = event.dataTransfer.getData(FILE_DRAG_MIME)
+      if (!payload && !filePath) return
 
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       })
+
+      if (filePath) {
+        const fileType = inferFileType(filePath) as FileType
+        const label = pathBasename(filePath)
+        const target = findDropTargetTool(nodes, position)
+        if (!target) {
+          addFileNode(position, { isInput: true, label, path: filePath, fileType })
+          return
+        }
+
+        const tool = getTool((target.data as any).toolId)
+        const port = tool?.inputs.find((candidate) => {
+          if (!areTypesCompatible(fileType, candidate.fileType)) return false
+          if (candidate.multi) return true
+          return !edges.some((edge) => edge.target === target.id && edge.targetHandle === candidate.id)
+        })
+        if (!port) {
+          addFileNode(position, { isInput: true, label, path: filePath, fileType })
+          return
+        }
+
+        const fileId = addFileNode(
+          { x: target.position.x - 220, y: target.position.y },
+          { isInput: true, label, path: filePath, fileType },
+        )
+        onConnect({
+          source: fileId,
+          sourceHandle: 'output',
+          target: target.id,
+          targetHandle: port.id,
+        })
+        return
+      }
 
       if (payload.startsWith('__special__:')) {
         const kind = payload.slice('__special__:'.length)
@@ -83,7 +125,7 @@ function CanvasInner() {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, addToolNode, addFileNode, addNoteNode, addMergeNode],
+    [screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, onConnect],
   )
 
   /**
@@ -148,11 +190,28 @@ function CanvasInner() {
         e.preventDefault()
         if (e.shiftKey) redo()
         else undo()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        const selected = usePipelineStore.getState().selectedNodeId
+        if (selected) duplicateNode(selected)
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'c') {
+        e.preventDefault()
+        copySelection()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'v') {
+        e.preventDefault()
+        pasteClipboard()
+        return
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [undo, redo])
+  }, [undo, redo, duplicateNode, copySelection, pasteClipboard])
 
   const defaultEdgeOptions = useMemo(
     () => ({
@@ -202,6 +261,23 @@ function CanvasInner() {
       </ReactFlow>
     </div>
   )
+}
+
+function findDropTargetTool(
+  nodes: ReturnType<typeof usePipelineStore.getState>['nodes'],
+  position: { x: number; y: number },
+) {
+  return nodes.find((node) => {
+    if (node.type !== 'tool') return false
+    const width = node.width ?? 220
+    const height = node.height ?? 140
+    return (
+      position.x >= node.position.x &&
+      position.x <= node.position.x + width &&
+      position.y >= node.position.y &&
+      position.y <= node.position.y + height
+    )
+  })
 }
 
 export function PipelineCanvas() {

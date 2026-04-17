@@ -27,6 +27,7 @@ import type {
   RunState,
   RunStatus,
   NodeRunState,
+  DryRunScript,
   ToolNodeData,
   MergeNodeData,
   FileNodeData,
@@ -151,6 +152,93 @@ export class PipelineRunner {
     void this.executeRun(runState, snapshot, plans, connectionDefaults, nodeSlugs)
 
     return { runId }
+  }
+
+  async generateScriptsDry(opts: StartOptions): Promise<DryRunScript[]> {
+    const { connectionId, snapshot } = opts
+    const connectionDefaults = await this.loadConnectionDefaults(connectionId)
+    const analysisFolder = this.loadAnalysisFolder(connectionId)
+    const home = await this.resolveHome(connectionId)
+    const runFolder = `${slugify(snapshot.name || 'pipeline')}-${timestampStamp()}`
+    const workRoot = analysisFolder
+      ? expandHome(analysisFolder, home)
+      : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`
+    const workDir = (opts.workDir ?? `${workRoot}/runs/${runFolder}`).replace(/\/+$/, '')
+    const nodeSlugs = buildNodeSlugs(snapshot)
+
+    topoSort(snapshot)
+    const plans = planAxes(snapshot, {
+      outputRoot: `${workDir}/outputs`,
+      getTool,
+      nodeSlug: (id) => nodeSlugs.get(id) ?? id,
+      homeDir: home,
+    })
+
+    const { order } = topoSort(snapshot)
+    const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
+    const scripts: DryRunScript[] = []
+
+    for (const nodeId of order) {
+      const node = nodeById.get(nodeId)
+      const plan = plans.get(nodeId)
+      if (!node || !plan || (node.type !== 'tool' && node.type !== 'merge')) continue
+
+      const slug = nodeSlugs.get(nodeId) ?? nodeId
+      const logDir = `${workDir}/logs`
+      const override = (node.data as ToolNodeData | MergeNodeData).outputDirOverride
+      const outputDir = resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home)
+
+      if (node.type === 'tool') {
+        const toolData = node.data as ToolNodeData
+        const tool = getTool(toolData.toolId)
+        if (!tool) throw new Error(`Unknown tool ${toolData.toolId}`)
+        const gen = generateToolScript({
+          nodeId,
+          nodeSlug: slug,
+          tool,
+          nodeData: toolData,
+          axisPlan: plan,
+          outputDir,
+          logDir,
+          connectionDefaults,
+        })
+        scripts.push({
+          nodeId,
+          label: toolData.label || tool.name,
+          mode: plan.mode,
+          script: gen.script,
+          outputPaths: collectOutputPaths(plan.outputs),
+          arraySize: gen.arraySize,
+        })
+      } else {
+        const mergeData = node.data as MergeNodeData
+        const inputVal = plan.inputs.input
+        if (!inputVal) throw new Error(`Merge node ${nodeId} has no input`)
+        const effective: MergeNodeData = {
+          ...mergeData,
+          strategy: plan.resolvedMergeStrategy ?? mergeData.strategy,
+        }
+        const gen = generateMergeScript({
+          nodeId,
+          nodeSlug: slug,
+          mergeData: effective,
+          resolvedInputs: inputVal,
+          upstreamFileType: plan.upstreamFileType ?? 'any',
+          outputDir,
+          logDir,
+          connectionDefaults,
+        })
+        scripts.push({
+          nodeId,
+          label: mergeData.label || 'Merge',
+          mode: plan.mode,
+          script: gen.script,
+          outputPaths: [gen.outputPath],
+        })
+      }
+    }
+
+    return scripts
   }
 
   /** Resolve `$HOME` on the remote host. Cached per-connection is overkill for

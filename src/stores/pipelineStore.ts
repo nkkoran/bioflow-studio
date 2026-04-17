@@ -45,6 +45,9 @@ interface PipelineState {
   /** Dirty flag (has unsaved changes) */
   dirty: boolean
 
+  /** Internal graph clipboard for copy/paste shortcuts. */
+  clipboard: HistoryEntry | null
+
   // --- actions ---
   setPipelineName: (name: string) => void
   setPipelineDescription: (desc: string) => void
@@ -62,6 +65,8 @@ interface PipelineState {
   deleteNode: (nodeId: string) => void
   deleteEdge: (edgeId: string) => void
   duplicateNode: (nodeId: string) => void
+  copySelection: () => void
+  pasteClipboard: () => void
 
   setSelectedNode: (nodeId: string | null) => void
 
@@ -114,6 +119,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   past: [],
   future: [],
   dirty: false,
+  clipboard: null,
 
   setPipelineName: (name) => set({ pipelineName: name, dirty: true }),
   setPipelineDescription: (description) => set({ pipelineDescription: description, dirty: true }),
@@ -285,6 +291,60 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     })
   },
 
+  copySelection: () => {
+    const state = get()
+    const selectedNodes = state.nodes.filter((node) => node.selected || node.id === state.selectedNodeId)
+    const selectedIds = new Set(selectedNodes.map((node) => node.id))
+    const selectedEdges = state.edges.filter((edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target))
+    if (selectedNodes.length === 0) return
+    set({
+      clipboard: {
+        nodes: selectedNodes,
+        edges: selectedEdges,
+      },
+    })
+  },
+
+  pasteClipboard: () => {
+    set((state) => {
+      if (!state.clipboard || state.clipboard.nodes.length === 0) return state
+      const idMap = new Map<string, string>()
+      const nodes = state.clipboard.nodes.map((node) => {
+        const id = makeId(node.type ?? 'node')
+        idMap.set(node.id, id)
+        return {
+          ...node,
+          id,
+          selected: true,
+          position: { x: node.position.x + 40, y: node.position.y + 40 },
+          data: { ...node.data } as BioflowNode['data'],
+        } as BioflowNode
+      })
+      const edges = state.clipboard.edges.flatMap((edge) => {
+        const source = idMap.get(edge.source)
+        const target = idMap.get(edge.target)
+        if (!source || !target) return []
+        return [{
+          ...edge,
+          id: makeId('edge'),
+          source,
+          target,
+          selected: false,
+        }]
+      })
+      return {
+        nodes: [
+          ...state.nodes.map((node) => ({ ...node, selected: false })),
+          ...nodes,
+        ],
+        edges: [...state.edges, ...edges],
+        selectedNodeId: nodes[0]?.id ?? state.selectedNodeId,
+        ...pushHistory(state),
+        dirty: true,
+      }
+    })
+  },
+
   setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
   undo: () => {
@@ -330,6 +390,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       past: [],
       future: [],
       dirty: false,
+      clipboard: null,
     })
   },
 

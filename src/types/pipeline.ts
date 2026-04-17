@@ -247,3 +247,12 @@ export interface RunState {
   /** Serialized as a plain record so it survives IPC. */
   nodes: Record<string, NodeRunState>
 }
+
+export interface DryRunScript {
+  nodeId: string
+  label: string
+  mode: 'single' | 'array' | 'fanIn' | 'skip'
+  script: string
+  outputPaths: string[]
+  arraySize?: number
+}

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { NodeRunState, PipelineSnapshot, RunState, RunStatus } from '../../src/types/pipeline'
+import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus } from '../../src/types/pipeline'
 
 // Types matching src/types/
 export interface ConnectionConfig {
@@ -187,6 +187,8 @@ const api = {
       ipcRenderer.invoke('pipeline:get-run', runId),
     listOutputs: (runId: string, nodeId: string): Promise<Array<{ name: string; path: string; size: number; modified: number }>> =>
       ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId }),
+    generateScriptsDry: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<DryRunScript[]> =>
+      ipcRenderer.invoke('pipeline:generate-scripts-dry', { connectionId, snapshot, workDir }),
     onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: RunStatus | 'idle'; jobId?: string; error?: string; node?: NodeRunState }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('pipeline:node-status', handler)

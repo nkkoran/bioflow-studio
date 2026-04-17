@@ -67,7 +67,7 @@ export function DataPreview() {
         )}
 
         {activeTab && !activeTab.loading && activeTab.data && activeTab.data.headers.length > 0 && (
-          <DataTable headers={activeTab.data.headers} rows={activeTab.data.rows} />
+          <DataTable filePath={activeTab.filePath} headers={activeTab.data.headers} rows={activeTab.data.rows} />
         )}
 
         {activeTab && !activeTab.loading && (!activeTab.data || activeTab.data.headers.length === 0) && (

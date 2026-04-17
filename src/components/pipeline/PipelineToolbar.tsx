@@ -9,7 +9,7 @@
  * anyway". If everything is clean the run starts immediately.
  */
 import { useState, useCallback } from 'react'
-import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle } from 'lucide-react'
+import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { usePipelineStore } from '@/stores/pipelineStore'
@@ -18,7 +18,9 @@ import { useRunStore } from '@/stores/runStore'
 import { classNames } from '@/lib/utils'
 import { ValidationBadge } from './ValidationBadge'
 import { validatePipeline, type ValidationIssue, type ValidationResult } from '@/lib/pipelineValidator'
-import type { PipelineSnapshot } from '@/types/pipeline'
+import type { DryRunScript, PipelineSnapshot } from '@/types/pipeline'
+import { ScriptPreviewModal } from './ScriptPreviewModal'
+import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -143,6 +145,8 @@ export function PipelineToolbar() {
   const [editingName, setEditingName] = useState(false)
   const [savedMessage, setSavedMessage] = useState<{ text: string; isError: boolean } | null>(null)
   const [running, setRunning] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [scriptPreview, setScriptPreview] = useState<DryRunScript[] | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
   const activeRunIsCancellable = activeRun?.status === 'queued' || activeRun?.status === 'running'
 
@@ -187,6 +191,41 @@ export function PipelineToolbar() {
     const snap = await window.api.store.get<any>(`pipeline:${pick.trim()}`)
     if (snap) loadSnapshot(snap)
     else flashMessage('Pipeline not found')
+  }, [dirty, loadSnapshot, flashMessage])
+
+  const handleImport = useCallback(async () => {
+    if (dirty && !confirm('Discard unsaved changes and import a pipeline?')) return
+    const path = await window.api.dialog.openFile({
+      filters: [{ name: 'BioFlow pipeline JSON', extensions: ['json', 'bioflow'] }],
+    })
+    if (!path) return
+    try {
+      const text = await window.api.local.read(path)
+      const snapshot = JSON.parse(text) as PipelineSnapshot
+      if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) {
+        throw new Error('File is not a BioFlow pipeline snapshot.')
+      }
+      loadSnapshot(snapshot)
+      flashMessage('Imported')
+    } catch (err: any) {
+      console.error('Import failed:', err)
+      flashMessage(`Import failed: ${err?.message ?? err}`, true)
+    }
+  }, [dirty, loadSnapshot, flashMessage])
+
+  const handleTemplate = useCallback(() => {
+    if (dirty && !confirm('Discard unsaved changes and load a template?')) return
+    const options = PIPELINE_TEMPLATES.map((template, index) => `${index + 1}. ${template.name} — ${template.description}`)
+    const pick = prompt(`Choose a template:\n${options.join('\n')}\n\nEnter number:`)
+    if (!pick) return
+    const idx = Number(pick.trim()) - 1
+    const template = PIPELINE_TEMPLATES[idx]
+    if (!template) {
+      flashMessage('Template not found', true)
+      return
+    }
+    loadSnapshot(instantiateTemplate(template))
+    flashMessage(`Loaded ${template.name}`)
   }, [dirty, loadSnapshot, flashMessage])
 
   const handleExport = useCallback(() => {
@@ -252,6 +291,37 @@ export function PipelineToolbar() {
       flashMessage(err?.message ?? String(err), true)
     }
   }, [exportSnapshot, flashMessage, activeConnectionId, submitRun])
+
+  const handlePreviewScripts = useCallback(async () => {
+    const snapshot = exportSnapshot()
+    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+    if (runnable.length === 0) { flashMessage('No tools to preview'); return }
+    if (!activeConnectionId) { flashMessage('No active connection', true); return }
+    if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Script preview requires an SSH connection', true); return }
+
+    let result
+    try {
+      result = validatePipeline(snapshot)
+    } catch (err: any) {
+      flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
+      return
+    }
+    if (result.errorCount > 0) {
+      setConfirmDialog({ result, snapshot })
+      return
+    }
+
+    setPreviewLoading(true)
+    try {
+      const scripts = await window.api.pipeline.generateScriptsDry(activeConnectionId, snapshot)
+      setScriptPreview(scripts)
+    } catch (err: any) {
+      console.error('Script preview failed:', err)
+      flashMessage(err?.message ?? String(err), true)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [activeConnectionId, exportSnapshot, flashMessage])
 
   const handleCancelRun = useCallback(async () => {
     if (!activeRunId || !activeRunIsCancellable) return
@@ -351,11 +421,25 @@ export function PipelineToolbar() {
             <FolderOpen size={14} />
           </button>
           <button
+            onClick={handleImport}
+            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            title="Import pipeline JSON"
+          >
+            <Download size={14} className="rotate-180" />
+          </button>
+          <button
             onClick={handleSave}
             className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
             title="Save pipeline"
           >
             <Save size={14} />
+          </button>
+          <button
+            onClick={handleTemplate}
+            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            title="Load template"
+          >
+            <LayoutTemplate size={14} />
           </button>
           <button
             onClick={handleExport}
@@ -366,6 +450,17 @@ export function PipelineToolbar() {
           </button>
 
           <div className="w-px h-5 bg-border mx-1" />
+
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handlePreviewScripts}
+            disabled={previewLoading}
+            className="h-7 px-2.5 text-xs"
+          >
+            <FileCode2 size={12} className="mr-1" />
+            {previewLoading ? 'Previewing...' : 'Preview'}
+          </Button>
 
           <Button
             variant="primary"
@@ -403,6 +498,9 @@ export function PipelineToolbar() {
             await submitRun(snapshot)
           }}
         />
+      )}
+      {scriptPreview && (
+        <ScriptPreviewModal scripts={scriptPreview} onClose={() => setScriptPreview(null)} />
       )}
     </>
   )

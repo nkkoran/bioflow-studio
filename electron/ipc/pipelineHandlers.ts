@@ -31,4 +31,11 @@ export function registerPipelineHandlers(): void {
   ipcMain.handle('pipeline:list-outputs', async (_event, args: { runId: string; nodeId: string }) => {
     return runner.listNodeOutputs(args.runId, args.nodeId)
   })
+
+  ipcMain.handle('pipeline:generate-scripts-dry', async (
+    _event,
+    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string },
+  ) => {
+    return runner.generateScriptsDry(args)
+  })
 }
