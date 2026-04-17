@@ -36,7 +36,7 @@ interface RunStoreState {
 
   /** Append streaming log chunks (called by subscribeToEvents). Ring-capped at 500 lines. */
   appendLog: (nodeId: string, chunk: string, stream: 'stdout' | 'stderr') => void
-  /** Replace a node's log buffer with fetched SFTP content (used by LogViewer Refresh). */
+  /** Merge a node's log buffer with fetched SFTP content (used by LogViewer Refresh). */
   setLog: (nodeId: string, stream: 'stdout' | 'stderr', lines: string[]) => void
   /** Clear log buffers — called on new run start to avoid stale output. */
   clearLogs: () => void
@@ -105,7 +105,8 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   setLog: (nodeId, stream, lines) => {
     set((state) => {
       const existing = state.logs[nodeId] ?? { stdout: [], stderr: [] }
-      const trimmed = lines.length > LOG_RING_SIZE ? lines.slice(lines.length - LOG_RING_SIZE) : lines
+      const merged = mergeFetchedLog(existing[stream], lines)
+      const trimmed = merged.length > LOG_RING_SIZE ? merged.slice(merged.length - LOG_RING_SIZE) : merged
       return { logs: { ...state.logs, [nodeId]: { ...existing, [stream]: trimmed } } }
     })
   },
@@ -126,22 +127,31 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     }
 
     const offNode = api.onNodeStatus
-      ? api.onNodeStatus(({ runId, nodeId, status, jobId, error }) => {
+      ? api.onNodeStatus(({ runId, nodeId, status, jobId, error, node }) => {
           // Mirror into the pipeline store so the canvas badge updates.
           const pipelineStore = usePipelineStore.getState()
-          pipelineStore.setNodeStatus(nodeId, status as any, jobId, error)
+          pipelineStore.setNodeStatus(
+            nodeId,
+            (node?.status ?? status) as any,
+            node?.jobId ?? jobId,
+            node ? node.error : error,
+          )
           // Update local run cache.
           set((state) => {
             const run = state.runs[runId]
             if (!run) return state
+            const previous = run.nodes[nodeId] ?? { nodeId, status: 'idle' }
+            const nextNode = {
+              ...previous,
+              ...(node ?? {}),
+              nodeId,
+              status: (node?.status ?? status) as any,
+              jobId: node?.jobId ?? jobId ?? previous.jobId,
+              error: node ? node.error : error,
+            }
             const nodes = {
               ...run.nodes,
-              [nodeId]: {
-                ...(run.nodes[nodeId] ?? { nodeId, status: 'idle' }),
-                status: status as any,
-                jobId: jobId ?? run.nodes[nodeId]?.jobId,
-                error,
-              },
+              [nodeId]: nextNode,
             }
             return { runs: { ...state.runs, [runId]: { ...run, nodes, updatedAt: Date.now() } } }
           })
@@ -167,3 +177,14 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     return () => { offNode(); offRun(); offLog() }
   },
 }))
+
+function mergeFetchedLog(existing: string[], fetched: string[]): string[] {
+  const existingText = existing.join('\n')
+  const fetchedText = fetched.join('\n')
+
+  if (!existingText) return fetched
+  if (!fetchedText) return existing
+  if (fetchedText.includes(existingText)) return fetched
+  if (existingText.includes(fetchedText)) return existing
+  return [...existing, ...fetched]
+}

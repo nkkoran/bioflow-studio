@@ -221,6 +221,8 @@ export interface NodeRunState {
   stderrPath?: string
   /** Absolute remote dir where this node's outputs land. */
   outputDir?: string
+  /** Absolute remote output files resolved for this node's output ports. */
+  outputPaths?: string[]
   submittedAt?: number
   startedAt?: number
   finishedAt?: number

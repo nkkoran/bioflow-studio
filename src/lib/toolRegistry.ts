@@ -231,11 +231,7 @@ export const TOOLS: ToolDef[] = [
     inputs: [{ id: 'input', label: 'Input', fileType: 'any', multi: true }],
     outputs: [{ id: 'output', label: 'Output', fileType: 'any' }],
     params: [
-      // `-c <script>` so bash evaluates the value as a command, not a file path.
-      // Without the flag the ScriptGenerator emits it as a positional arg, which
-      // bash treats as a script filename — the "echo \"Hello\": No such file"
-      // failure we hit on the first real run.
-      { name: 'script', flag: '-c', label: 'Shell script', type: 'string', required: true, placeholder: 'echo "Hello"' },
+      { name: 'script', label: 'Shell script', type: 'string', required: true, placeholder: 'cat "$INPUT"' },
     ],
     slurm: { cpus: 1, memoryGB: 4, timeHours: 1 },
   },

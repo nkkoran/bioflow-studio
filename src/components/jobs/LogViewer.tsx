@@ -75,7 +75,7 @@ export function LogViewer({ run, connectionId }: Props) {
     setError(null)
     try {
       const text = await window.api.sftp.read(connectionId, resolvedPath)
-      const lines = (text ?? '').split('\n')
+      const lines = text.length === 0 ? [] : text.split('\n')
       setLog(ns.nodeId, stream, lines)
     } catch (err: any) {
       const msg = String(err?.message ?? err)

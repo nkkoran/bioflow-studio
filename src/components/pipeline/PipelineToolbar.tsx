@@ -136,6 +136,7 @@ export function PipelineToolbar() {
 
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const activeRunId = useRunStore((s) => s.activeRunId)
+  const activeRun = useRunStore((s) => s.activeRunId ? s.runs[s.activeRunId] : null)
   const startRun = useRunStore((s) => s.startRun)
   const cancelRun = useRunStore((s) => s.cancelRun)
 
@@ -143,6 +144,7 @@ export function PipelineToolbar() {
   const [savedMessage, setSavedMessage] = useState<{ text: string; isError: boolean } | null>(null)
   const [running, setRunning] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
+  const activeRunIsCancellable = activeRun?.status === 'queued' || activeRun?.status === 'running'
 
   const flashMessage = useCallback((msg: string, isError = false) => {
     setSavedMessage({ text: msg, isError })
@@ -252,7 +254,7 @@ export function PipelineToolbar() {
   }, [exportSnapshot, flashMessage, activeConnectionId, submitRun])
 
   const handleCancelRun = useCallback(async () => {
-    if (!activeRunId) return
+    if (!activeRunId || !activeRunIsCancellable) return
     if (!confirm('Cancel this run? Submitted Slurm jobs will be cancelled.')) return
     try {
       await cancelRun(activeRunId)
@@ -261,7 +263,7 @@ export function PipelineToolbar() {
       console.error('Cancel failed:', err)
       flashMessage(`Cancel failed: ${err?.message ?? err}`)
     }
-  }, [activeRunId, cancelRun, flashMessage])
+  }, [activeRunId, activeRunIsCancellable, cancelRun, flashMessage])
 
   return (
     <>
@@ -369,13 +371,13 @@ export function PipelineToolbar() {
             variant="primary"
             size="sm"
             onClick={handleRun}
-            disabled={running || !!activeRunId}
+            disabled={running}
             className="h-7 px-2.5 text-xs"
           >
             <Play size={12} className="mr-1" />
             {running ? 'Starting...' : 'Run'}
           </Button>
-          {activeRunId && (
+          {activeRunId && activeRunIsCancellable && (
             <Button
               variant="ghost"
               size="sm"

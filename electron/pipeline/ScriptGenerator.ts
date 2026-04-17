@@ -101,6 +101,18 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     lines.push('')
   }
 
+  if (tool.id === 'custom.shell') {
+    lines.push(...renderCustomShellScript({
+      nodeData,
+      axisPlan,
+      outputDir,
+      slug,
+      isArray,
+    }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
   // Compose the command invocation.
   const cmdParts: string[] = [tool.command]
 
@@ -146,6 +158,68 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
 
   const outputs: Record<string, AxedValue> = axisPlan.outputs
   return { script: lines.join('\n'), outputs, arraySize }
+}
+
+function renderCustomShellScript(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+}): string[] {
+  const { nodeData, axisPlan, outputDir, slug, isArray } = opts
+  const script = String(nodeData.paramValues?.script ?? '').trim()
+  const input = axisPlan.inputs.input
+  const inputPaths =
+    !input ? []
+    : isArray && input.kind === 'array' ? [`$i_input`]
+    : input.kind === 'single' ? [input.path]
+    : input.paths
+  const output = resolveShellOutputPath(axisPlan, outputDir, slug, isArray)
+
+  const lines: string[] = []
+  lines.push('# --- BioFlow shell I/O ---')
+  lines.push(`OUTPUT_DIR=${shellQuote(outputDir)}`)
+  if (output) {
+    lines.push(`OUTPUT=${shellQuote(output)}`)
+  }
+  lines.push(`INPUTS=(${inputPaths.map(shellArrayValue).join(' ')})`)
+  lines.push('INPUT="${INPUTS[0]:-}"')
+  inputPaths.forEach((path, idx) => {
+    lines.push(`INPUT_${idx + 1}=${shellArrayValue(path)}`)
+  })
+  lines.push('set -- "${INPUTS[@]}"')
+  lines.push('')
+  lines.push('# Use $INPUT for the first connected file, "${INPUTS[@]}" for all inputs,')
+  lines.push('# and $OUTPUT for the node output file. Stdout is saved to $OUTPUT.')
+  if (output) {
+    lines.push('{')
+    lines.push(script || ':')
+    lines.push(`} > "$OUTPUT"`)
+  } else {
+    lines.push(script || ':')
+  }
+  return lines
+}
+
+function resolveShellOutputPath(
+  axisPlan: AxisPlan,
+  outputDir: string,
+  slug: string,
+  isArray: boolean,
+): string | null {
+  const outVal = axisPlan.outputs.output
+  if (!outVal) return null
+  if (isArray && outVal.kind === 'array') {
+    return pickPathExpr('output', outputDir, slug, 'any')
+  }
+  if (outVal.kind === 'single') return outVal.path
+  return outVal.paths[0] ?? null
+}
+
+function shellArrayValue(value: string): string {
+  if (value.startsWith('$')) return `"${value}"`
+  return shellQuote(value)
 }
 
 /** Build the --out / -o section. Uses the first output port's path. */

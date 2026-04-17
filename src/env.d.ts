@@ -72,10 +72,21 @@ interface Window {
       cancelNode: (runId: string, nodeId: string) => Promise<void>
       listRuns: () => Promise<import('./types/pipeline').RunState[]>
       getRun: (runId: string) => Promise<import('./types/pipeline').RunState | null>
-      listOutputs: (runId: string, nodeId: string) => Promise<Array<{ name: string; size: number; modified: number }>>
-      onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: import('./types/pipeline').RunStatus | 'idle'; jobId?: string; error?: string }) => void) => () => void
+      listOutputs: (runId: string, nodeId: string) => Promise<Array<{ name: string; path: string; size: number; modified: number }>>
+      onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: import('./types/pipeline').RunStatus | 'idle'; jobId?: string; error?: string; node?: import('./types/pipeline').NodeRunState }) => void) => () => void
       onRunStatus: (callback: (data: { runId: string; status: import('./types/pipeline').RunStatus }) => void) => () => void
       onJobLog: (callback: (data: { runId: string; nodeId: string; chunk: string; stream: 'stdout' | 'stderr' }) => void) => () => void
+    }
+    slurm: {
+      queue: (connectionId: string) => Promise<Array<{
+        jobId: string
+        name: string
+        state: string
+        elapsed: string
+        timeLimit: string
+        partition: string
+        reason: string
+      }>>
     }
   }
 }

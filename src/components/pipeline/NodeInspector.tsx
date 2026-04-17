@@ -103,6 +103,37 @@ function ParamField({
   }
 }
 
+function ShellScriptField({
+  value,
+  onChange,
+}: {
+  value: unknown
+  onChange: (v: unknown) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-text-secondary text-xs font-medium">
+        Shell script <span className="text-error">*</span>
+      </label>
+      <textarea
+        value={value === undefined || value === null ? '' : String(value)}
+        placeholder={'cat "$INPUT"'}
+        onChange={(e) => onChange(e.target.value)}
+        rows={7}
+        className="rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent resize-y font-mono leading-relaxed"
+      />
+      <div className="rounded-md border border-accent/20 bg-accent/5 px-2 py-1.5 text-[10px] text-text-secondary leading-relaxed">
+        Connected files are available as <code className="font-mono text-text-primary">$INPUT</code>,{' '}
+        <code className="font-mono text-text-primary">$INPUT_1</code>,{' '}
+        <code className="font-mono text-text-primary">$INPUT_2</code>, and{' '}
+        <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code> for all inputs. The node captures stdout into{' '}
+        <code className="font-mono text-text-primary">$OUTPUT</code>, so{' '}
+        <code className="font-mono text-text-primary">cat "$INPUT"</code> creates the output file.
+      </div>
+    </div>
+  )
+}
+
 function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const nodes = usePipelineStore((s) => s.nodes)
@@ -181,12 +212,22 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         </h4>
         <div className="flex flex-col gap-2">
           {tool.params.map((p) => (
-            <ParamField
-              key={p.name}
-              param={p}
-              value={data.paramValues[p.name]}
-              onChange={(v) => setParam(p.name, v)}
-            />
+            tool.id === 'custom.shell' && p.name === 'script'
+              ? (
+                  <ShellScriptField
+                    key={p.name}
+                    value={data.paramValues[p.name]}
+                    onChange={(v) => setParam(p.name, v)}
+                  />
+                )
+              : (
+                  <ParamField
+                    key={p.name}
+                    param={p}
+                    value={data.paramValues[p.name]}
+                    onChange={(v) => setParam(p.name, v)}
+                  />
+                )
           ))}
           {tool.params.length === 0 && (
             <div className="text-xs text-text-muted italic">No parameters</div>
@@ -415,11 +456,13 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
         onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
       />
       <div className="flex flex-col gap-1">
-        <label className="text-text-secondary text-xs font-medium">Remote path</label>
+        <label className="text-text-secondary text-xs font-medium">
+          {data.isInput ? 'Input file path' : 'Output destination path'}
+        </label>
         <div className="flex items-end gap-1.5">
           <Input
             value={data.path}
-            placeholder="/project/username/data/input.vcf.gz"
+            placeholder={data.isInput ? '/project/username/data/input.vcf.gz' : '/project/username/results/output.txt'}
             onChange={(e) => updateNodeData(nodeId, { path: e.target.value })}
             className="flex-1"
           />
@@ -428,6 +471,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             size="sm"
             className="h-8 px-2 shrink-0"
             title="Pick a file from the sidebar"
+            disabled={!data.isInput}
             onClick={() =>
               useUIStore.getState().startFilePick({
                 nodeId,
@@ -440,6 +484,11 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             Pick…
           </Button>
         </div>
+        {!data.isInput && (
+          <p className="text-[10px] text-text-muted">
+            Connect a tool output to this node to write that output here.
+          </p>
+        )}
       </div>
       <div className="flex flex-col gap-1">
         <label className="text-text-secondary text-xs font-medium">File type</label>

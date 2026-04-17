@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { PipelineSnapshot, RunState, RunStatus } from '../../src/types/pipeline'
+import type { NodeRunState, PipelineSnapshot, RunState, RunStatus } from '../../src/types/pipeline'
 
 // Types matching src/types/
 export interface ConnectionConfig {
@@ -48,6 +48,16 @@ export interface FileStat {
   modified: number
   isDirectory: boolean
   permissions: string
+}
+
+export interface SlurmQueueEntry {
+  jobId: string
+  name: string
+  state: string
+  elapsed: string
+  timeLimit: string
+  partition: string
+  reason: string
 }
 
 const api = {
@@ -175,9 +185,9 @@ const api = {
       ipcRenderer.invoke('pipeline:list-runs'),
     getRun: (runId: string): Promise<RunState | null> =>
       ipcRenderer.invoke('pipeline:get-run', runId),
-    listOutputs: (runId: string, nodeId: string): Promise<Array<{ name: string; size: number; modified: number }>> =>
+    listOutputs: (runId: string, nodeId: string): Promise<Array<{ name: string; path: string; size: number; modified: number }>> =>
       ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId }),
-    onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: RunStatus | 'idle'; jobId?: string; error?: string }) => void): (() => void) => {
+    onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: RunStatus | 'idle'; jobId?: string; error?: string; node?: NodeRunState }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('pipeline:node-status', handler)
       return () => ipcRenderer.removeListener('pipeline:node-status', handler)
@@ -192,6 +202,10 @@ const api = {
       ipcRenderer.on('pipeline:job-log', handler)
       return () => ipcRenderer.removeListener('pipeline:job-log', handler)
     },
+  },
+  slurm: {
+    queue: (connectionId: string): Promise<SlurmQueueEntry[]> =>
+      ipcRenderer.invoke('slurm:queue', connectionId),
   }
 }
 

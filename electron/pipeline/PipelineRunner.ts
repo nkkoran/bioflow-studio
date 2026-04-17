@@ -131,6 +131,12 @@ export class PipelineRunner {
         dirs.add(resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home))
       }
     }
+    for (const plan of plans.values()) {
+      if (plan.nodeType !== 'tool' && plan.nodeType !== 'merge') continue
+      for (const path of collectOutputPaths(plan.outputs)) {
+        dirs.add(pathDirname(path))
+      }
+    }
     const mkdirCmd = [...dirs].map((d) => `mkdir -p ${shellQuote(d)}`).join(' && ')
     await this.ssh.exec(connectionId, mkdirCmd)
 
@@ -160,8 +166,14 @@ export class PipelineRunner {
   async cancel(runId: string): Promise<void> {
     const run = this.runs.get(runId)
     if (!run) return
+    if (run.status === 'done' || run.status === 'failed' || run.status === 'cancelled') return
+
+    const nodes = Object.values(run.nodes)
+    const hasPendingWork = nodes.some((ns) => ns.status === 'idle' || ns.status === 'queued' || ns.status === 'running')
+    if (!hasPendingWork) return
+
     this.cancelledRuns.add(runId)
-    for (const ns of Object.values(run.nodes)) {
+    for (const ns of nodes) {
       if (ns.jobId && (ns.status === 'queued' || ns.status === 'running')) {
         await this.tracker.cancel(run.connectionId, ns.jobId)
       }
@@ -194,21 +206,36 @@ export class PipelineRunner {
   async listNodeOutputs(
     runId: string,
     nodeId: string,
-  ): Promise<Array<{ name: string; size: number; modified: number }>> {
+  ): Promise<Array<{ name: string; path: string; size: number; modified: number }>> {
     const run = this.runs.get(runId)
     if (!run) return []
     const ns = run.nodes[nodeId]
-    if (!ns?.outputDir) return []
+    if (!ns?.outputDir && !ns?.outputPaths?.length) return []
+    const byPath = new Map<string, { name: string; path: string; size: number; modified: number }>()
     try {
-      const entries = await this.sftp.ls(run.connectionId, ns.outputDir)
-      return entries
-        .filter((e) => !e.isDirectory)
-        .map((e) => ({ name: e.name, size: e.size, modified: e.modified }))
+      if (ns.outputDir) {
+        const entries = await this.sftp.ls(run.connectionId, ns.outputDir)
+        for (const e of entries.filter((entry) => !entry.isDirectory)) {
+          byPath.set(e.path, { name: e.name, path: e.path, size: e.size, modified: e.modified })
+        }
+      }
     } catch (err: any) {
       const msg = String(err?.message ?? err)
-      if (msg.includes('No such file') || msg.includes('code 2')) return []
-      throw err
+      if (!msg.includes('No such file') && !msg.includes('code 2')) throw err
     }
+    for (const path of ns.outputPaths ?? []) {
+      if (byPath.has(path)) continue
+      try {
+        const stat = await this.sftp.stat(run.connectionId, path)
+        if (!stat.isDirectory) {
+          byPath.set(path, { name: pathBasename(path), path, size: stat.size, modified: stat.modified })
+        }
+      } catch (err: any) {
+        const msg = String(err?.message ?? err)
+        if (!msg.includes('No such file') && !msg.includes('code 2')) throw err
+      }
+    }
+    return [...byPath.values()]
   }
 
   // ---- internals --------------------------------------------------------
@@ -320,6 +347,7 @@ export class PipelineRunner {
     await this.sftp.write(run.connectionId, scriptPath, script)
     ns.scriptPath = scriptPath
     ns.outputDir = outputDir
+    ns.outputPaths = collectOutputPaths(plan.outputs)
     ns.submittedAt = Date.now()
     ns.isArray = plan.mode === 'array'
     ns.arraySize = arraySize
@@ -354,6 +382,15 @@ export class PipelineRunner {
     ns.stderrPath = plan.mode === 'array'
       ? `${logDir}/${slug}-${jobId}_%a.err`
       : `${logDir}/${slug}-${jobId}.err`
+    console.debug('[PipelineRunner] submitted node', {
+      runId: run.runId,
+      nodeId: node.id,
+      slug,
+      jobId,
+      isArray: ns.isArray,
+      stdoutPath: ns.stdoutPath,
+      stderrPath: ns.stderrPath,
+    })
     this.emitNodeStatus(run.runId, node.id, 'queued', jobId)
 
     await new Promise<void>((resolve) => {
@@ -426,12 +463,13 @@ export class PipelineRunner {
   }
 
   private emitNodeStatus(runId: string, nodeId: string, status: RunStatus | 'idle', jobId?: string, error?: string): void {
-    const win = BrowserWindow.getAllWindows()[0]
-    if (win) {
-      win.webContents.send('pipeline:node-status', { runId, nodeId, status, jobId, error })
-    }
     const run = this.runs.get(runId)
     if (run) run.updatedAt = Date.now()
+    const node = run?.nodes[nodeId] ? { ...run.nodes[nodeId] } : undefined
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      win.webContents.send('pipeline:node-status', { runId, nodeId, status, jobId, error, node })
+    }
   }
 
   private emitRunStatus(runId: string, status: RunStatus): void {
@@ -479,6 +517,26 @@ function expandHome(path: string, home: string): string {
   if (p === '~') return home
   if (p.startsWith('~/')) return `${home}/${p.slice(2)}`
   return p
+}
+
+function collectOutputPaths(outputs: Record<string, { kind: string; path?: string; paths?: string[] }>): string[] {
+  const paths: string[] = []
+  for (const output of Object.values(outputs)) {
+    if (output.kind === 'single' && output.path) paths.push(output.path)
+    else if ((output.kind === 'array' || output.kind === 'multi') && output.paths) paths.push(...output.paths)
+  }
+  return paths
+}
+
+function pathDirname(path: string): string {
+  const idx = path.lastIndexOf('/')
+  if (idx <= 0) return '/'
+  return path.slice(0, idx)
+}
+
+function pathBasename(path: string): string {
+  const idx = path.lastIndexOf('/')
+  return idx === -1 ? path : path.slice(idx + 1)
 }
 
 function shellQuote(s: string): string {

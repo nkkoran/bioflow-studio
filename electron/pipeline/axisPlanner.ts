@@ -108,6 +108,30 @@ function outputPath(outputDir: string, slug: string, portId: string, key: string
   return `${outputDir}/${slug}.${portId}${keyPart}${ext}`
 }
 
+function outputPathFromTemplate(template: string, key: string | null): string {
+  if (key === null) return template
+  const slashIdx = template.lastIndexOf('/')
+  const dotIdx = template.lastIndexOf('.')
+  const insertIdx = dotIdx > slashIdx ? dotIdx : template.length
+  return `${template.slice(0, insertIdx)}.${key}${template.slice(insertIdx)}`
+}
+
+function connectedOutputSink(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  portId: string,
+): FileNodeData | null {
+  const edge = snapshot.edges.find(
+    (e) => e.source === nodeId && (e.sourceHandle ?? 'output') === portId,
+  )
+  if (!edge) return null
+  const target = snapshot.nodes.find((n) => n.id === edge.target)
+  if (!target || target.type !== 'file') return null
+  const data = target.data as FileNodeData
+  if (data.isInput || !data.path?.trim()) return null
+  return data
+}
+
 export interface PlannerContext {
   /** Absolute remote output directory for the run (used for output path convention). */
   outputRoot: string
@@ -242,7 +266,8 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const outExt = mergeOutputExt(resolvedStrategy)
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
       const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
-      const outPath = `${mergeOutDir}/${slug}.output${outExt}`
+      const sink = connectedOutputSink(snapshot, nodeId, 'output')
+      const outPath = sink?.path ?? `${mergeOutDir}/${slug}.output${outExt}`
       plans.set(nodeId, {
         nodeId,
         nodeType: 'merge',
@@ -328,17 +353,22 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
     const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
+      const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
       if (mode === 'array' && keys) {
         outputs[outPort.id] = {
           kind: 'array',
           axis: axis!,
           keys,
-          paths: keys.map((k) => outputPath(perNodeOutputDir, slug, outPort.id, k, outPort.fileType)),
+          paths: keys.map((k) =>
+            sink
+              ? outputPathFromTemplate(sink.path, k)
+              : outputPath(perNodeOutputDir, slug, outPort.id, k, outPort.fileType),
+          ),
         }
       } else {
         outputs[outPort.id] = {
           kind: 'single',
-          path: outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType),
+          path: sink?.path ?? outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType),
         }
       }
     }
