@@ -22,6 +22,7 @@ import { validatePipeline, type ValidationIssue, type ValidationResult } from '@
 import type { DryRunScript, PipelineSnapshot } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
+import { Dialog } from '@/components/ui/Dialog'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -150,6 +151,8 @@ export function PipelineToolbar() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [scriptPreview, setScriptPreview] = useState<DryRunScript[] | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
+  const [openPicker, setOpenPicker] = useState<Array<{ id: string; name: string }> | null>(null)
+  const [templatePicker, setTemplatePicker] = useState(false)
   const activeRunIsCancellable = activeRun?.status === 'queued' || activeRun?.status === 'running'
 
   const flashMessage = useCallback((msg: string, isError = false) => {
@@ -181,19 +184,21 @@ export function PipelineToolbar() {
     if (dirty && !confirm('Discard unsaved changes and open a pipeline?')) return
     const ids = (await window.api.store.get<string[]>('pipelines:ids')) ?? []
     if (ids.length === 0) { flashMessage('No saved pipelines'); return }
-    const options = await Promise.all(
+    const entries = await Promise.all(
       ids.map(async (id) => {
         const snap = await window.api.store.get<{ name: string; id: string }>(`pipeline:${id}`)
-        return snap ? `${snap.id}: ${snap.name}` : null
+        return snap ? { id: snap.id, name: snap.name } : null
       }),
     )
-    const filtered = options.filter((o): o is string => o !== null)
-    const pick = prompt(`Open pipeline:\n${filtered.join('\n')}\n\nEnter pipeline id:`)
-    if (!pick) return
-    const snap = await window.api.store.get<any>(`pipeline:${pick.trim()}`)
+    setOpenPicker(entries.filter((e): e is { id: string; name: string } => e !== null))
+  }, [dirty, flashMessage])
+
+  const confirmOpen = useCallback(async (id: string) => {
+    setOpenPicker(null)
+    const snap = await window.api.store.get<any>(`pipeline:${id}`)
     if (snap) loadSnapshot(snap)
-    else flashMessage('Pipeline not found')
-  }, [dirty, loadSnapshot, flashMessage])
+    else flashMessage('Pipeline not found', true)
+  }, [loadSnapshot, flashMessage])
 
   const handleImport = useCallback(async () => {
     if (dirty && !confirm('Discard unsaved changes and import a pipeline?')) return
@@ -217,18 +222,16 @@ export function PipelineToolbar() {
 
   const handleTemplate = useCallback(() => {
     if (dirty && !confirm('Discard unsaved changes and load a template?')) return
-    const options = PIPELINE_TEMPLATES.map((template, index) => `${index + 1}. ${template.name} — ${template.description}`)
-    const pick = prompt(`Choose a template:\n${options.join('\n')}\n\nEnter number:`)
-    if (!pick) return
-    const idx = Number(pick.trim()) - 1
+    setTemplatePicker(true)
+  }, [dirty])
+
+  const confirmTemplate = useCallback((idx: number) => {
+    setTemplatePicker(false)
     const template = PIPELINE_TEMPLATES[idx]
-    if (!template) {
-      flashMessage('Template not found', true)
-      return
-    }
+    if (!template) { flashMessage('Template not found', true); return }
     loadSnapshot(instantiateTemplate(template))
     flashMessage(`Loaded ${template.name}`)
-  }, [dirty, loadSnapshot, flashMessage])
+  }, [loadSnapshot, flashMessage])
 
   const handleExport = useCallback(() => {
     const snapshot = exportSnapshot()
@@ -504,6 +507,48 @@ export function PipelineToolbar() {
       {scriptPreview && (
         <ScriptPreviewModal scripts={scriptPreview} onClose={() => setScriptPreview(null)} />
       )}
+
+      <Dialog
+        open={openPicker !== null}
+        onClose={() => setOpenPicker(null)}
+        title="Open pipeline"
+      >
+        {openPicker && openPicker.length === 0 ? (
+          <div className="text-sm text-text-muted">No saved pipelines.</div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            {openPicker?.map((entry) => (
+              <button
+                key={entry.id}
+                onClick={() => void confirmOpen(entry.id)}
+                className="flex items-center justify-between gap-2 px-3 py-2 rounded border border-border-light hover:bg-bg-hover text-left"
+              >
+                <span className="text-sm text-text-primary truncate">{entry.name}</span>
+                <span className="text-[10px] font-mono text-text-muted shrink-0">{entry.id}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </Dialog>
+
+      <Dialog
+        open={templatePicker}
+        onClose={() => setTemplatePicker(false)}
+        title="Load template"
+      >
+        <div className="flex flex-col gap-1">
+          {PIPELINE_TEMPLATES.map((template, idx) => (
+            <button
+              key={template.id}
+              onClick={() => confirmTemplate(idx)}
+              className="flex flex-col gap-0.5 px-3 py-2 rounded border border-border-light hover:bg-bg-hover text-left"
+            >
+              <span className="text-sm text-text-primary">{template.name}</span>
+              <span className="text-[11px] text-text-muted">{template.description}</span>
+            </button>
+          ))}
+        </div>
+      </Dialog>
     </>
   )
 }

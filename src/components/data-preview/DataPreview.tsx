@@ -1,16 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { headFile } from '@/stores/fileStore'
 import { Tabs } from '@/components/ui/Tabs'
 import { DataTable } from './DataTable'
 import { detectDelimiter, parseTabularData } from './DelimiterDetector'
-import { Table2, Loader2 } from 'lucide-react'
+import { Table2, Loader2, AlertCircle } from 'lucide-react'
 
 export function DataPreview() {
   const { tabs, activeTabId, setActiveTab, closeTab, setTabData } = useDataPreviewStore()
   const loadingRef = useRef(new Set<string>())
+  const [errors, setErrors] = useState<Record<string, string>>({})
 
-  // Fetch data for any tab that is loading and hasn't been fetched yet
   useEffect(() => {
     for (const tab of tabs) {
       if (tab.loading && !tab.data && !loadingRef.current.has(tab.id)) {
@@ -21,11 +21,33 @@ export function DataPreview() {
         ;(async () => {
           try {
             const content = await headFile(filePath, 500)
+            if (content.length === 0) {
+              setErrors((prev) => ({ ...prev, [tabId]: 'File is empty.' }))
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t' })
+              return
+            }
+            // Crude binary-file guard: a run of null bytes or >5% non-printable chars
+            // usually means we opened something that isn't actually text.
+            const sample = content.slice(0, 4096)
+            const nonPrintable = sample.replace(/[\x20-\x7E\t\n\r]/g, '').length
+            if (sample.includes('\u0000') || nonPrintable / sample.length > 0.05) {
+              setErrors((prev) => ({
+                ...prev,
+                [tabId]: 'File appears to be binary and cannot be previewed as tabular data.',
+              }))
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t' })
+              return
+            }
             const delimiter = detectDelimiter(content)
             const { headers, rows } = parseTabularData(content, delimiter)
+            setErrors((prev) => {
+              const { [tabId]: _, ...rest } = prev
+              return rest
+            })
             setTabData(tabId, { headers, rows, delimiter })
-          } catch (err) {
-            console.error('Failed to load file:', err)
+          } catch (err: any) {
+            const message = err?.message ?? String(err)
+            setErrors((prev) => ({ ...prev, [tabId]: `Failed to load: ${message}` }))
             useDataPreviewStore.getState().setTabData(tabId, { headers: [], rows: [], delimiter: '\t' })
           } finally {
             loadingRef.current.delete(tabId)
@@ -71,8 +93,10 @@ export function DataPreview() {
         )}
 
         {activeTab && !activeTab.loading && (!activeTab.data || activeTab.data.headers.length === 0) && (
-          <div className="flex items-center justify-center h-full text-text-muted text-sm">
-            Failed to load file data
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-text-muted text-sm p-6 text-center">
+            <AlertCircle size={20} />
+            <span>{errors[activeTab.id] ?? 'No rows found in this file.'}</span>
+            <span className="text-[11px] text-text-muted/70 font-mono break-all">{activeTab.filePath}</span>
           </div>
         )}
       </div>

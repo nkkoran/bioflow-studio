@@ -102,7 +102,11 @@ function buildConnectOptions(config: ConnectionConfig): ConnectConfig {
       break
     }
     case 'password':
+      if (!config.password) {
+        throw new Error('Password auth selected but no password was provided')
+      }
       options.password = config.password
+      console.log(`[SSH] Password auth configured (password length: ${config.password.length})`)
       break
     case 'agent':
       options.agent = process.env.SSH_AUTH_SOCK

@@ -174,6 +174,55 @@ function ColumnParamField({
   )
 }
 
+/**
+ * Folder picker. Renders a text input + "Browse…" button that opens the
+ * FileExplorer directory-pick banner and writes the chosen path back via
+ * `onChange`.
+ */
+function FolderPickerField({
+  label,
+  value,
+  placeholder,
+  requesterLabel,
+  onChange,
+}: {
+  label: string
+  value: string
+  placeholder?: string
+  requesterLabel: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      {label && <label className="text-text-secondary text-xs font-medium">{label}</label>}
+      <div className="flex items-end gap-1.5">
+        <Input
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          className="flex-1"
+        />
+        <Button
+          variant="secondary"
+          size="sm"
+          className="h-8 px-2 shrink-0"
+          title="Browse folders in the sidebar"
+          onClick={() =>
+            useUIStore.getState().startFilePick({
+              target: 'directory',
+              requesterLabel,
+              onResolve: ({ path }) => onChange(path),
+            })
+          }
+        >
+          <Folder size={12} className="mr-1" />
+          Browse
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function ShellScriptField({
   value,
   onChange,
@@ -398,13 +447,12 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Output folder
         </h4>
-        <Input
-          type="text"
+        <FolderPickerField
+          label=""
           value={(data.outputDirOverride as string | undefined) ?? ''}
           placeholder="(default — run's outputs folder)"
-          onChange={(e) =>
-            updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })
-          }
+          requesterLabel={`${data.label} output folder`}
+          onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
         />
         <p className="text-[10px] text-text-muted mt-1">
           Absolute path or <code className="font-mono">~/…</code>. Applies to this node only.
@@ -618,12 +666,12 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               })
             }}
           />
-          <Input
+          <FolderPickerField
             label="Output folder"
             value={outputParts?.folder ?? ''}
             placeholder="(default — connected tool output folder)"
-            onChange={(e) => {
-              const folder = e.target.value
+            requesterLabel={`${data.label} output folder`}
+            onChange={(folder) => {
               const filename = outputParts?.filename ?? ''
               updateNodeData(nodeId, {
                 outputFilename: filename || undefined,
@@ -843,13 +891,12 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Output folder
         </h4>
-        <Input
-          type="text"
+        <FolderPickerField
+          label=""
           value={(data.outputDirOverride as string | undefined) ?? ''}
           placeholder="(default — run's outputs folder)"
-          onChange={(e) =>
-            updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })
-          }
+          requesterLabel={`${data.label} output folder`}
+          onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
         />
         <p className="text-[10px] text-text-muted mt-1">
           Absolute path or <code className="font-mono">~/…</code>. Applies to this merge only.
@@ -1161,13 +1208,15 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
         >
           {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
         </select>
-        <Input
-          type="text"
-          value={(data.outputDirOverride as string | undefined) ?? ''}
-          placeholder="(default — run's outputs folder)"
-          onChange={(e) => updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })}
-          className="mt-2"
-        />
+        <div className="mt-2">
+          <FolderPickerField
+            label=""
+            value={(data.outputDirOverride as string | undefined) ?? ''}
+            placeholder="(default — run's outputs folder)"
+            requesterLabel={`${data.label} output folder`}
+            onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
+          />
+        </div>
       </div>
 
       <div>

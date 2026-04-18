@@ -40,6 +40,7 @@ interface Props {
 export function LogViewer({ run, connectionId }: Props) {
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
   const setLog = useRunStore((s) => s.setLog)
+  const replaceLog = useRunStore((s) => s.replaceLog)
   const ns = selectedNodeId ? run.nodes[selectedNodeId] : null
 
   const [stream, setStream] = useState<Stream>('stdout')
@@ -50,11 +51,11 @@ export function LogViewer({ run, connectionId }: Props) {
   const scrollRef = useRef<HTMLPreElement>(null)
   const autoScrollRef = useRef(true)
 
-  // For non-array: subscribe to the live ring buffer. Use the module-level
-  // EMPTY_LINES constant so the selector returns a stable reference when the
-  // buffer is empty — a fresh `[]` here causes an infinite re-render loop.
+  // Subscribe to the ring buffer. Use the module-level EMPTY_LINES constant so
+  // the selector returns a stable reference when empty — a fresh `[]` here
+  // causes an infinite re-render loop under Zustand's reference equality.
   const logLines = useRunStore((s) =>
-    ns && !ns.isArray ? (s.logs[ns.nodeId]?.[stream] ?? EMPTY_LINES) : EMPTY_LINES,
+    ns ? (s.logs[ns.nodeId]?.[stream] ?? EMPTY_LINES) : EMPTY_LINES,
   ) as readonly string[]
 
   // The concrete log file path (null when not yet known or array-with-placeholder).
@@ -76,7 +77,10 @@ export function LogViewer({ run, connectionId }: Props) {
     try {
       const text = await window.api.sftp.read(connectionId, resolvedPath)
       const lines = text.length === 0 ? [] : text.split('\n')
-      setLog(ns.nodeId, stream, lines)
+      // Array jobs: each task has its own file — switching tasks must replace,
+      // not merge, or the previous task's output bleeds in.
+      if (ns.isArray) replaceLog(ns.nodeId, stream, lines)
+      else setLog(ns.nodeId, stream, lines)
     } catch (err: any) {
       const msg = String(err?.message ?? err)
       if (msg.includes('No such file') || msg.includes('code 2')) {
@@ -87,7 +91,14 @@ export function LogViewer({ run, connectionId }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [connectionId, resolvedPath, ns, stream, setLog])
+  }, [connectionId, resolvedPath, ns, stream, setLog, replaceLog])
+
+  // Clear the buffer instantly when the user switches array tasks so the
+  // prior task's output isn't visible while the SFTP fetch is in flight.
+  useEffect(() => {
+    if (ns?.isArray) replaceLog(ns.nodeId, stream, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdx, ns?.nodeId, stream])
 
   // Load via SFTP on initial selection AND when a non-array job transitions
   // into a terminal state — streaming (tail -F) may have ended before the

@@ -61,13 +61,24 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
 
   closeTab: (id) =>
     set((state) => {
+      const closing = state.tabs.find((t) => t.id === id)
       const filtered = state.tabs.filter((t) => t.id !== id)
       const wasActive = state.activeTabId === id
       const newActiveId = wasActive
         ? (filtered.length > 0 ? filtered[filtered.length - 1].id : null)
         : state.activeTabId
 
-      return { tabs: filtered, activeTabId: newActiveId }
+      // Drop per-file view state so reopening the file gives a clean slate.
+      // Schemas remain cached — they don't depend on user selections and are
+      // useful for the tool-inspector column picker (item 8).
+      if (!closing) return { tabs: filtered, activeTabId: newActiveId }
+      const filePath = closing.filePath
+      const stillOpen = filtered.some((t) => t.filePath === filePath)
+      if (stillOpen) return { tabs: filtered, activeTabId: newActiveId }
+      const { [filePath]: _vc, ...visibleColumns } = state.visibleColumns
+      const { [filePath]: _f, ...filters } = state.filters
+      const { [filePath]: _s, ...sort } = state.sort
+      return { tabs: filtered, activeTabId: newActiveId, visibleColumns, filters, sort }
     }),
 
   setActiveTab: (id) => set({ activeTabId: id }),

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, X } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { getQueueSnapshot, useSlurmQueueStore } from '@/stores/slurmQueueStore'
@@ -13,6 +13,7 @@ export function QueuePanel() {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [onlyBioFlow, setOnlyBioFlow] = useState(false)
   const [sortKey, setSortKey] = useState<'jobId' | 'name' | 'state' | 'elapsed' | 'partition'>('jobId')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 
   const snapshot = connectionId ? getQueueSnapshot(snapshots, connectionId) : null
   const ourJobIds = useMemo(() => {
@@ -30,17 +31,41 @@ export function QueuePanel() {
     void refreshQueue(connectionId)
   }, [connectionId, refreshQueue])
 
+  // Auto-refresh pauses while an error is set — otherwise a dead SSH
+  // connection produces a stream of error toasts every 10s. User can resume
+  // by clicking Refresh, which clears the error on next success.
   useEffect(() => {
     if (!autoRefresh || !connectionId || connectionId === LOCAL_CONNECTION_ID) return
+    if (snapshot?.error) return
     const timer = setInterval(() => void refreshQueue(connectionId), 10000)
     return () => clearInterval(timer)
-  }, [autoRefresh, connectionId, refreshQueue])
+  }, [autoRefresh, connectionId, refreshQueue, snapshot?.error])
 
   const rows = useMemo(() => {
     const base = snapshot?.entries ?? []
-    const filtered = onlyBioFlow ? base.filter((entry) => ourJobIds.has(entry.jobId.split('_')[0])) : base
-    return [...filtered].sort((a, b) => a[sortKey].localeCompare(b[sortKey], undefined, { numeric: true }))
-  }, [onlyBioFlow, ourJobIds, snapshot?.entries, sortKey])
+    const filtered = onlyBioFlow ? base.filter((entry) => isKnownJob(entry.jobId, ourJobIds)) : base
+    const sign = sortDir === 'asc' ? 1 : -1
+    return [...filtered].sort((a, b) => sign * a[sortKey].localeCompare(b[sortKey], undefined, { numeric: true }))
+  }, [onlyBioFlow, ourJobIds, snapshot?.entries, sortKey, sortDir])
+
+  const onSort = (key: typeof sortKey) => {
+    if (key === sortKey) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else { setSortKey(key); setSortDir('asc') }
+  }
+
+  // Only surface cancel on rows we submitted — scancel on arbitrary cluster jobs
+  // is a foot-gun. The parent id (pre-`_`) is what scancel expects.
+  const onCancel = async (jobId: string) => {
+    if (!connectionId) return
+    const parent = jobId.split('_')[0]
+    if (!confirm(`Cancel Slurm job ${parent}?`)) return
+    try {
+      await window.api.pipeline.cancelJob(connectionId, parent)
+      void refreshQueue(connectionId)
+    } catch (err: any) {
+      alert(`scancel failed: ${err?.message ?? err}`)
+    }
+  }
 
   if (!connectionId || connectionId === LOCAL_CONNECTION_ID) {
     return (
@@ -91,18 +116,19 @@ export function QueuePanel() {
                 ['partition', 'Partition'],
               ].map(([key, label]) => (
                 <th key={key} className="border-b border-border px-3 py-2 text-text-secondary">
-                  <button onClick={() => setSortKey(key as typeof sortKey)} className="hover:text-text-primary">
-                    {label}{sortKey === key ? ' ↑' : ''}
+                  <button onClick={() => onSort(key as typeof sortKey)} className="hover:text-text-primary">
+                    {label}{sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
                   </button>
                 </th>
               ))}
               <th className="border-b border-border px-3 py-2 text-text-secondary">Limit</th>
               <th className="border-b border-border px-3 py-2 text-text-secondary">Reason</th>
+              <th className="border-b border-border px-3 py-2 text-text-secondary w-10"></th>
             </tr>
           </thead>
           <tbody>
             {rows.map((entry) => {
-              const ours = ourJobIds.has(entry.jobId.split('_')[0])
+              const ours = isKnownJob(entry.jobId, ourJobIds)
               return (
                 <tr key={entry.jobId} className={ours ? 'bg-accent/5' : 'odd:bg-bg-primary even:bg-bg-secondary'}>
                   <td className="border-b border-border/50 px-3 py-1.5 font-mono text-text-primary">{entry.jobId}</td>
@@ -112,12 +138,23 @@ export function QueuePanel() {
                   <td className="border-b border-border/50 px-3 py-1.5 text-text-muted">{entry.partition}</td>
                   <td className="border-b border-border/50 px-3 py-1.5 text-text-muted font-mono">{entry.timeLimit}</td>
                   <td className="border-b border-border/50 px-3 py-1.5 text-text-muted">{entry.reason}</td>
+                  <td className="border-b border-border/50 px-3 py-1.5 text-right">
+                    {ours && (
+                      <button
+                        title="Cancel job (scancel)"
+                        onClick={() => void onCancel(entry.jobId)}
+                        className="p-1 rounded text-text-muted hover:text-error hover:bg-error/10"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </td>
                 </tr>
               )
             })}
             {!snapshot?.loading && rows.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-text-muted">
+                <td colSpan={8} className="px-3 py-8 text-center text-text-muted">
                   No queued jobs visible for this connection.
                 </td>
               </tr>
@@ -127,4 +164,11 @@ export function QueuePanel() {
       </div>
     </div>
   )
+}
+
+/** Match both `12345` and `12345_3` / `12345_[0-5]` forms against our known parent ids. */
+function isKnownJob(jobId: string, known: Set<string>): boolean {
+  if (known.has(jobId)) return true
+  const parent = jobId.split('_')[0]
+  return known.has(parent)
 }

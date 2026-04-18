@@ -39,9 +39,18 @@ interface PipelineState {
   /** Selected node id (for the inspector panel) */
   selectedNodeId: string | null
 
-  /** Undo/redo stacks */
+  /** Undo/redo stacks for the currently-active pipeline. */
   past: HistoryEntry[]
   future: HistoryEntry[]
+
+  /**
+   * Per-pipeline history cache. When the user switches pipelines (loadSnapshot),
+   * the outgoing pipeline's past/future are stashed here keyed by its id, and
+   * the incoming pipeline's stacks are restored if present. Memory is bounded
+   * per entry by HISTORY_LIMIT; we don't cap the number of cached pipelines
+   * because users rarely hold more than a handful.
+   */
+  historyByPipeline: Record<string, { past: HistoryEntry[]; future: HistoryEntry[] }>
 
   /** Dirty flag (has unsaved changes) */
   dirty: boolean
@@ -120,6 +129,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
 
   past: [],
   future: [],
+  historyByPipeline: {},
   dirty: false,
   clipboard: null,
 
@@ -407,17 +417,30 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       position: n.position,
       data: n.data as BioflowNode['data'],
     }))
-    set({
-      pipelineId: snapshot.id,
-      pipelineName: snapshot.name,
-      pipelineDescription: snapshot.description ?? '',
-      nodes,
-      edges: snapshot.edges,
-      selectedNodeId: null,
-      past: [],
-      future: [],
-      dirty: false,
-      clipboard: null,
+    set((state) => {
+      // Stash the outgoing pipeline's history, then restore the incoming one's
+      // if we've seen it before. Same-id reloads keep their stacks intact.
+      const nextCache =
+        state.pipelineId === snapshot.id
+          ? state.historyByPipeline
+          : {
+              ...state.historyByPipeline,
+              [state.pipelineId]: { past: state.past, future: state.future },
+            }
+      const restored = nextCache[snapshot.id] ?? { past: [], future: [] }
+      return {
+        pipelineId: snapshot.id,
+        pipelineName: snapshot.name,
+        pipelineDescription: snapshot.description ?? '',
+        nodes,
+        edges: snapshot.edges,
+        selectedNodeId: null,
+        past: restored.past,
+        future: restored.future,
+        historyByPipeline: nextCache,
+        dirty: false,
+        clipboard: null,
+      }
     })
   },
 

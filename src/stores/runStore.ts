@@ -39,6 +39,8 @@ interface RunStoreState {
   appendLog: (nodeId: string, chunk: string, stream: 'stdout' | 'stderr') => void
   /** Merge a node's log buffer with fetched SFTP content (used by LogViewer Refresh). */
   setLog: (nodeId: string, stream: 'stdout' | 'stderr', lines: string[]) => void
+  /** Replace a node's log buffer without merging — used when switching array tasks. */
+  replaceLog: (nodeId: string, stream: 'stdout' | 'stderr', lines: string[]) => void
   /** Clear log buffers — called on new run start to avoid stale output. */
   clearLogs: () => void
 
@@ -123,6 +125,14 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     })
   },
 
+  replaceLog: (nodeId, stream, lines) => {
+    set((state) => {
+      const existing = state.logs[nodeId] ?? { stdout: [], stderr: [] }
+      const trimmed = lines.length > LOG_RING_SIZE ? lines.slice(lines.length - LOG_RING_SIZE) : lines
+      return { logs: { ...state.logs, [nodeId]: { ...existing, [stream]: trimmed } } }
+    })
+  },
+
   clearLogs: () => set({ logs: {} }),
 
   subscribeToEvents: () => {
@@ -187,7 +197,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
             const run = state.runs[runId]
             if (!run) return state
             if (status === 'done' || status === 'failed' || status === 'cancelled') {
-              notifyRunFinished(runId, status)
+              notifyRunFinished(runId, status, run.pipelineName)
             }
             return { runs: { ...state.runs, [runId]: { ...run, status: status as RunStatus, updatedAt: Date.now() } } }
           })
@@ -230,10 +240,15 @@ function mergeFetchedLog(existing: string[], fetched: string[]): string[] {
   return [...existing, ...fetched]
 }
 
-function notifyRunFinished(runId: string, status: RunStatus): void {
+function notifyRunFinished(runId: string, status: RunStatus, pipelineName?: string): void {
   if (typeof window === 'undefined' || !('Notification' in window)) return
-  const title = status === 'done' ? 'BioFlow run finished' : status === 'failed' ? 'BioFlow run failed' : 'BioFlow run cancelled'
-  const body = `Run ${runId.slice(0, 8)} is ${status}.`
+  const name = pipelineName?.trim() || `Run ${runId.slice(0, 8)}`
+  const title = status === 'done'
+    ? `${name} finished`
+    : status === 'failed'
+      ? `${name} failed`
+      : `${name} cancelled`
+  const body = `Pipeline run is ${status}.`
   if (Notification.permission === 'granted') {
     new Notification(title, { body })
     return

@@ -30,6 +30,15 @@ export function JobsPanel() {
     () => Object.values(runs).sort((a, b) => b.createdAt - a.createdAt),
     [runs],
   )
+  // Group by status so the dropdown surfaces running / queued first.
+  const groupedRuns = useMemo(() => {
+    const groups: Record<string, RunState[]> = { running: [], queued: [], done: [], failed: [], cancelled: [], other: [] }
+    for (const r of sortedRuns) {
+      const bucket = groups[r.status] ? r.status : 'other'
+      groups[bucket].push(r)
+    }
+    return groups
+  }, [sortedRuns])
   const activeRun = activeRunId ? runs[activeRunId] : null
   const isRunning = activeRun?.status === 'running' || activeRun?.status === 'queued'
 
@@ -55,11 +64,19 @@ export function JobsPanel() {
           onChange={(e) => setActiveRun(e.target.value || null)}
           className="bg-bg-primary border border-border rounded px-2 py-0.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent min-w-[280px]"
         >
-          {sortedRuns.map((r) => (
-            <option key={r.runId} value={r.runId}>
-              {formatRunLabel(r)}
-            </option>
-          ))}
+          {(['running', 'queued', 'done', 'failed', 'cancelled', 'other'] as const).map((bucket) => {
+            const list = groupedRuns[bucket]
+            if (!list || list.length === 0) return null
+            return (
+              <optgroup key={bucket} label={bucket.toUpperCase()}>
+                {list.map((r) => (
+                  <option key={r.runId} value={r.runId}>
+                    {formatRunLabel(r)}
+                  </option>
+                ))}
+              </optgroup>
+            )
+          })}
         </select>
 
         {activeRun && (
@@ -203,13 +220,13 @@ function RunDetails({ run }: { run: RunState }) {
   )
 }
 
-function formatRunLabel(run: { runId: string; createdAt: number; workDir: string; status: string }): string {
+function formatRunLabel(run: { runId: string; createdAt: number; workDir: string; status: string; pipelineName?: string }): string {
   const d = new Date(run.createdAt)
   const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  // Extract the run folder name from workDir for a human label.
   const folder = run.workDir.split('/').pop() ?? run.runId.slice(0, 8)
-  return `${date} ${time}  •  ${folder}`
+  const name = run.pipelineName?.trim()
+  return name ? `${name}  •  ${date} ${time}` : `${date} ${time}  •  ${folder}`
 }
 
 function pad(n: number): string {

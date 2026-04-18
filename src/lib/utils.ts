@@ -55,7 +55,7 @@ export function getFileExtension(name: string): string {
  */
 export function isTabularFile(extension: string): boolean {
   const tabularExtensions = new Set([
-    'tsv', 'csv', 'txt', 'pheno', 'psam', 'fam', 'bim',
+    'tsv', 'csv', 'txt', 'pheno', 'psam', 'fam', 'bim', 'pvar', 'frq', 'afreq', 'assoc', 'qassoc', 'linear', 'logistic',
   ])
   return tabularExtensions.has(extension.toLowerCase())
 }

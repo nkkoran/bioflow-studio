@@ -8,7 +8,7 @@
  *   - Sync selection back to the store (for the Inspector)
  *   - Keyboard shortcuts: Delete (remove selection), Ctrl/Cmd+Z (undo), Shift+Ctrl/Cmd+Z (redo)
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -27,6 +27,7 @@ import { FileNode } from './nodes/FileNode'
 import { NoteNode } from './nodes/NoteNode'
 import { MergeNode } from './nodes/MergeNode'
 import { TransformNode } from './nodes/TransformNode'
+import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { DRAG_MIME } from './ToolPalette'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
@@ -67,6 +68,8 @@ function CanvasInner() {
   const copySelection = usePipelineStore((s) => s.copySelection)
   const pasteClipboard = usePipelineStore((s) => s.pasteClipboard)
 
+  const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
+
   /** Accept drop events from the tool palette */
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault()
@@ -95,25 +98,56 @@ function CanvasInner() {
         }
 
         const tool = getTool((target.data as any).toolId)
-        const port = tool?.inputs.find((candidate) => {
-          if (!areTypesCompatible(fileType, candidate.fileType)) return false
-          if (candidate.multi) return true
-          return !edges.some((edge) => edge.target === target.id && edge.targetHandle === candidate.id)
-        })
-        if (!port) {
+        if (!tool || tool.inputs.length === 0) {
           addFileNode(position, { isInput: true, label, path: filePath, fileType })
           return
         }
 
-        const fileId = addFileNode(
-          { x: target.position.x - 220, y: target.position.y },
-          { isInput: true, label, path: filePath, fileType },
+        const occupied = new Set<string>(
+          edges.filter((edge) => edge.target === target.id && edge.targetHandle)
+            .map((edge) => edge.targetHandle as string),
         )
-        onConnect({
-          source: fileId,
-          sourceHandle: 'output',
-          target: target.id,
-          targetHandle: port.id,
+
+        const attach = (portId: string) => {
+          const fileId = addFileNode(
+            { x: target.position.x - 220, y: target.position.y },
+            { isInput: true, label, path: filePath, fileType },
+          )
+          onConnect({
+            source: fileId,
+            sourceHandle: 'output',
+            target: target.id,
+            targetHandle: portId,
+          })
+        }
+
+        const compatible = tool.inputs.filter((candidate) => {
+          if (!areTypesCompatible(fileType, candidate.fileType)) return false
+          if (candidate.multi) return true
+          return !occupied.has(candidate.id)
+        })
+
+        if (compatible.length === 0) {
+          addFileNode(position, { isInput: true, label, path: filePath, fileType })
+          return
+        }
+
+        if (compatible.length === 1) {
+          attach(compatible[0].id)
+          return
+        }
+
+        setPortPicker({
+          x: event.clientX,
+          y: event.clientY,
+          ports: tool.inputs,
+          droppedType: fileType,
+          occupiedPortIds: occupied,
+          onPick: (portId) => {
+            setPortPicker(null)
+            attach(portId)
+          },
+          onDismiss: () => setPortPicker(null),
         })
         return
       }
@@ -268,6 +302,7 @@ function CanvasInner() {
           style={{ background: 'var(--color-bg-secondary)' }}
         />
       </ReactFlow>
+      {portPicker && <PortPickerPopover state={portPicker} />}
     </div>
   )
 }

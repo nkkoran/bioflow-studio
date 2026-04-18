@@ -4,6 +4,7 @@ import { ConnectionDialog } from './ConnectionDialog'
 import { Wifi, WifiOff, ChevronDown, Settings, Server } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { useUIStore } from '@/stores/uiStore'
 
 interface ConnectionStatusProps {
   /** When true, collapse to an icon-only pill (used in narrow TopBar widths). */
@@ -282,12 +283,32 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
         onChange={(e) => setPartition(e.target.value)}
         placeholder="(optional)"
       />
-      <Input
-        label="Default analysis folder"
-        value={analysisFolder}
-        onChange={(e) => setAnalysisFolder(e.target.value)}
-        placeholder="(optional, e.g. /scratch/username/bioflow)"
-      />
+      <div className="flex flex-col gap-1">
+        <label className="text-text-secondary text-xs font-medium">Default analysis folder</label>
+        <div className="flex items-end gap-1.5">
+          <Input
+            value={analysisFolder}
+            onChange={(e) => setAnalysisFolder(e.target.value)}
+            placeholder="(optional, e.g. /scratch/username/bioflow)"
+            className="flex-1"
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 px-2 shrink-0"
+            title="Browse folders in the sidebar"
+            onClick={() =>
+              useUIStore.getState().startFilePick({
+                target: 'directory',
+                requesterLabel: 'Default analysis folder',
+                onResolve: ({ path }) => setAnalysisFolder(path),
+              })
+            }
+          >
+            Browse
+          </Button>
+        </div>
+      </div>
       <div className="flex items-center gap-2 mt-1">
         <Button variant="primary" size="sm" onClick={save} className="h-7 px-3 text-xs">
           Save

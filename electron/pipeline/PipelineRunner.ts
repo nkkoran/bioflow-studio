@@ -118,6 +118,7 @@ export class PipelineRunner {
     const runState: RunState = {
       runId,
       pipelineId: snapshot.id,
+      pipelineName: snapshot.name,
       connectionId,
       workDir,
       homeDir: home,
@@ -305,6 +306,14 @@ export class PipelineRunner {
     await this.tracker.cancel(run.connectionId, ns.jobId)
   }
 
+  /**
+   * Cancel a slurm job by id without requiring a runId/nodeId lookup. Used by
+   * the Queue panel where the user sees raw squeue output and acts on a row.
+   */
+  async cancelJobId(connectionId: string, jobId: string): Promise<void> {
+    await this.tracker.cancel(connectionId, jobId)
+  }
+
   async rerunNode(runId: string, nodeId: string, snapshot: PipelineSnapshot): Promise<void> {
     const run = this.runs.get(runId)
     if (!run) throw new Error(`Run ${runId} not found`)
@@ -375,7 +384,7 @@ export class PipelineRunner {
         this.tracker.watch({
           connectionId: run.connectionId,
           jobId: ns.jobId,
-          isArray: ns.isArray,
+          isArray: !!ns.isArray,
           onStart: () => {
             ns.status = 'running'
             ns.startedAt = ns.startedAt ?? Date.now()

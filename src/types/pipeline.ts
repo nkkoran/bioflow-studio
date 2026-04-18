@@ -285,6 +285,8 @@ export interface NodeRunState {
 export interface RunState {
   runId: string
   pipelineId: string
+  /** Human-readable pipeline name captured at submit time; survives rename. */
+  pipelineName?: string
   connectionId: string
   workDir: string
   /** Resolved `$HOME` on the remote — used to expand `~` in user-supplied path overrides. */

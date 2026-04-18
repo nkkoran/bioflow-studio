@@ -925,3 +925,60 @@ Run a short job; confirm the system notification appears on completion and click
 - Container support (Singularity / Apptainer autoloading).
 - Windows installer polish and code signing.
 - Schema inference for headerless files (item 8 requires a header row).
+
+---
+
+## Post-MVP bugfix pass (2026-04-17)
+
+A review pass after the Phase 4 features landed. Every item below is shipped.
+
+### SSH
+- `SshManager.buildConnectOptions`: password case now rejects an empty password explicitly with a clear error, and logs password length (not the value) so `console.log` confirms the secret reached `ssh2`. Prior behavior silently passed `undefined`, which the server interpreted as "try next method" and led to confusing "permission denied" errors.
+- `ConnectionDialog`: MFA/TOTP hint now shows for password-auth too. Alliance Canada's TOTP prompt is labelled "Password:" — users were entering their cluster password into the 2FA prompt.
+
+### Data preview
+- `DelimiterDetector.stripMetaComments`: VCF/PLINK `##` header blocks are stripped before delimiter detection and before parsing. Without this, `##contig=<ID=chr1,length=248956422>` lines tipped the auto-detector toward `,`.
+- `DelimiterDetector.splitLine`: RFC-4180 quoted-field aware. CSVs exported from R/pandas/Excel with quoted string values parse correctly (e.g. `"Doe, John",30`).
+- `DelimiterDetector.detectDelimiter`: samples up to 20 non-meta lines (was 5) for better signal on sparse files.
+- `getColumnSummary`: guards `Math.min(...numericValues)` on empty arrays so all-null numeric columns no longer render `Infinity`.
+- `DataPreview.tsx`: empty files and binary files (detected via null-byte / non-printable-ratio heuristic) now show a specific message instead of a generic failure.
+- `utils.ts`: `isTabularFile` now includes `pvar` so PLINK2 variant tables preview cleanly.
+- `dataPreviewStore.closeTab`: per-file `visibleColumns`/`filters`/`sort` are dropped when the last tab for a file closes — reopening gives a clean slate. Schemas stay cached for the tool-inspector column picker.
+
+### Jobs / logs
+- `runStore.replaceLog`: new action that replaces a node's buffer without running `mergeFetchedLog`. Used when the user switches array tasks — otherwise task N's file content was concatenated with task N-1's.
+- `LogViewer.tsx`: dropped the `!ns.isArray` gate in the selector. Array-job buffers now render. Previously `logLines` was always `EMPTY_LINES` for array jobs even after `sftpRefresh` populated the store — users saw a blank pane forever.
+- `LogViewer.tsx`: task-index change now calls `replaceLog(..., [])` so the previous task's output disappears immediately instead of briefly showing during the SFTP round-trip.
+- `LogViewer.tsx`: `sftpRefresh` routes array-job reads through `replaceLog`; non-array reads still go through `setLog` so the merge-with-streaming logic continues to work.
+
+### Queue
+- `QueuePanel.tsx`: sort direction is now tracked separately. Click a column header a second time to toggle asc/desc; the arrow updates accordingly. Previously every column header showed ` ↑` regardless of direction.
+- `QueuePanel.tsx`: `isKnownJob(jobId, known)` helper replaces the inline `split('_')[0]` check. Handles `12345`, `12345_3`, and `12345_[0-5]` forms against the set of parent ids we've submitted.
+- `QueuePanel.tsx` + `QueueDetails.tsx`: auto-refresh pauses while `snapshot.error` is set. A dead SSH connection no longer spams `squeue` failures every 10 seconds; the user's next click on Refresh clears the error on success and auto-refresh resumes.
+
+### Build
+- `PipelineRunner.reattachPersistedJobs`: coerce `ns.isArray` with `!!` before passing to `tracker.watch` (the watch signature expects `boolean`, not `boolean | undefined`). Unblocks `tsc -p tsconfig.node.json --noEmit`.
+
+---
+
+## Post-MVP bugfix pass (2026-04-18)
+
+Second review pass — the smaller UX gaps surfaced once real-world usage began.
+
+### Pipeline authoring
+- `PipelineCanvas.onDrop` + new `PortPickerPopover.tsx`: drops from the file explorer now resolve deterministically. Zero compatible ports → standalone `FileNode`; exactly one → auto-attach; multiple → popover listing ports with incompatible types and occupied non-`multi` ports disabled. Previously a drop onto a multi-input tool just silently picked the first port.
+- `pipelineStore`: undo/redo history is now keyed by `pipelineId`. `historyByPipeline` caches past/future on every `loadSnapshot`, so switching between saved pipelines no longer wipes the undo stack of the outgoing one.
+- `PipelineToolbar`: Open and New-from-template now use a proper `<Dialog>` list instead of `prompt()` (the numeric index was a terrible UX). Both dialogs list entries as clickable rows.
+- `NodeInspector` / `SlurmSettings` / output-folder fields: all Browse buttons now wire to `window.api.dialog.openDirectory` with the current value as `defaultPath`.
+
+### Jobs panel
+- `JobsPanel.formatRunLabel` + run dropdown: runs now group by status via `<optgroup>` (RUNNING / QUEUED / DONE / FAILED / CANCELLED), and the label includes the pipeline name captured at submit time. Previously a long list of unlabeled run-ids was the only way to pick a past run.
+- `RunState.pipelineName`: new optional field populated in `PipelineRunner.start` from the snapshot name. Survives pipeline rename because it's captured at submit time. Persisted via the existing JSONL run store.
+- `runStore.notifyRunFinished`: system notification title now reads `${pipelineName} finished` / `failed` / `cancelled` with an `${runId} slice` fallback when the name is missing.
+
+### Queue
+- `QueuePanel`: per-row cancel action (X button) for jobs we submitted. Splits `12345_3` → `12345` before calling `scancel`. Kept off non-BioFlow jobs — mass-cancel on arbitrary cluster jobs is a foot-gun.
+- `electron/ipc/pipelineHandlers` + `PipelineRunner.cancelJobId`: new IPC `pipeline:cancel-job` routes to `JobTracker.cancel` without requiring a runId (the queue can show reattached jobs whose parent run is no longer in memory).
+
+### Types
+- `src/env.d.ts`: pipeline block now declares `cancelJob`. Note that `window.api` is typed via this hand-maintained interface, not inferred from preload's `typeof api` — future preload additions must be mirrored here.

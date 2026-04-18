@@ -387,10 +387,11 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
         />
 
         {/* HPC MFA note */}
-        {form.authMethod === 'key' && (
+        {(form.authMethod === 'key' || form.authMethod === 'password') && (
           <div className="px-3 py-2 rounded-md bg-accent/10 border border-accent/20 text-text-secondary text-xs">
             <strong className="text-accent">HPC clusters with MFA:</strong> If your server requires multi-factor authentication
             (e.g., Compute Canada / Alliance), you'll be prompted for your verification code after clicking Connect.
+            {form.authMethod === 'password' && ' Note: on Alliance Canada, the "Password:" prompt in the dialog actually wants your TOTP code, not your account password.'}
           </div>
         )}
 

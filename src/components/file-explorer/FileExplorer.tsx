@@ -143,9 +143,10 @@ export function FileExplorer() {
 
   const handlePreview = useCallback(
     (entry: RemoteFileEntry) => {
-      // File-picker hand-off takes priority over preview: if a node is waiting
-      // for a file pick, resolve it with the clicked entry and exit pick mode.
-      if (filePickMode.active && !entry.isDirectory) {
+      // File-pick hand-off: take priority over preview when we're in a file-pick
+      // and the user clicked a file. Directory-pick mode intentionally ignores
+      // file clicks — the user selects via the banner's "Select this folder".
+      if (filePickMode.active && filePickMode.target === 'file' && !entry.isDirectory) {
         resolveFilePick(entry.path, inferFileType(entry.name))
         return
       }
@@ -156,7 +157,7 @@ export function FileExplorer() {
         selectFile(entry.path)
       }
     },
-    [filePickMode.active, resolveFilePick, openPreview, clearSelection, selectFile],
+    [filePickMode.active, filePickMode.target, resolveFilePick, openPreview, clearSelection, selectFile],
   )
 
   // Escape cancels an active pick.
@@ -202,12 +203,22 @@ export function FileExplorer() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Pick-mode banner — shown when a pipeline node is waiting for a file. */}
+      {/* Pick-mode banner — file or directory. */}
       {filePickMode.active && (
         <div className="border-b border-accent bg-accent/10 px-3 py-1.5 flex items-center gap-2">
           <span className="text-xs text-text-primary flex-1 truncate">
-            Click a file to use for {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
+            {filePickMode.target === 'directory' ? 'Navigate to a folder and click Select for ' : 'Click a file to use for '}
+            {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
           </span>
+          {filePickMode.target === 'directory' && (
+            <button
+              onClick={() => resolveFilePick(cwd)}
+              className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
+              title="Use the current folder"
+            >
+              Select this folder
+            </button>
+          )}
           <button
             onClick={cancelFilePick}
             className="text-[10px] text-text-secondary hover:text-text-primary underline"

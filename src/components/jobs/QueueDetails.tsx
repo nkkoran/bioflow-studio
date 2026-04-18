@@ -30,9 +30,17 @@ export function QueueDetails({ run }: Props) {
   useEffect(() => {
     if (!run.connectionId) return
     void refreshQueue(run.connectionId)
+  }, [run.connectionId, refreshQueue])
+
+  // Pause auto-refresh when the last fetch errored — avoids spamming a dead
+  // SSH connection every 10s. User-initiated Refresh still works and clears
+  // the error on success.
+  useEffect(() => {
+    if (!run.connectionId) return
+    if (snapshot.error) return
     const timer = setInterval(() => void refreshQueue(run.connectionId), 10_000)
     return () => clearInterval(timer)
-  }, [run.connectionId, refreshQueue])
+  }, [run.connectionId, refreshQueue, snapshot.error])
 
   return (
     <div className="border-b border-border-light bg-bg-secondary/50 shrink-0">
