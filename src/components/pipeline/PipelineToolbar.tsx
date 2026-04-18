@@ -16,6 +16,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useRunStore } from '@/stores/runStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
 import { ValidationBadge } from './ValidationBadge'
 import { validatePipeline, type ValidationIssue, type ValidationResult } from '@/lib/pipelineValidator'
@@ -23,6 +24,7 @@ import type { DryRunScript, PipelineSnapshot } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import { Dialog } from '@/components/ui/Dialog'
+import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -136,6 +138,7 @@ export function PipelineToolbar() {
   const reset = usePipelineStore((s) => s.reset)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const loadSnapshot = usePipelineStore((s) => s.loadSnapshot)
+  const markSaved = usePipelineStore((s) => s.markSaved)
   const nodes = usePipelineStore((s) => s.nodes)
   const schemas = useDataPreviewStore((s) => s.schemas)
 
@@ -143,6 +146,8 @@ export function PipelineToolbar() {
   const activeRunId = useRunStore((s) => s.activeRunId)
   const activeRun = useRunStore((s) => s.activeRunId ? s.runs[s.activeRunId] : null)
   const startRun = useRunStore((s) => s.startRun)
+  const settings = useSettingsStore((s) => s.settings)
+  const confirmOnLoginNodeRun = useSettingsStore((s) => s.settings.confirmOnLoginNodeRun)
   const cancelRun = useRunStore((s) => s.cancelRun)
 
   const [editingName, setEditingName] = useState(false)
@@ -168,17 +173,14 @@ export function PipelineToolbar() {
   const handleSave = useCallback(async () => {
     const snapshot = exportSnapshot()
     try {
-      await window.api.store.set(`pipeline:${snapshot.id}`, snapshot)
-      const existing = (await window.api.store.get<string[]>('pipelines:ids')) ?? []
-      if (!existing.includes(snapshot.id)) {
-        await window.api.store.set('pipelines:ids', [...existing, snapshot.id])
-      }
+      await savePipelineSnapshot(snapshot)
+      markSaved()
       flashMessage('Saved')
     } catch (err) {
       console.error('Save failed:', err)
       flashMessage('Save failed')
     }
-  }, [exportSnapshot, flashMessage])
+  }, [exportSnapshot, flashMessage, markSaved])
 
   const handleOpen = useCallback(async () => {
     if (dirty && !confirm('Discard unsaved changes and open a pipeline?')) return
@@ -249,6 +251,11 @@ export function PipelineToolbar() {
   const submitRun = useCallback(async (snapshot: PipelineSnapshot) => {
     if (!activeConnectionId) { flashMessage('No active connection', true); return }
     if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
+    const loginNodes = snapshot.nodes.filter((node) => node.type === 'tool' && (node.data as any).executionMode === 'login')
+    if (confirmOnLoginNodeRun && loginNodes.length > 0) {
+      const ok = confirm(`This run includes ${loginNodes.length} login-node tool${loginNodes.length === 1 ? '' : 's'}. Continue?`)
+      if (!ok) return
+    }
     setRunning(true)
     try {
       const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
@@ -260,7 +267,7 @@ export function PipelineToolbar() {
     } finally {
       setRunning(false)
     }
-  }, [activeConnectionId, startRun, flashMessage])
+  }, [activeConnectionId, startRun, flashMessage, confirmOnLoginNodeRun])
 
   const handleRun = useCallback(async () => {
     try {
@@ -276,7 +283,7 @@ export function PipelineToolbar() {
       // left the toolbar in an inconsistent state.
       let result
       try {
-        result = validatePipeline(snapshot, { schemas })
+        result = validatePipeline(snapshot, { schemas, annotationDefaults: { annovarDbPath: settings.annovarDbPath, vepCachePath: settings.vepCachePath } })
       } catch (err: any) {
         console.error('[PipelineToolbar] validatePipeline threw:', err)
         flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
@@ -295,7 +302,7 @@ export function PipelineToolbar() {
       console.error('[PipelineToolbar] handleRun threw:', err)
       flashMessage(err?.message ?? String(err), true)
     }
-  }, [exportSnapshot, flashMessage, activeConnectionId, submitRun, schemas])
+  }, [exportSnapshot, flashMessage, activeConnectionId, submitRun, schemas, settings.annovarDbPath, settings.vepCachePath])
 
   const handlePreviewScripts = useCallback(async () => {
     const snapshot = exportSnapshot()
@@ -306,7 +313,7 @@ export function PipelineToolbar() {
 
     let result
     try {
-      result = validatePipeline(snapshot, { schemas })
+      result = validatePipeline(snapshot, { schemas, annotationDefaults: { annovarDbPath: settings.annovarDbPath, vepCachePath: settings.vepCachePath } })
     } catch (err: any) {
       flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
       return
@@ -326,7 +333,7 @@ export function PipelineToolbar() {
     } finally {
       setPreviewLoading(false)
     }
-  }, [activeConnectionId, exportSnapshot, flashMessage, schemas])
+  }, [activeConnectionId, exportSnapshot, flashMessage, schemas, settings.annovarDbPath, settings.vepCachePath])
 
   const handleCancelRun = useCallback(async () => {
     if (!activeRunId || !activeRunIsCancellable) return

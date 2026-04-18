@@ -3,6 +3,8 @@ import { useUIStore } from '@/stores/uiStore'
 import { useRunStore } from '@/stores/runStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
 import { TopBar } from './TopBar'
 import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
@@ -81,6 +83,9 @@ export function AppLayout() {
     void useConnectionStore.getState().hydrateFromMain().catch((err) => {
       console.error('[AppLayout] hydrateFromMain failed:', err)
     })
+    void useSettingsStore.getState().load().catch((err) => {
+      console.error('[AppLayout] load settings failed:', err)
+    })
     return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
   }, [])
 
@@ -92,20 +97,29 @@ export function AppLayout() {
       if (!state.dirty && state.nodes.length === 0) state.loadSnapshot(snapshot)
     }).catch((err) => console.error('[AppLayout] autosave restore failed:', err))
 
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const unsubscribe = usePipelineStore.subscribe((state) => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        const snapshot = usePipelineStore.getState().exportSnapshot()
-        void window.api.store.set('pipeline:autosave:latest', snapshot).catch((err) => {
-          console.error('[AppLayout] autosave write failed:', err)
-        })
-      }, 1000)
+    const runAutosave = async () => {
+      const settings = useSettingsStore.getState().settings
+      const state = usePipelineStore.getState()
+      if (!settings.autosaveEnabled || !state.dirty) return
+      const snapshot = state.exportSnapshot()
+      await savePipelineSnapshot(snapshot)
+      usePipelineStore.getState().markSaved()
+    }
+    const startTimer = () => {
+      const seconds = Math.max(5, useSettingsStore.getState().settings.autosaveIntervalSeconds || 15)
+      return window.setInterval(() => {
+        void runAutosave().catch((err) => console.error('[AppLayout] autosave write failed:', err))
+      }, seconds * 1000)
+    }
+    let timer = startTimer()
+    const unsubscribeSettings = useSettingsStore.subscribe(() => {
+      window.clearInterval(timer)
+      timer = startTimer()
     })
     return () => {
       disposed = true
-      if (timer) clearTimeout(timer)
-      unsubscribe()
+      window.clearInterval(timer)
+      unsubscribeSettings()
     }
   }, [])
 

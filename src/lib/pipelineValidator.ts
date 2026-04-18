@@ -40,7 +40,10 @@ export interface ValidationResult {
   infoCount: number
 }
 
-export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: SchemaCache }): ValidationResult {
+export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
+  schemas?: SchemaCache
+  annotationDefaults?: { annovarDbPath?: string; vepCachePath?: string }
+}): ValidationResult {
   const issues: ValidationIssue[] = []
   const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
   const schemas = opts?.schemas ?? {}
@@ -223,6 +226,23 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: 
         })
       }
 
+      if (tool.requiresDatabase) {
+        const defaultPath = d.toolId === 'annovar.table_annovar'
+          ? opts?.annotationDefaults?.annovarDbPath
+          : d.toolId === 'vep'
+            ? opts?.annotationDefaults?.vepCachePath
+            : ''
+        const dbPath = String(d.paramValues?.annotationDbPath ?? defaultPath ?? '').trim()
+        if (!dbPath) {
+          issues.push({
+            severity: 'warning', nodeId: node.id,
+            code: 'ANNOT_DATABASE_MISSING',
+            message: `${tool.name} needs ${tool.requiresDatabase.name}, but no database path is set.`,
+            suggestion: 'Open the dataset guide from the node inspector, download the database, then set the database path.',
+          })
+        }
+      }
+
       // Overprovisioned Slurm — informational
       const defCpus = tool.slurm?.cpus ?? 1
       const defMem = tool.slurm?.memoryGB ?? 4
@@ -234,6 +254,17 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: 
           code: 'OVERPROVISIONED_SLURM',
           message: `Tool "${d.label}" is requesting >4× the recommended ${overCpus ? 'CPUs' : 'memory'}.`,
           suggestion: 'Reduce the override unless you have a specific reason.',
+        })
+      }
+
+      const effectiveCpus = d.slurmOverride?.cpus ?? tool.slurm?.cpus ?? 1
+      const effectiveMem = d.slurmOverride?.memoryGB ?? tool.slurm?.memoryGB ?? 4
+      if (d.executionMode === 'login' && (effectiveCpus > 4 || effectiveMem > 16 || hasAxedInput(snapshot, node.id))) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'LOGIN_NODE_HEAVY',
+          message: 'Running an array or heavy job on the login node will likely be killed by cluster admins. Consider sbatch.',
+          suggestion: 'Switch this node back to Slurm job unless it is a quick command.',
         })
       }
 
@@ -354,6 +385,17 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: 
       })
       continue
     }
+    const loginMember = members.find((node) => node.type === 'tool' && (node.data as ToolNodeData).executionMode === 'login')
+    if (loginMember) {
+      issues.push({
+        severity: 'error',
+        nodeId: loginMember.id,
+        code: 'GROUP_MIXED_EXECUTION',
+        message: `Group "${group.label}" contains a login-node tool.`,
+        suggestion: 'Login-node tools cannot be merged into one sbatch group.',
+      })
+      continue
+    }
 
     const internalEdges = snapshot.edges.filter((edge) => groupNodeIds.has(edge.source) && groupNodeIds.has(edge.target))
     const counts = new Map<string, { in: number; out: number }>()
@@ -416,6 +458,14 @@ function axisForNode(snapshot: PipelineSnapshot, nodeId: string, seen = new Set<
   if (axes.size === 0) return undefined
   if (axes.size === 1) return [...axes][0]
   return '__mixed__'
+}
+
+function hasAxedInput(snapshot: PipelineSnapshot, nodeId: string): boolean {
+  return snapshot.edges.some((edge) => {
+    if (edge.target !== nodeId) return false
+    const source = snapshot.nodes.find((node) => node.id === edge.source)
+    return source?.type === 'file' && Boolean((source.data as FileNodeData).split?.items.length)
+  })
 }
 
 /**

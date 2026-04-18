@@ -22,6 +22,11 @@ Authoritative prior docs: [CLAUDE.md](CLAUDE.md), [PHASE3_PLAN.md](PHASE3_PLAN.m
 
 Ordered roughly by dependency and risk. Each item is independently mergeable.
 
+Implementation status as of 2026-04-18:
+- Items 1-9 are implemented in the app.
+- Item 10 is partially implemented: 10a, 10d, and 10e are done; 10b, 10c, 10f, and 10g remain planned.
+- Pipeline autosave is implemented as an additional Phase 5 usability improvement.
+
 ### 1. Data preview: crash-proofing + text mode + double-click opens everything
 
 **Crash fix** ([src/components/data-preview/DataPreview.tsx](src/components/data-preview/DataPreview.tsx)):
@@ -166,7 +171,7 @@ Verification: take a 4-node linear chain, group them, run, confirm a single Slur
 
 ---
 
-### 6. Clumping + GRS nodes, with GRS-bundles-clump on drag
+### 6. Clumping + GRS nodes, with GRS-bundles-clump on drag — implemented 2026-04-18
 
 **Tool registry** ([src/lib/toolRegistry.ts](src/lib/toolRegistry.ts)):
 
@@ -197,7 +202,7 @@ Verification: drag "GRS (with clumping)" from the palette; see two tool nodes an
 
 ---
 
-### 7. ANNOVAR + VEP annotation nodes, with dataset guidance
+### 7. ANNOVAR + VEP annotation nodes, with dataset guidance — implemented 2026-04-18
 
 **Registry entries:**
 - `annovar.table_annovar` — category `annotation`, command `table_annovar.pl`. Params: `buildver`, `protocol`, `operation`, `remove`, `nastring`, `vcfinput`. Module: `annovar` (user's cluster).
@@ -217,7 +222,7 @@ Verification: drag an ANNOVAR node, click the `?`, see the humandb download comm
 
 ---
 
-### 8. Login-node execution
+### 8. Login-node execution — implemented 2026-04-18
 
 Some things shouldn't queue: ANNOVAR/VEP dataset downloads, small transforms, anything that needs internet. Let the user mark a node as login-node.
 
@@ -248,7 +253,7 @@ Verification: set a small shell node to login-mode, run it, see logs stream with
 
 ---
 
-### 9. Smart resource suggester
+### 9. Smart resource suggester — implemented 2026-04-18
 
 Replace blind defaults with a per-node estimator that learns from the inputs.
 

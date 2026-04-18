@@ -30,9 +30,10 @@ import { MergeNode } from './nodes/MergeNode'
 import { TransformNode } from './nodes/TransformNode'
 import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
-import { DRAG_MIME } from './ToolPalette'
+import { BUNDLE_DRAG_MIME, DRAG_MIME } from './ToolPalette'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { pathBasename } from '@/lib/utils'
 import type { FileType } from '@/types/pipeline'
@@ -65,6 +66,7 @@ function CanvasInner() {
   const addNoteNode = usePipelineStore((s) => s.addNoteNode)
   const addMergeNode = usePipelineStore((s) => s.addMergeNode)
   const addTransformNode = usePipelineStore((s) => s.addTransformNode)
+  const addNodesAndEdges = usePipelineStore((s) => s.addNodesAndEdges)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
   const undo = usePipelineStore((s) => s.undo)
   const redo = usePipelineStore((s) => s.redo)
@@ -88,8 +90,9 @@ function CanvasInner() {
     (event: React.DragEvent) => {
       event.preventDefault()
       const payload = event.dataTransfer.getData(DRAG_MIME)
+      const bundlePayload = event.dataTransfer.getData(BUNDLE_DRAG_MIME)
       const filePath = event.dataTransfer.getData(FILE_DRAG_MIME)
-      if (!payload && !filePath) return
+      if (!payload && !bundlePayload && !filePath) return
 
       const position = screenToFlowPosition({
         x: event.clientX,
@@ -160,6 +163,14 @@ function CanvasInner() {
         return
       }
 
+      if (bundlePayload) {
+        const bundle = getToolBundle(bundlePayload)
+        if (!bundle) return
+        const built = bundle.build(position)
+        addNodesAndEdges(built.nodes, built.edges)
+        return
+      }
+
       if (payload.startsWith('__special__:')) {
         const kind = payload.slice('__special__:'.length)
         if (kind === 'file-input') addFileNode(position, { isInput: true, label: 'Input file' })
@@ -171,7 +182,7 @@ function CanvasInner() {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, addTransformNode, onConnect],
+    [screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges, onConnect],
   )
 
   /**

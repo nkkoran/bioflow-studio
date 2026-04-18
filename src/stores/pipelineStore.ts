@@ -93,6 +93,7 @@ interface PipelineState {
 
   loadSnapshot: (snapshot: PipelineSnapshot) => void
   exportSnapshot: () => PipelineSnapshot
+  markSaved: () => void
   reset: () => void
   listPipelines: () => Promise<Array<{ id: string; name: string; updatedAt: number }>>
 
@@ -526,6 +527,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       groups: state.groups,
     }
   },
+
+  markSaved: () => set({ dirty: false }),
 
   reset: () => {
     set({

@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from 'react'
 import { CheckSquare, CheckCircle2, AlertTriangle, XCircle, Info } from 'lucide-react'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { validatePipeline, type ValidationIssue, type ValidationResult, type ValidationSeverity } from '@/lib/pipelineValidator'
 
 export function ValidationBadge() {
@@ -22,6 +23,7 @@ export function ValidationBadge() {
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
   const schemas = useDataPreviewStore((s) => s.schemas)
+  const settings = useSettingsStore((s) => s.settings)
 
   const [result, setResult] = useState<ValidationResult | null>(null)
   const [open, setOpen] = useState(false)
@@ -52,7 +54,7 @@ export function ValidationBadge() {
   }, [open])
 
   const handleValidate = () => {
-    const r = validatePipeline(exportSnapshot(), { schemas })
+    const r = validatePipeline(exportSnapshot(), { schemas, annotationDefaults: { annovarDbPath: settings.annovarDbPath, vepCachePath: settings.vepCachePath } })
     setResult(r)
     validatedAt.current = { nodeCount: nodes.length, edgeCount: edges.length }
     setOpen(true)

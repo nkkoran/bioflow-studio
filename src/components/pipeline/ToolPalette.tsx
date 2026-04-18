@@ -7,13 +7,16 @@
  * MIME type carrying the tool id.
  */
 import { useState, useMemo } from 'react'
-import { ChevronRight, Search, FileText, StickyNote, GitMerge, SlidersHorizontal } from 'lucide-react'
+import { ChevronRight, Search, FileText, StickyNote, GitMerge, SlidersHorizontal, Boxes } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { classNames } from '@/lib/utils'
 import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
+import { TOOL_BUNDLES } from '@/lib/toolBundles'
 import type { ToolDef } from '@/types/pipeline'
+import type { ToolBundle } from '@/lib/toolBundles'
 
 export const DRAG_MIME = 'application/bioflow-tool'
+export const BUNDLE_DRAG_MIME = 'application/bioflow-bundle'
 
 interface PaletteItemProps {
   tool: ToolDef
@@ -38,6 +41,29 @@ function PaletteItem({ tool }: PaletteItemProps) {
     >
       <div className="font-medium text-text-primary truncate">{tool.name}</div>
       <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
+    </div>
+  )
+}
+
+function BundleItem({ bundle }: { bundle: ToolBundle }) {
+  const onDragStart = (event: React.DragEvent) => {
+    event.dataTransfer.setData(BUNDLE_DRAG_MIME, bundle.id)
+    event.dataTransfer.effectAllowed = 'copy'
+  }
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      className={classNames(
+        'px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
+        'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
+        'transition-colors select-none',
+      )}
+      title={bundle.description}
+    >
+      <div className="font-medium text-text-primary truncate">{bundle.label}</div>
+      <div className="text-[10px] text-text-muted truncate">{bundle.description}</div>
     </div>
   )
 }
@@ -92,6 +118,16 @@ export function ToolPalette() {
     return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
   }, [search])
 
+  const bundles = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return TOOL_BUNDLES
+    return TOOL_BUNDLES.filter((bundle) =>
+      bundle.label.toLowerCase().includes(q) ||
+      bundle.description.toLowerCase().includes(q) ||
+      bundle.id.toLowerCase().includes(q),
+    )
+  }, [search])
+
   const toggleGroup = (cat: string) => {
     const next = new Set(collapsed)
     if (next.has(cat)) next.delete(cat)
@@ -125,7 +161,21 @@ export function ToolPalette() {
 
       {/* Tools grouped by category */}
       <div className="flex-1 overflow-y-auto py-1">
-        {groups.length === 0 && (
+        {bundles.length > 0 && (
+          <div className="mb-1">
+            <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+              <Boxes size={10} />
+              Bundles
+              <span className="ml-auto text-text-muted">{bundles.length}</span>
+            </div>
+            <div className="px-2 flex flex-col gap-0.5">
+              {bundles.map((bundle) => (
+                <BundleItem key={bundle.id} bundle={bundle} />
+              ))}
+            </div>
+          </div>
+        )}
+        {groups.length === 0 && bundles.length === 0 && (
           <div className="px-3 py-4 text-xs text-text-muted text-center">No matching tools</div>
         )}
         {groups.map(({ category, tools }) => {

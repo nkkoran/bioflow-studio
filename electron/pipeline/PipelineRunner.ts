@@ -75,6 +75,8 @@ export class PipelineRunner {
   private runs = new Map<string, RunState>()
   private cancelledRuns = new Set<string>()
   private reattachedJobs = new Set<string>()
+  private loginCancels = new Map<string, () => void>()
+  private cancelledLoginNodes = new Set<string>()
 
   private constructor() {
     this.loadPersistedRuns()
@@ -90,7 +92,12 @@ export class PipelineRunner {
     const runId = randomUUID()
 
     const connectionDefaults = await this.loadConnectionDefaults(connectionId)
-    if (!connectionDefaults.account) {
+    const needsSlurm = snapshot.nodes.some((node) =>
+      node.type === 'merge' ||
+      node.type === 'transform' ||
+      (node.type === 'tool' && (node.data as ToolNodeData).executionMode !== 'login'),
+    )
+    if (needsSlurm && !connectionDefaults.account) {
       throw new Error(
         'No Slurm account set. Click the connection name in the top bar → Slurm Settings to add one.',
       )
@@ -312,7 +319,13 @@ export class PipelineRunner {
     this.cancelledRuns.add(runId)
     for (const ns of nodes) {
       if (ns.jobId && (ns.status === 'queued' || ns.status === 'running')) {
-        await this.tracker.cancel(run.connectionId, ns.jobId)
+        if (ns.jobId.startsWith('login-')) {
+          const key = `${runId}:${ns.nodeId}`
+          this.cancelledLoginNodes.add(key)
+          this.loginCancels.get(key)?.()
+        } else {
+          await this.tracker.cancel(run.connectionId, ns.jobId)
+        }
       }
     }
     run.status = 'cancelled'
@@ -324,6 +337,12 @@ export class PipelineRunner {
     if (!run) return
     const ns = run.nodes[nodeId]
     if (!ns?.jobId) return
+    if (ns.jobId.startsWith('login-')) {
+      const key = `${runId}:${nodeId}`
+      this.cancelledLoginNodes.add(key)
+      this.loginCancels.get(key)?.()
+      return
+    }
     await this.tracker.cancel(run.connectionId, ns.jobId)
   }
 
@@ -649,6 +668,11 @@ export class PipelineRunner {
     const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
     const nodes = orderGroupNodes(group, snapshot).map((id) => nodeById.get(id)).filter(Boolean) as PipelineSnapshot['nodes']
     if (nodes.length === 0) return
+    const loginNode = nodes.find((node) => node.type === 'tool' && (node.data as ToolNodeData).executionMode === 'login')
+    if (loginNode) {
+      this.failNode(run, run.nodes[loginNode.id], 'Login-node tools cannot be part of a grouped sbatch.')
+      return
+    }
 
     const firstPlan = plans.get(nodes[0].id)
     if (!firstPlan) throw new Error(`No axis plan for ${nodes[0].id}`)
@@ -819,6 +843,11 @@ export class PipelineRunner {
     ns.isArray = plan.mode === 'array'
     ns.arraySize = arraySize
 
+    if (node.type === 'tool' && (node.data as ToolNodeData).executionMode === 'login') {
+      await this.runLoginNode(run, node.id, ns, scriptPath, plan)
+      return
+    }
+
     const parts: string[] = ['sbatch']
     if (plan.dependsOnArrayNodeIds.length > 0) {
       const depIds: string[] = []
@@ -916,6 +945,58 @@ export class PipelineRunner {
     })
   }
 
+  private async runLoginNode(
+    run: RunState,
+    nodeId: string,
+    ns: NodeRunState,
+    scriptPath: string,
+    plan: AxisPlan,
+  ): Promise<void> {
+    if (plan.mode === 'array') {
+      this.failNode(run, ns, 'Login-node array execution is not supported. Switch this node to Slurm job.')
+      return
+    }
+
+    const jobId = `login-${randomUUID().slice(0, 8)}`
+    const key = `${run.runId}:${nodeId}`
+    ns.jobId = jobId
+    ns.status = 'queued'
+    this.emitNodeStatus(run.runId, nodeId, 'queued', jobId)
+
+    await new Promise<void>((resolve) => {
+      const command = `bash -lc ${shellQuote(`source ${shellQuote(scriptPath)}`)}`
+      const { cancel } = this.ssh.execStream(
+        run.connectionId,
+        command,
+        (chunk, stream) => this.emitJobLog(run.runId, nodeId, chunk, stream),
+        (exitCode) => {
+          this.loginCancels.delete(key)
+          ns.finishedAt = Date.now()
+          if (this.cancelledLoginNodes.has(key)) {
+            this.cancelledLoginNodes.delete(key)
+            ns.status = 'cancelled'
+            this.emitNodeStatus(run.runId, nodeId, 'cancelled', jobId)
+          } else if (exitCode === 0) {
+            ns.status = 'done'
+            ns.exitCode = 0
+            this.emitNodeStatus(run.runId, nodeId, 'done', jobId)
+          } else {
+            const code = exitCode ?? -1
+            ns.status = 'failed'
+            ns.exitCode = code
+            ns.error = `Login-node command failed (${code})`
+            this.emitNodeStatus(run.runId, nodeId, 'failed', jobId, ns.error)
+          }
+          resolve()
+        },
+      )
+      this.loginCancels.set(key, cancel)
+      ns.status = 'running'
+      ns.startedAt = Date.now()
+      this.emitNodeStatus(run.runId, nodeId, 'running', jobId)
+    })
+  }
+
   private failNode(run: RunState, ns: NodeRunState, error: string): void {
     ns.status = 'failed'
     ns.error = error
@@ -994,12 +1075,25 @@ export class PipelineRunner {
       const rawAccount = store.get(`connection:${connectionId}:slurmAccount`)
       const rawPartition = store.get(`connection:${connectionId}:slurmPartition`)
       const rawDefaultPartition = store.get('settings:defaultPartition')
+      const str = (key: string): string | undefined => {
+        const value = store.get(key)
+        return typeof value === 'string' && value.trim() ? value.trim() : undefined
+      }
       const account = typeof rawAccount === 'string' && rawAccount.trim() ? rawAccount.trim() : undefined
       const partition =
         typeof rawDefaultPartition === 'string' && rawDefaultPartition.trim() ? rawDefaultPartition.trim()
         : typeof rawPartition === 'string' && rawPartition.trim() ? rawPartition.trim()
         : undefined
-      return { account, partition, modulePreamble: MODULE_PREAMBLE }
+      return {
+        account,
+        partition,
+        modulePreamble: MODULE_PREAMBLE,
+        toolsRoot: str('settings:toolsRoot'),
+        annovarScriptsPath: str('settings:annovarScriptsPath'),
+        annovarDbPath: str('settings:annovarDbPath'),
+        vepPath: str('settings:vepPath'),
+        vepCachePath: str('settings:vepCachePath'),
+      }
     } catch (err) {
       console.error('[PipelineRunner] loadConnectionDefaults failed:', err)
       return { modulePreamble: MODULE_PREAMBLE }

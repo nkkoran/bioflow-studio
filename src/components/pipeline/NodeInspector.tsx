@@ -12,11 +12,16 @@ import { X, Trash2, Copy, Plus, Folder } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { DatasetGuideDialog } from '@/components/settings/DatasetGuideDialog'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useFileSizeStore } from '@/stores/fileSizeStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { getTool } from '@/lib/toolRegistry'
+import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
+import { ANNOVAR_FEATURES, VEP_FEATURES, annovarDbNames, annovarParamsForFeatures } from '@/lib/annotationCatalog'
 import {
   connectedInputPath,
   connectedInputSchema,
@@ -26,17 +31,80 @@ import {
 import type {
   FileNodeData,
   FileNodeSplit,
+  PipelineSnapshot,
   SplitPattern,
   MergeNodeData,
   MergeStrategy,
   NoteNodeData,
   ToolNodeData,
   ToolParam,
+  ToolPort,
   TransformFilterOp,
   TransformFilterRule,
   TransformNodeData,
 } from '@/types/pipeline'
 import { classNames } from '@/lib/utils'
+
+function connectedInputPaths(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+): Record<string, string[]> {
+  const paths: Record<string, string[]> = {}
+  for (const edge of snapshot.edges) {
+    if (edge.target !== nodeId) continue
+    const portId = edge.targetHandle ?? 'input'
+    const source = snapshot.nodes.find((node) => node.id === edge.source)
+    if (!source) continue
+    if (source.type === 'file') {
+      const data = source.data as FileNodeData
+      paths[portId] = data.split?.items.length
+        ? data.split.items.map((item) => item.path).filter(Boolean)
+        : data.path ? [data.path] : []
+      continue
+    }
+    const path = connectedInputPath(snapshot, nodeId, portId)
+    if (path) paths[portId] = [path]
+  }
+  return paths
+}
+
+function hasFilteringParam(data: ToolNodeData): boolean {
+  const names = ['extract', 'keep', 'chr', 'region', 'regions', 'samples']
+  return Object.entries(data.paramValues ?? {}).some(([name, value]) => {
+    if (value === undefined || value === null || value === '' || value === false) return false
+    return names.some((candidate) => name.toLowerCase().includes(candidate))
+  })
+}
+
+function deviatesByTwo(current: number | undefined, suggested: number | undefined): boolean {
+  if (!current || !suggested) return false
+  return current >= suggested * 2 || current <= suggested / 2
+}
+
+function inspectorNodeLabel(node: PipelineSnapshot['nodes'][number]): string {
+  const data = node.data as { label?: unknown; text?: unknown; path?: unknown }
+  if (typeof data.label === 'string' && data.label.trim()) return data.label
+  if (typeof data.path === 'string' && data.path.trim()) return data.path.split('/').pop() ?? data.path
+  if (typeof data.text === 'string' && data.text.trim()) return data.text
+  return node.id
+}
+
+function inputConnectionDetail(node: PipelineSnapshot['nodes'][number], sourceHandle: string): string {
+  if (node.type === 'file') {
+    const data = node.data as FileNodeData
+    if (data.split?.items.length) return `${data.split.items.length} files split by ${data.split.axis}`
+    return data.path || 'File path not set'
+  }
+  if (node.type === 'tool') return `Output: ${sourceHandle}`
+  if (node.type === 'merge') return 'Merged output'
+  if (node.type === 'transform') return 'Transformed output'
+  return 'Connected'
+}
+
+function shellQuoteClient(value: string): string {
+  if (/^[A-Za-z0-9_\-./~:]+$/.test(value)) return value
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
 
 function ParamField({
   param,
@@ -255,6 +323,302 @@ function ShellScriptField({
   )
 }
 
+function ToolInputRow({
+  port,
+  connections,
+  snapshot,
+}: {
+  port: ToolPort
+  connections: PipelineSnapshot['edges']
+  snapshot: PipelineSnapshot
+}) {
+  const missingRequired = port.required && connections.length === 0
+
+  return (
+    <div className={classNames(
+      'rounded-md border px-2 py-1.5 text-xs',
+      missingRequired ? 'border-error/40 bg-error/5' : 'border-border bg-bg-tertiary',
+    )}>
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-text-primary">{port.label}</span>
+        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+        {port.required && <span className="rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">required</span>}
+        {port.multi && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">multiple</span>}
+      </div>
+      <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
+        {port.description ?? `Connect a ${port.fileType} file here.`}
+      </div>
+      <div className="mt-1.5 flex flex-col gap-0.5">
+        {connections.length === 0 ? (
+          <div className={missingRequired ? 'text-error' : 'text-text-muted'}>
+            {missingRequired ? `Connect a ${port.fileType} source before running.` : 'Optional input not connected.'}
+          </div>
+        ) : connections.map((edge) => {
+          const source = snapshot.nodes.find((node) => node.id === edge.source)
+          if (!source) return null
+          const detail = inputConnectionDetail(source, edge.sourceHandle ?? 'output')
+          return (
+            <div key={edge.id} className="min-w-0 text-text-secondary">
+              <span className="text-success">Connected</span>
+              {' to '}
+              <span className="text-text-primary">{inspectorNodeLabel(source)}</span>
+              <span className="text-text-muted"> · {detail}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ToolOutputRow({
+  port,
+  consumers,
+}: {
+  port: ToolPort
+  consumers: PipelineSnapshot['edges']
+}) {
+  return (
+    <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-text-primary">{port.label}</span>
+        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+      </div>
+      <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
+        {port.description ?? `Produces a ${port.fileType} output.`}
+      </div>
+      <div className="mt-1.5 text-text-secondary">
+        {consumers.length > 0
+          ? `${consumers.length} downstream connection${consumers.length === 1 ? '' : 's'}`
+          : 'Not connected downstream; the file is still written when the node runs.'}
+      </div>
+    </div>
+  )
+}
+
+const ANNOTATION_INTERNAL_PARAMS = new Set([
+  'toolPath',
+  'annotationDbPath',
+  'annotationFeatures',
+  'buildver',
+  'protocol',
+  'operation',
+  'remove',
+  'nastring',
+  'vcfinput',
+  'assembly',
+  'cache',
+  'offline',
+  'everything',
+  'check_existing',
+  'af_gnomad',
+  'nearest',
+  'fork',
+])
+
+function AnnotationConfigPanel({
+  nodeId,
+  data,
+}: {
+  nodeId: string
+  data: ToolNodeData
+}) {
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
+  const setSetting = useSettingsStore((s) => s.setSetting)
+  const [message, setMessage] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const isAnnovar = data.toolId === 'annovar.table_annovar'
+  const isVep = data.toolId === 'vep'
+  if (!isAnnovar && !isVep) return null
+
+  const params = data.paramValues ?? {}
+  const featureIds = String(params.annotationFeatures ?? (isAnnovar ? 'gene,rsid' : 'consequence,rsid'))
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+  const build = String(params.buildver ?? 'hg38')
+  const assembly = String(params.assembly ?? 'GRCh38')
+  const toolsRoot = settings.toolsRoot || '~/bioflow/tools'
+  const defaultToolPath = isAnnovar
+    ? (settings.annovarScriptsPath || `${toolsRoot}/annovar`)
+    : (settings.vepPath || `${toolsRoot}/ensembl-vep/vep`)
+  const defaultDbPath = isAnnovar
+    ? (settings.annovarDbPath || `${toolsRoot}/annovar/humandb`)
+    : (settings.vepCachePath || `${toolsRoot}/vep/cache`)
+  const toolPath = String(params.toolPath ?? '') || defaultToolPath
+  const dbPath = String(params.annotationDbPath ?? '') || defaultDbPath
+
+  const patchParams = (patch: Record<string, unknown>) => {
+    updateNodeData(nodeId, { paramValues: { ...params, ...patch } })
+  }
+
+  const toggleAnnovarFeature = (id: string) => {
+    const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
+    const generated = annovarParamsForFeatures(next)
+    patchParams({ annotationFeatures: next.join(','), ...generated })
+  }
+
+  const toggleVepFeature = (id: string) => {
+    const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
+    const selected = VEP_FEATURES.filter((feature) => next.includes(feature.id))
+    const merged: Record<string, unknown> = {
+      annotationFeatures: next.join(','),
+      everything: false,
+      check_existing: false,
+      af_gnomad: false,
+      nearest: undefined,
+    }
+    for (const feature of selected) Object.assign(merged, feature.params)
+    patchParams(merged)
+  }
+
+  const runLoginCommand = async (command: string) => {
+    if (!activeConnectionId) {
+      setMessage('Connect to Rorqual before running a login-node installer.')
+      return
+    }
+    setRunning(true)
+    setMessage('Running on login node...')
+    try {
+      const result = await window.api.ssh.exec(activeConnectionId, command)
+      setMessage(result.exitCode === 0 ? 'Finished.' : `Failed (${result.exitCode}): ${result.stderr || result.stdout}`)
+    } catch (err: any) {
+      setMessage(`Failed: ${err?.message ?? err}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const prepareToolCommand = () => {
+    if (isAnnovar) {
+      return [
+        `mkdir -p ${shellQuoteClient(toolPath)} ${shellQuoteClient(dbPath)}`,
+        `cat > ${shellQuoteClient(`${toolPath}/README_BioFlow.txt`)} <<'EOF'`,
+        'ANNOVAR scripts are license-gated. Download ANNOVAR from https://annovar.openbioinformatics.org/, unpack table_annovar.pl and annotate_variation.pl into this folder, then use BioFlow to install databases.',
+        'EOF',
+      ].join('\n')
+    }
+    const vepDir = toolPath.endsWith('/vep') ? toolPath.slice(0, -4) : toolPath.replace(/\/+$/, '')
+    return [
+      `mkdir -p ${shellQuoteClient(toolsRoot)} ${shellQuoteClient(dbPath)}`,
+      `cd ${shellQuoteClient(toolsRoot)}`,
+      'if [ ! -d ensembl-vep ]; then git clone https://github.com/Ensembl/ensembl-vep.git; fi',
+      `cd ${shellQuoteClient(vepDir)}`,
+      'perl INSTALL.pl --AUTO a --NO_HTSLIB --NO_TEST',
+    ].join('\n')
+  }
+
+  const databaseCommand = () => {
+    if (isAnnovar) {
+      const dbs = annovarDbNames(featureIds)
+      const script = `${toolPath.replace(/\/+$/, '')}/annotate_variation.pl`
+      return [
+        `mkdir -p ${shellQuoteClient(dbPath)}`,
+        ...dbs.map((db) => `perl ${shellQuoteClient(script)} -buildver ${shellQuoteClient(build)} -downdb -webfrom annovar ${shellQuoteClient(db)} ${shellQuoteClient(dbPath)}`),
+      ].join('\n')
+    }
+    const installer = toolPath.endsWith('/vep') ? `${toolPath.slice(0, -4)}/INSTALL.pl` : `${toolPath.replace(/\/+$/, '')}/INSTALL.pl`
+    return [
+      `mkdir -p ${shellQuoteClient(dbPath)}`,
+      `perl ${shellQuoteClient(installer)} -a cf -s homo_sapiens -y ${shellQuoteClient(assembly)} -c ${shellQuoteClient(dbPath)}`,
+    ].join('\n')
+  }
+
+  return (
+    <div>
+      <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+        Annotation setup
+      </h4>
+      <div className="flex flex-col gap-2 rounded-md border border-border bg-bg-primary p-2">
+        <Input
+          label={isAnnovar ? 'ANNOVAR scripts folder' : 'VEP executable or folder'}
+          value={toolPath}
+          onChange={(event) => patchParams({ toolPath: event.target.value })}
+        />
+        <Input
+          label={isAnnovar ? 'Database folder (humandb)' : 'Cache folder'}
+          value={dbPath}
+          onChange={(event) => patchParams({ annotationDbPath: event.target.value })}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          {isAnnovar ? (
+            <select
+              value={build}
+              onChange={(event) => patchParams({ buildver: event.target.value })}
+              className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+            >
+              <option value="hg38">hg38</option>
+              <option value="hg19">hg19</option>
+            </select>
+          ) : (
+            <select
+              value={assembly}
+              onChange={(event) => patchParams({ assembly: event.target.value })}
+              className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+            >
+              <option value="GRCh38">GRCh38</option>
+              <option value="GRCh37">GRCh37</option>
+            </select>
+          )}
+          {isVep && (
+            <Input
+              label="Forks"
+              type="number"
+              min={1}
+              value={String(params.fork ?? 4)}
+              onChange={(event) => patchParams({ fork: Number(event.target.value) })}
+            />
+          )}
+        </div>
+        <div>
+          <div className="text-xs font-medium text-text-secondary mb-1">Add information</div>
+          <div className="flex flex-col gap-1">
+            {(isAnnovar ? ANNOVAR_FEATURES : VEP_FEATURES).map((feature) => {
+              const active = featureIds.includes(feature.id)
+              return (
+                <button
+                  key={feature.id}
+                  type="button"
+                  onClick={() => isAnnovar ? toggleAnnovarFeature(feature.id) : toggleVepFeature(feature.id)}
+                  className={classNames(
+                    'rounded-md border px-2 py-1.5 text-left',
+                    active ? 'border-accent/50 bg-accent/10' : 'border-border bg-bg-tertiary hover:bg-bg-hover',
+                  )}
+                >
+                  <div className="text-xs font-medium text-text-primary">{active ? '✓ ' : ''}{feature.label}</div>
+                  <div className="text-[11px] text-text-muted">{feature.description}</div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+        {isAnnovar && (
+          <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-muted">
+            BioFlow will generate ANNOVAR protocol/operation lists from the selected information. You do not need to type comma-separated protocol strings.
+          </div>
+        )}
+        <div className="flex flex-wrap gap-1.5">
+          <Button variant="secondary" size="sm" disabled={running} onClick={() => void setSetting(isAnnovar ? 'settings:annovarScriptsPath' : 'settings:vepPath', toolPath)}>
+            Save tool path
+          </Button>
+          <Button variant="secondary" size="sm" disabled={running} onClick={() => void setSetting(isAnnovar ? 'settings:annovarDbPath' : 'settings:vepCachePath', dbPath)}>
+            Save DB path
+          </Button>
+          <Button variant="secondary" size="sm" disabled={running} onClick={() => void runLoginCommand(prepareToolCommand())}>
+            {isAnnovar ? 'Prepare scripts folder' : 'Install VEP'}
+          </Button>
+          <Button variant="secondary" size="sm" disabled={running || featureIds.length === 0} onClick={() => void runLoginCommand(databaseCommand())}>
+            Install selected databases
+          </Button>
+        </div>
+        {message && <div className="text-[11px] text-text-muted whitespace-pre-wrap break-all">{message}</div>}
+      </div>
+    </div>
+  )
+}
+
 function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const nodes = usePipelineStore((s) => s.nodes)
@@ -266,6 +630,10 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const tool = getTool(data.toolId)
   const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
   const loadingSchemaKey = useMemo(() => `${nodeId}:${Object.keys(schemas).length}`, [nodeId, schemas])
+  const [estimate, setEstimate] = useState<EstimateOutput | null>(null)
+  const [estimating, setEstimating] = useState(false)
+  const [showEstimateWhy, setShowEstimateWhy] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
 
   /**
    * Inputs whose upstream source carries an axis — either a file node with
@@ -333,11 +701,80 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     return () => { cancelled = true }
   }, [activeConnectionId, loadingSchemaKey, nodeId, schemas, setSchema, snapshot, tool])
 
+  useEffect(() => {
+    if (!activeConnectionId || !tool) {
+      setEstimate(null)
+      return
+    }
+    const connectionId = activeConnectionId
+    const currentTool = tool
+    let cancelled = false
+    async function loadEstimate() {
+      setEstimating(true)
+      try {
+        const pathsByPort = connectedInputPaths(snapshot, nodeId)
+        const sizes: Record<string, number> = {}
+        const getSize = useFileSizeStore.getState().getSize
+        for (const [portId, paths] of Object.entries(pathsByPort)) {
+          const values = await Promise.all(paths.map((path) => getSize(connectionId, path)))
+          sizes[portId] = axedInputPorts.some((port) => port.portId === portId)
+            ? Math.max(0, ...values)
+            : values.reduce((sum, value) => sum + value, 0)
+        }
+        if (cancelled) return
+        const firstAxed = axedInputPorts[0]
+        setEstimate(estimateResources({
+          tool: currentTool,
+          nodeData: data,
+          inputSizes: sizes,
+          isArray: data.arrayOver !== null && axedInputPorts.length > 0,
+          arraySize: firstAxed
+            ? (snapshot.nodes.find((node) =>
+                snapshot.edges.some((edge) => edge.target === nodeId && edge.targetHandle === firstAxed.portId && edge.source === node.id),
+              )?.data as FileNodeData | undefined)?.split?.items.length
+            : undefined,
+          hasFilter: hasFilteringParam(data),
+        }))
+      } finally {
+        if (!cancelled) setEstimating(false)
+      }
+    }
+    void loadEstimate()
+    return () => { cancelled = true }
+  }, [activeConnectionId, axedInputPorts, data, nodeId, snapshot, tool])
+
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
   const slurm = { ...tool.slurm, ...data.slurmOverride }
+  const executionMode = data.executionMode ?? 'sbatch'
+  const inputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
+  for (const edge of snapshot.edges) {
+    if (edge.target !== nodeId) continue
+    const portId = edge.targetHandle ?? 'input'
+    inputEdgesByPort.set(portId, [...(inputEdgesByPort.get(portId) ?? []), edge])
+  }
+  const outputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
+  for (const edge of snapshot.edges) {
+    if (edge.source !== nodeId) continue
+    const portId = edge.sourceHandle ?? 'output'
+    outputEdgesByPort.set(portId, [...(outputEdgesByPort.get(portId) ?? []), edge])
+  }
+  const visibleParams = tool.requiresDatabase
+    ? tool.params.filter((param) => !ANNOTATION_INTERNAL_PARAMS.has(param.name))
+    : tool.params
+  const applyEstimate = () => {
+    if (!estimate) return
+    updateNodeData(nodeId, {
+      slurmOverride: {
+        ...data.slurmOverride,
+        cpus: estimate.cpus,
+        memoryGB: estimate.memGB,
+        timeHours: estimate.timeHours,
+      },
+    })
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -354,7 +791,89 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           {tool.module && <div>Module: <span className="font-mono text-text-secondary">{tool.module}</span></div>}
         </div>
         <p className="text-xs text-text-muted mt-2">{tool.description}</p>
+        {tool.requiresDatabase && (
+          <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-[11px] text-text-secondary">
+            <div className="flex items-center justify-between gap-2">
+              <span>
+                Needs {tool.requiresDatabase.name}. Set the database path before running.
+              </span>
+              <Button variant="secondary" size="sm" className="h-6 px-2 text-[11px]" onClick={() => setGuideOpen(true)}>
+                Guide
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Execution Mode
+        </h4>
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+          {[
+            { value: 'sbatch', label: 'Slurm job' },
+            { value: 'login', label: 'Login node' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => updateNodeData(nodeId, { executionMode: option.value === 'sbatch' ? undefined : 'login' })}
+              className={classNames(
+                'h-7 rounded text-xs transition-colors',
+                executionMode === option.value
+                  ? 'bg-accent text-white'
+                  : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        {executionMode === 'login' && (
+          <div className="mt-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1.5 text-[11px] text-yellow-200">
+            Running an array or heavy job on the login node will likely be killed by cluster admins. Consider Slurm for anything beyond quick commands.
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Inputs
+        </h4>
+        <div className="flex flex-col gap-1.5">
+          {tool.inputs.map((port) => (
+            <ToolInputRow
+              key={port.id}
+              port={port}
+              connections={inputEdgesByPort.get(port.id) ?? []}
+              snapshot={snapshot}
+            />
+          ))}
+          {tool.inputs.length === 0 && (
+            <div className="text-xs text-text-muted italic">This tool has no inputs.</div>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Outputs
+        </h4>
+        <div className="flex flex-col gap-1.5">
+          {tool.outputs.map((port) => (
+            <ToolOutputRow
+              key={port.id}
+              port={port}
+              consumers={outputEdgesByPort.get(port.id) ?? []}
+            />
+          ))}
+          {tool.outputs.length === 0 && (
+            <div className="text-xs text-text-muted italic">This tool has no declared outputs.</div>
+          )}
+        </div>
+      </div>
+
+      {tool.requiresDatabase && <AnnotationConfigPanel nodeId={nodeId} data={data} />}
 
       {/* Parameters */}
       <div>
@@ -362,7 +881,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           Parameters
         </h4>
         <div className="flex flex-col gap-2">
-          {tool.params.map((p) => {
+          {visibleParams.map((p) => {
             const schema = p.columnRef
               ? connectedInputSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
               : null
@@ -397,7 +916,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                   />
                 )
           })}
-          {tool.params.length === 0 && (
+          {visibleParams.length === 0 && (
             <div className="text-xs text-text-muted italic">No parameters</div>
           )}
         </div>
@@ -465,6 +984,47 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Slurm Resources
         </h4>
+        <div className="mb-2 rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-xs font-medium text-text-primary">
+                {estimate
+                  ? `Suggested: ${estimate.cpus} CPU / ${estimate.memGB} GB / ${estimate.timeHours} h`
+                  : estimating ? 'Estimating resources...' : 'No resource suggestion yet'}
+              </div>
+              {estimate && (
+                <div className="text-[10px] text-text-muted mt-0.5">
+                  Confidence: {estimate.confidence}
+                </div>
+              )}
+            </div>
+            {estimate && (
+              <div className="flex gap-1 shrink-0">
+                <Button size="sm" variant="secondary" className="h-7 px-2 text-[11px]" onClick={applyEstimate}>
+                  Apply
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => {
+                    applyEstimate()
+                    setShowEstimateWhy(true)
+                  }}
+                >
+                  Apply + why
+                </Button>
+              </div>
+            )}
+          </div>
+          {estimate && showEstimateWhy && (
+            <ul className="mt-2 list-disc pl-4 text-[11px] text-text-secondary">
+              {estimate.rationale.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <Input
             label="CPUs"
@@ -472,6 +1032,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             min={1}
             value={slurm.cpus ?? ''}
             placeholder={String(tool.slurm?.cpus ?? 1)}
+            className={deviatesByTwo(slurm.cpus, estimate?.cpus) ? 'border-yellow-500' : undefined}
             onChange={(e) => setSlurm({ cpus: e.target.value ? Number(e.target.value) : undefined })}
           />
           <Input
@@ -480,6 +1041,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             min={1}
             value={slurm.memoryGB ?? ''}
             placeholder={String(tool.slurm?.memoryGB ?? 4)}
+            className={deviatesByTwo(slurm.memoryGB, estimate?.memGB) ? 'border-yellow-500' : undefined}
             onChange={(e) => setSlurm({ memoryGB: e.target.value ? Number(e.target.value) : undefined })}
           />
           <Input
@@ -489,6 +1051,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             step={0.5}
             value={slurm.timeHours ?? ''}
             placeholder={String(tool.slurm?.timeHours ?? 1)}
+            className={deviatesByTwo(slurm.timeHours, estimate?.timeHours) ? 'border-yellow-500' : undefined}
             onChange={(e) => setSlurm({ timeHours: e.target.value ? Number(e.target.value) : undefined })}
           />
           <Input
@@ -518,6 +1081,11 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           </div>
         </div>
       )}
+      <DatasetGuideDialog
+        guideKey={tool.requiresDatabase?.guideKey ?? null}
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
+      />
     </div>
   )
 }

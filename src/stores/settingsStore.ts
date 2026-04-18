@@ -10,8 +10,15 @@ export interface PathSettings {
 
 export interface AppSettings {
   paths: PathSettings
+  toolsRoot: string
+  annovarScriptsPath: string
+  annovarDbPath: string
+  vepPath: string
+  vepCachePath: string
   defaultPartition: string
   autoOpenJobsTabOnRun: boolean
+  autosaveEnabled: boolean
+  autosaveIntervalSeconds: number
   confirmOnLoginNodeRun: boolean
   notifyOnRunFinish: boolean
   notifyOnRunFail: boolean
@@ -26,8 +33,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
     createSubfolders: true,
     runFolderTemplate: 'runs/{pipelineSlug}-{timestamp}',
   },
+  toolsRoot: '~/bioflow/tools',
+  annovarScriptsPath: '',
+  annovarDbPath: '',
+  vepPath: '',
+  vepCachePath: '',
   defaultPartition: '',
   autoOpenJobsTabOnRun: true,
+  autosaveEnabled: true,
+  autosaveIntervalSeconds: 15,
   confirmOnLoginNodeRun: true,
   notifyOnRunFinish: true,
   notifyOnRunFail: true,
@@ -59,8 +73,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         createSubfolders: await readSetting('settings:paths:createSubfolders', DEFAULT_SETTINGS.paths.createSubfolders),
         runFolderTemplate: await readSetting('settings:paths:runFolderTemplate', DEFAULT_SETTINGS.paths.runFolderTemplate),
       },
+      toolsRoot: await readSetting('settings:toolsRoot', DEFAULT_SETTINGS.toolsRoot),
+      annovarScriptsPath: await readSetting('settings:annovarScriptsPath', DEFAULT_SETTINGS.annovarScriptsPath),
+      annovarDbPath: await readSetting('settings:annovarDbPath', DEFAULT_SETTINGS.annovarDbPath),
+      vepPath: await readSetting('settings:vepPath', DEFAULT_SETTINGS.vepPath),
+      vepCachePath: await readSetting('settings:vepCachePath', DEFAULT_SETTINGS.vepCachePath),
       defaultPartition: await readSetting('settings:defaultPartition', DEFAULT_SETTINGS.defaultPartition),
       autoOpenJobsTabOnRun: await readSetting('settings:autoOpenJobsTabOnRun', DEFAULT_SETTINGS.autoOpenJobsTabOnRun),
+      autosaveEnabled: await readSetting('settings:autosaveEnabled', DEFAULT_SETTINGS.autosaveEnabled),
+      autosaveIntervalSeconds: await readSetting('settings:autosaveIntervalSeconds', DEFAULT_SETTINGS.autosaveIntervalSeconds),
       confirmOnLoginNodeRun: await readSetting('settings:confirmOnLoginNodeRun', DEFAULT_SETTINGS.confirmOnLoginNodeRun),
       notifyOnRunFinish: await readSetting('settings:notifyOnRunFinish', DEFAULT_SETTINGS.notifyOnRunFinish),
       notifyOnRunFail: await readSetting('settings:notifyOnRunFail', DEFAULT_SETTINGS.notifyOnRunFail),
@@ -79,8 +100,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:paths:logsSubfolder': next.paths.logsSubfolder = String(value); break
       case 'settings:paths:createSubfolders': next.paths.createSubfolders = Boolean(value); break
       case 'settings:paths:runFolderTemplate': next.paths.runFolderTemplate = String(value); break
+      case 'settings:toolsRoot': next.toolsRoot = String(value); break
+      case 'settings:annovarScriptsPath': next.annovarScriptsPath = String(value); break
+      case 'settings:annovarDbPath': next.annovarDbPath = String(value); break
+      case 'settings:vepPath': next.vepPath = String(value); break
+      case 'settings:vepCachePath': next.vepCachePath = String(value); break
       case 'settings:defaultPartition': next.defaultPartition = String(value); break
       case 'settings:autoOpenJobsTabOnRun': next.autoOpenJobsTabOnRun = Boolean(value); break
+      case 'settings:autosaveEnabled': next.autosaveEnabled = Boolean(value); break
+      case 'settings:autosaveIntervalSeconds': next.autosaveIntervalSeconds = Math.max(5, Number(value) || DEFAULT_SETTINGS.autosaveIntervalSeconds); break
       case 'settings:confirmOnLoginNodeRun': next.confirmOnLoginNodeRun = Boolean(value); break
       case 'settings:notifyOnRunFinish': next.notifyOnRunFinish = Boolean(value); break
       case 'settings:notifyOnRunFail': next.notifyOnRunFail = Boolean(value); break

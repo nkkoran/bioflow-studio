@@ -41,6 +41,7 @@ export interface ToolParam {
 export interface ToolPort {
   id: string                // unique within node (e.g., "input", "output")
   label: string
+  description?: string      // plain-language explanation shown in the inspector
   fileType: FileType
   required?: boolean
   multi?: boolean           // accepts multiple files
@@ -78,6 +79,8 @@ export interface ToolDef {
     timeHours?: number
     partition?: string
   }
+  /** Advisory metadata for tools that need local/reference databases. */
+  requiresDatabase?: { name: string; guideKey: string }
 }
 
 export type ToolCategory =
@@ -119,6 +122,8 @@ export interface ToolNodeData {
    * are resolved from the same path by axisPlanner.
    */
   outputDirOverride?: string
+  /** Run through Slurm by default; login is for small, interactive-safe jobs. */
+  executionMode?: 'sbatch' | 'login'
   /** Execution status — populated by runtime, not user-editable */
   status?: 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
   /** Slurm job id when running */

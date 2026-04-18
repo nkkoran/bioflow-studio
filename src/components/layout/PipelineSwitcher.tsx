@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ChevronDown, FilePlus2, Pencil } from 'lucide-react'
 import { usePipelineStore } from '@/stores/pipelineStore'
+import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
 import type { PipelineSnapshot } from '@/types/pipeline'
 
 interface PipelineRow {
@@ -18,6 +19,7 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
   const setPipelineName = usePipelineStore((s) => s.setPipelineName)
   const listPipelines = usePipelineStore((s) => s.listPipelines)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const markSaved = usePipelineStore((s) => s.markSaved)
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<PipelineRow[]>([])
 
@@ -49,9 +51,8 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
     if (!next || next === pipelineName) return
     setPipelineName(next)
     const snapshot = { ...exportSnapshot(), name: next, updatedAt: Date.now() }
-    await window.api.store.set(`pipeline:${snapshot.id}`, snapshot)
-    const ids = (await window.api.store.get<string[]>('pipelines:ids')) ?? []
-    if (!ids.includes(snapshot.id)) await window.api.store.set('pipelines:ids', [...ids, snapshot.id])
+    await savePipelineSnapshot(snapshot)
+    markSaved()
   }
 
   const recentCutoff = Date.now() - 24 * 60 * 60 * 1000

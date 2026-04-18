@@ -21,6 +21,11 @@ export interface ConnectionDefaults {
   account?: string            // --account
   partition?: string          // --partition
   modulePreamble?: string     // e.g., "module --force purge && module load StdEnv/2023"
+  toolsRoot?: string
+  annovarScriptsPath?: string
+  annovarDbPath?: string
+  vepPath?: string
+  vepCachePath?: string
 }
 
 export interface ToolScriptOpts {
@@ -110,6 +115,18 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
       slug,
       isArray,
     }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'annovar.table_annovar') {
+    lines.push(renderAnnovarCommand({ nodeData, axisPlan, outputDir, slug, isArray, connectionDefaults }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'vep') {
+    lines.push(renderVepCommand({ nodeData, axisPlan, outputDir, slug, isArray, connectionDefaults }))
     lines.push('')
     return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
   }
@@ -218,8 +235,108 @@ function resolveShellOutputPath(
   return outVal.paths[0] ?? null
 }
 
+function renderAnnovarCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+  connectionDefaults?: ConnectionDefaults
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray, connectionDefaults } = opts
+  const input = resolveSingleInput(axisPlan, 'input', isArray)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'tsv', isArray)
+  const scriptDir = stringParam(nodeData, 'toolPath') || connectionDefaults?.annovarScriptsPath || ''
+  const script = scriptDir ? `${scriptDir.replace(/\/+$/, '')}/table_annovar.pl` : 'table_annovar.pl'
+  const humandb = stringParam(nodeData, 'annotationDbPath') || connectionDefaults?.annovarDbPath || `${connectionDefaults?.toolsRoot ?? '~/bioflow/tools'}/annovar/humandb`
+  const build = stringParam(nodeData, 'buildver') || 'hg38'
+  const protocol = stringParam(nodeData, 'protocol') || 'refGene,avsnp150'
+  const operation = stringParam(nodeData, 'operation') || 'g,f'
+  const nastring = stringParam(nodeData, 'nastring') || '.'
+  const prefix = stripExt(output)
+
+  const parts = [
+    'perl',
+    shellQuote(script),
+    shellExpr(input),
+    shellQuote(humandb),
+    '--buildver', shellQuote(build),
+    '--out', shellExpr(prefix),
+    '--protocol', shellQuote(protocol),
+    '--operation', shellQuote(operation),
+    '--nastring', shellQuote(nastring),
+  ]
+  if (nodeData.paramValues?.remove !== false) parts.push('--remove')
+  if (nodeData.paramValues?.vcfinput !== false) parts.push('--vcfinput')
+  return parts.join(' \\\n  ')
+}
+
+function renderVepCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+  connectionDefaults?: ConnectionDefaults
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray, connectionDefaults } = opts
+  const input = resolveSingleInput(axisPlan, 'input', isArray)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'vcf', isArray)
+  const rawToolPath = stringParam(nodeData, 'toolPath') || connectionDefaults?.vepPath || 'vep'
+  const command = rawToolPath.endsWith('/') ? `${rawToolPath}vep` : rawToolPath
+  const cache = stringParam(nodeData, 'annotationDbPath') || connectionDefaults?.vepCachePath || `${connectionDefaults?.toolsRoot ?? '~/bioflow/tools'}/vep/cache`
+  const assembly = stringParam(nodeData, 'assembly') || 'GRCh38'
+  const fork = stringParam(nodeData, 'fork') || '4'
+
+  const parts = [
+    shellQuote(command),
+    '--input_file', shellExpr(input),
+    '--output_file', shellExpr(output),
+    '--assembly', shellQuote(assembly),
+    '--dir_cache', shellQuote(cache),
+    '--fork', shellQuote(fork),
+    '--force_overwrite',
+  ]
+  if (nodeData.paramValues?.cache !== false) parts.push('--cache')
+  if (nodeData.paramValues?.offline !== false) parts.push('--offline')
+  if (nodeData.paramValues?.everything === true) parts.push('--everything')
+  if (nodeData.paramValues?.check_existing === true) parts.push('--check_existing')
+  if (nodeData.paramValues?.af_gnomad === true) parts.push('--af_gnomad')
+  const nearest = stringParam(nodeData, 'nearest')
+  if (nearest) parts.push('--nearest', shellQuote(nearest))
+  const plugin = stringParam(nodeData, 'plugin')
+  if (plugin) parts.push('--plugin', shellQuote(plugin))
+  return parts.join(' \\\n  ')
+}
+
+function stringParam(nodeData: ToolNodeData, name: string): string {
+  const value = nodeData.paramValues?.[name]
+  return value === undefined || value === null ? '' : String(value).trim()
+}
+
+function resolveSingleInput(axisPlan: AxisPlan, portId: string, isArray: boolean): string {
+  const val = axisPlan.inputs[portId]
+  if (!val) return ''
+  if (isArray && val.kind === 'array') return `$i_${portId}`
+  if (val.kind === 'single') return val.path
+  return val.paths[0] ?? ''
+}
+
+function resolveFirstOutput(axisPlan: AxisPlan, portId: string, outputDir: string, slug: string, ft: FileType, isArray: boolean): string {
+  const outVal = axisPlan.outputs[portId]
+  if (!outVal) return `${outputDir}/${slug}.${portId}${extForFileType(ft)}`
+  if (isArray && outVal.kind === 'array') return pickPathExpr(portId, outputDir, slug, ft)
+  if (outVal.kind === 'single') return outVal.path
+  return outVal.paths[0] ?? `${outputDir}/${slug}.${portId}${extForFileType(ft)}`
+}
+
 function shellArrayValue(value: string): string {
   if (value.startsWith('$')) return `"${value}"`
+  return shellQuote(value)
+}
+
+function shellExpr(value: string): string {
+  if (value.includes('$')) return `"${value.replace(/"/g, '\\"')}"`
   return shellQuote(value)
 }
 

@@ -7,12 +7,14 @@ import { useEffect, useMemo } from 'react'
 import { useRunStore } from '@/stores/runStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { Button } from '@/components/ui/Button'
-import { RefreshCw, X } from 'lucide-react'
+import { FolderOpen, RefreshCw, X } from 'lucide-react'
 import { NodeRunList } from './NodeRunList'
 import { LogViewer } from './LogViewer'
 import { JobSummary } from './JobSummary'
 import { QueueDetails } from './QueueDetails'
 import type { RunState } from '@/types/pipeline'
+import { useFileStore } from '@/stores/fileStore'
+import { useConnectionStore } from '@/stores/connectionStore'
 
 export function JobsPanel() {
   const runs = useRunStore((s) => s.runs)
@@ -24,6 +26,8 @@ export function JobsPanel() {
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const pipelineId = usePipelineStore((s) => s.pipelineId)
+  const navigate = useFileStore((s) => s.navigate)
+  const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
 
   // Sort runs most-recent-first for the selector
   const sortedRuns = useMemo(
@@ -96,6 +100,22 @@ export function JobsPanel() {
         >
           Refresh
         </Button>
+
+        {activeRun?.workDir && (
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<FolderOpen size={12} />}
+            onClick={() => {
+              setActiveConnection(activeRun.connectionId)
+              void navigate(activeRun.workDir)
+            }}
+            className="h-6 text-xs"
+            title="Open run folder in the file explorer"
+          >
+            Run folder
+          </Button>
+        )}
 
         {activeRun && selectedNodeId && activeRun.nodes[selectedNodeId]?.status === 'failed' && activeRun.pipelineId === pipelineId && (
           <Button

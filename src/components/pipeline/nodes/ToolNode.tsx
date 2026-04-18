@@ -91,19 +91,26 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   }
 
   const borderColor = CATEGORY_COLORS[tool.category] ?? 'border-border'
+  const connectedInputs = new Set(edges.filter((edge) => edge.target === id).map((edge) => edge.targetHandle ?? 'input'))
+  const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
 
   return (
     <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[200px] transition-all',
+        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[260px] transition-all',
         selected ? 'border-accent ring-2 ring-accent/30' : borderColor,
       )}
     >
       {/* Header */}
       <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <div className="text-[10px] uppercase tracking-wide text-text-muted">
-            {tool.category}
+          <div className="text-[10px] uppercase tracking-wide text-text-muted flex items-center gap-1">
+            <span>{tool.category}</span>
+            {nodeData.executionMode === 'login' && (
+              <span className="rounded bg-yellow-500/15 px-1 py-px text-[9px] text-yellow-300 normal-case tracking-normal">
+                login
+              </span>
+            )}
           </div>
           <div className="text-xs font-semibold text-text-primary truncate">
             {nodeData.label}
@@ -126,57 +133,73 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           exactly with the port label. */}
       <div className="px-3 py-2 flex flex-col text-[11px]">
         {/* Inputs on the left */}
-        {tool.inputs.map((port) => (
-          <div key={port.id} className="relative flex items-center h-6">
-            <Handle
-              type="target"
-              position={Position.Left}
-              id={port.id}
-              style={{
-                left: -8,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                width: 10,
-                height: 10,
-                background: 'var(--color-accent)',
-                border: '2px solid var(--color-bg-secondary)',
-              }}
-            />
-            <span className="text-text-secondary">
-              <span className="text-text-muted">◀ </span>
-              {port.label}
-              {port.required && <span className="text-error ml-0.5">*</span>}
-            </span>
-          </div>
-        ))}
+        {tool.inputs.length > 0 && (
+          <div className="mb-1 text-[9px] uppercase tracking-wide text-text-muted">Inputs</div>
+        )}
+        {tool.inputs.map((port) => {
+          const connected = connectedInputs.has(port.id)
+          return (
+            <div key={port.id} className="relative flex items-center h-7 gap-2">
+              <Handle
+                type="target"
+                position={Position.Left}
+                id={port.id}
+                style={{
+                  left: -8,
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  width: 10,
+                  height: 10,
+                  background: connected ? 'var(--color-accent)' : 'var(--color-bg-secondary)',
+                  border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-accent)',
+                }}
+              />
+              <span className={classNames('min-w-0 flex-1 truncate', connected ? 'text-text-primary' : 'text-text-secondary')}>
+                {port.label}
+                {port.required && <span className="text-error ml-0.5">*</span>}
+              </span>
+              <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[9px] text-text-muted shrink-0">
+                {port.fileType}
+              </span>
+            </div>
+          )
+        })}
 
         {tool.inputs.length > 0 && tool.outputs.length > 0 && (
           <div className="h-px bg-border my-1" />
         )}
 
         {/* Outputs on the right */}
-        {tool.outputs.map((port) => (
-          <div key={port.id} className="relative flex items-center justify-end h-6">
-            <span className="text-text-secondary">
-              {port.label}
-              <span className="text-text-muted"> ▶</span>
-            </span>
-            <Handle
-              type="source"
-              position={Position.Right}
-              id={port.id}
-              style={{
-                right: -8,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                width: 10,
-                height: 10,
-                background: 'var(--color-success, #10b981)',
-                border: '2px solid var(--color-bg-secondary)',
-              }}
-            />
-          </div>
-        ))}
+        {tool.outputs.length > 0 && (
+          <div className="mb-1 text-[9px] uppercase tracking-wide text-text-muted">Outputs</div>
+        )}
+        {tool.outputs.map((port) => {
+          const connected = connectedOutputs.has(port.id)
+          return (
+            <div key={port.id} className="relative flex items-center justify-end h-7 gap-2">
+              <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[9px] text-text-muted shrink-0">
+                {port.fileType}
+              </span>
+              <span className={classNames('min-w-0 flex-1 truncate text-right', connected ? 'text-text-primary' : 'text-text-secondary')}>
+                {port.label}
+              </span>
+              <Handle
+                type="source"
+                position={Position.Right}
+                id={port.id}
+                style={{
+                  right: -8,
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  width: 10,
+                  height: 10,
+                  background: connected ? 'var(--color-success, #10b981)' : 'var(--color-bg-secondary)',
+                  border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-success, #10b981)',
+                }}
+              />
+            </div>
+          )
+        })}
       </div>
 
       {/* Error line */}

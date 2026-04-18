@@ -401,6 +401,7 @@ export class SshManager {
     id: string,
     command: string,
     onData: (chunk: string, stream: 'stdout' | 'stderr') => void,
+    onClose?: (exitCode: number | null) => void,
   ): { cancel: () => void } {
     const conn = this.connections.get(id)
     if (!conn) return { cancel: () => {} }
@@ -409,7 +410,10 @@ export class SshManager {
     let streamRef: ClientChannel | null = null
 
     conn.client.exec(command, (err, stream) => {
-      if (err || !active) return
+      if (err || !active) {
+        if (active) onClose?.(null)
+        return
+      }
       streamRef = stream
 
       stream.on('data', (data: Buffer) => {
@@ -418,9 +422,10 @@ export class SshManager {
       stream.stderr.on('data', (data: Buffer) => {
         if (active) onData(data.toString(), 'stderr')
       })
-      stream.on('close', () => {
+      stream.on('close', (code: number | null) => {
         active = false
         streamRef = null
+        onClose?.(code)
       })
     })
 

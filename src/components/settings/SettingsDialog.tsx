@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/Input'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
 
-const SECTIONS = ['General', 'Paths', 'Notifications', 'Advanced'] as const
+const SECTIONS = ['General', 'Paths', 'Tools', 'Notifications', 'Advanced'] as const
 type Section = typeof SECTIONS[number]
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -22,6 +22,10 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
   }
 
   const text = (key: string, value: string) => {
+    void setSetting(key, value)
+  }
+
+  const number = (key: string, value: number) => {
     void setSetting(key, value)
   }
 
@@ -56,6 +60,20 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 label="Open Jobs tab when a run starts"
                 checked={settings.autoOpenJobsTabOnRun}
                 onChange={(value) => toggle('settings:autoOpenJobsTabOnRun', value)}
+              />
+              <Checkbox
+                label="Autosave pipelines"
+                checked={settings.autosaveEnabled}
+                onChange={(value) => toggle('settings:autosaveEnabled', value)}
+              />
+              <Input
+                label="Autosave interval (seconds)"
+                type="number"
+                min={5}
+                step={1}
+                value={settings.autosaveIntervalSeconds}
+                disabled={!settings.autosaveEnabled}
+                onChange={(e) => number('settings:autosaveIntervalSeconds', Number(e.target.value))}
               />
               <Checkbox
                 label="Confirm before login-node runs"
@@ -101,6 +119,46 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                   onChange={(e) => text('settings:paths:logsSubfolder', e.target.value)}
                 />
               </div>
+            </div>
+          )}
+
+          {section === 'Tools' && (
+            <div className="flex flex-col gap-3">
+              <Input
+                label="Tools folder"
+                value={settings.toolsRoot}
+                placeholder="~/bioflow/tools"
+                onChange={(e) => text('settings:toolsRoot', e.target.value)}
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  label="ANNOVAR scripts folder"
+                  value={settings.annovarScriptsPath}
+                  placeholder="~/bioflow/tools/annovar"
+                  onChange={(e) => text('settings:annovarScriptsPath', e.target.value)}
+                />
+                <Input
+                  label="ANNOVAR humandb folder"
+                  value={settings.annovarDbPath}
+                  placeholder="~/bioflow/tools/annovar/humandb"
+                  onChange={(e) => text('settings:annovarDbPath', e.target.value)}
+                />
+                <Input
+                  label="VEP executable or folder"
+                  value={settings.vepPath}
+                  placeholder="vep or ~/bioflow/tools/ensembl-vep/vep"
+                  onChange={(e) => text('settings:vepPath', e.target.value)}
+                />
+                <Input
+                  label="VEP cache folder"
+                  value={settings.vepCachePath}
+                  placeholder="~/bioflow/tools/vep/cache"
+                  onChange={(e) => text('settings:vepCachePath', e.target.value)}
+                />
+              </div>
+              <p className="text-[11px] text-text-muted">
+                Node inspector values override these defaults. ANNOVAR scripts may need manual download from the ANNOVAR site before database installs can run.
+              </p>
             </div>
           )}
 
