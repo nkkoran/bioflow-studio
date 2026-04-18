@@ -128,6 +128,8 @@ export interface ToolNodeData {
   [key: string]: unknown
 }
 
+export type SlurmOverride = NonNullable<ToolNodeData['slurmOverride']>
+
 /**
  * Axis metadata for a file node that represents a split input (e.g., one
  * pgen per chromosome). When present, the node emits one path per `items`
@@ -138,6 +140,20 @@ export interface FileNodeSplit {
   axis: string                  // e.g., "chrom"
   items: Array<{ key: string; path: string }>
   glob?: string                 // optional — original pattern, display only
+  pattern?: SplitPattern        // source pattern used to materialize items
+}
+
+export type SplitPattern =
+  | { kind: 'manual' }
+  | { kind: 'brace'; template: string }
+  | { kind: 'glob'; template: string; capture: string }
+  | { kind: 'crossFolder'; parentDir: string; childGlob: string; file: string }
+
+export interface NodeGroup {
+  id: string
+  label: string
+  nodeIds: string[]
+  sharedResources?: SlurmOverride
 }
 
 /** A file node — represents an input/output file in the graph. */
@@ -254,6 +270,7 @@ export interface PipelineSnapshot {
     target: string
     targetHandle?: string
   }>
+  groups?: NodeGroup[]
 }
 
 // ===================== Execution runtime types =====================
@@ -289,6 +306,9 @@ export interface RunState {
   pipelineName?: string
   connectionId: string
   workDir: string
+  scriptsDir?: string
+  logsDir?: string
+  outputRoot?: string
   /** Resolved `$HOME` on the remote — used to expand `~` in user-supplied path overrides. */
   homeDir?: string
   createdAt: number

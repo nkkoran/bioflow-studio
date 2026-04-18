@@ -109,13 +109,20 @@ export function getColumnSummary(rows: string[][], colIndex: number): {
 
   const numericValues = values.map(Number).filter(n => !isNaN(n))
   if (numericValues.length > values.length * 0.8 && numericValues.length > 0) {
+    let min = numericValues[0]
+    let max = numericValues[0]
+    for (let i = 1; i < numericValues.length; i++) {
+      const value = numericValues[i]
+      if (value < min) min = value
+      if (value > max) max = value
+    }
     return {
       type: 'numeric',
       nonNull,
       total,
       unique,
-      min: Math.min(...numericValues),
-      max: Math.max(...numericValues),
+      min,
+      max,
       mean: numericValues.reduce((a, b) => a + b, 0) / numericValues.length
     }
   }

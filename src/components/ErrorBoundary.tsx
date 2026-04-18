@@ -8,6 +8,8 @@
  * guessing from a blank screen.
  */
 import { Component, type ReactNode, type ErrorInfo } from 'react'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useUIStore } from '@/stores/uiStore'
 
 interface Props { children: ReactNode }
 interface State { error: Error | null; info: ErrorInfo | null }
@@ -29,6 +31,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   handleReset = (): void => {
+    useDataPreviewStore.getState().clearTabs()
+    useUIStore.getState().setBottomPanelMode('terminal')
     this.setState({ error: null, info: null })
   }
 

@@ -25,6 +25,17 @@ function expandPath(filePath: string): string {
   return resolvePath(filePath)
 }
 
+function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
+  return {
+    ...config,
+    name: config.name.trim(),
+    host: config.host.trim(),
+    username: config.username.trim(),
+    privateKeyPath: config.privateKeyPath?.trim(),
+    defaultDirectory: config.defaultDirectory?.trim(),
+  }
+}
+
 /** Standard algorithm lists for broad HPC server compatibility. */
 const ALGORITHMS: ConnectConfig['algorithms'] = {
   kex: [
@@ -173,9 +184,10 @@ export class SshManager {
 
   connect(config: ConnectionConfig): Promise<ConnectionResult> {
     return new Promise((resolve, reject) => {
+      const cleanConfig = normalizeConnectionConfig(config)
       let connectOptions: ConnectConfig
       try {
-        connectOptions = buildConnectOptions(config)
+        connectOptions = buildConnectOptions(cleanConfig)
       } catch (err) {
         reject(err)
         return
@@ -207,8 +219,8 @@ export class SshManager {
             const promptText = prompt.prompt.toLowerCase()
 
             // If it's asking for a password and we have one, auto-respond
-            if (promptText.includes('password') && config.password) {
-              responses.push(config.password)
+            if (promptText.includes('password') && cleanConfig.password) {
+              responses.push(cleanConfig.password)
             }
             // For MFA/verification/OTP prompts, or any unknown prompt, ask the user
             else {
@@ -239,12 +251,12 @@ export class SshManager {
         resolved = true
         this.connections.set(id, {
           client,
-          config,
+          config: cleanConfig,
           connectedAt: Date.now(),
           reconnecting: false,
         })
         this.sendStatusChange(id, true)
-        resolve({ id, host: config.host, username: config.username })
+        resolve({ id, host: cleanConfig.host, username: cleanConfig.username })
       })
 
       client.on('error', (err) => {
@@ -252,8 +264,8 @@ export class SshManager {
         if (!resolved) {
           resolved = true
           const enhanced = new Error(
-            `SSH connection to ${config.host} failed: ${err.message}\n` +
-            `Auth method: ${config.authMethod}, User: ${config.username}`
+            `SSH connection to ${cleanConfig.host} failed: ${err.message}\n` +
+            `Auth method: ${cleanConfig.authMethod}, User: ${cleanConfig.username}`
           )
           reject(enhanced)
           return
@@ -292,7 +304,7 @@ export class SshManager {
         }
       })
 
-      console.log(`[SSH] Connecting to ${config.host}:${config.port} as ${config.username} (auth: ${config.authMethod})`)
+      console.log(`[SSH] Connecting to ${cleanConfig.host}:${cleanConfig.port} as ${cleanConfig.username} (auth: ${cleanConfig.authMethod})`)
       client.connect(connectOptions)
     })
   }

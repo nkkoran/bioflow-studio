@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Settings } from 'lucide-react'
 import { ConnectionStatus } from '@/components/connection/ConnectionStatus'
+import { PipelineSwitcher } from './PipelineSwitcher'
+import { SettingsDialog } from '@/components/settings/SettingsDialog'
 
 // Width below which the TopBar switches to compact mode: title hides,
 // connection status collapses to an icon pill. Measured against the TopBar
@@ -10,6 +12,7 @@ const COMPACT_WIDTH_THRESHOLD = 620
 export function TopBar() {
   const rootRef = useRef<HTMLDivElement>(null)
   const [compact, setCompact] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     const el = rootRef.current
@@ -32,11 +35,7 @@ export function TopBar() {
       {/* macOS traffic light padding */}
       <div className="w-[70px] shrink-0" />
 
-      {!compact && (
-        <span className="text-text-primary text-sm font-semibold font-sans tracking-tight truncate min-w-0">
-          BioFlow Studio
-        </span>
-      )}
+      <PipelineSwitcher compact={compact} />
 
       <div className="flex-1 min-w-0" />
 
@@ -48,12 +47,14 @@ export function TopBar() {
       </div>
 
       <button
+        onClick={() => setSettingsOpen(true)}
         className="p-1.5 rounded hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors shrink-0"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         title="Settings"
       >
         <Settings size={16} />
       </button>
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   )
 }

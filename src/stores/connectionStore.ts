@@ -3,6 +3,17 @@ import type { ConnectionConfig, ConnectionState } from '@/types'
 
 export const LOCAL_CONNECTION_ID = '__local__'
 
+function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
+  return {
+    ...config,
+    name: config.name.trim(),
+    host: config.host.trim(),
+    username: config.username.trim(),
+    privateKeyPath: config.privateKeyPath?.trim(),
+    defaultDirectory: config.defaultDirectory?.trim(),
+  }
+}
+
 interface ConnectionEntry {
   config: ConnectionConfig
   status: ConnectionState
@@ -34,21 +45,22 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   activeConnectionId: null,
 
   connect: async (config) => {
-    const tempId = `${config.host}-${config.username}`
+    const cleanConfig = normalizeConnectionConfig(config)
+    const tempId = `${cleanConfig.host}-${cleanConfig.username}`
     set((state) => ({
       connections: {
         ...state.connections,
-        [tempId]: { config, status: 'connecting', connectedAt: null, isLocal: false },
+        [tempId]: { config: cleanConfig, status: 'connecting', connectedAt: null, isLocal: false },
       },
     }))
 
     try {
-      const result = await window.api.ssh.connect(config)
+      const result = await window.api.ssh.connect(cleanConfig)
       set((state) => ({
         connections: {
           ...state.connections,
           [result.id]: {
-            config,
+            config: cleanConfig,
             status: 'connected',
             connectedAt: Date.now(),
             isLocal: false,

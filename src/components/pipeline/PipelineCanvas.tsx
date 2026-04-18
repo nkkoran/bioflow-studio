@@ -9,6 +9,7 @@
  *   - Keyboard shortcuts: Delete (remove selection), Ctrl/Cmd+Z (undo), Shift+Ctrl/Cmd+Z (redo)
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type React from 'react'
 import {
   ReactFlow,
   Background,
@@ -27,6 +28,7 @@ import { FileNode } from './nodes/FileNode'
 import { NoteNode } from './nodes/NoteNode'
 import { MergeNode } from './nodes/MergeNode'
 import { TransformNode } from './nodes/TransformNode'
+import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { DRAG_MIME } from './ToolPalette'
 import { usePipelineStore } from '@/stores/pipelineStore'
@@ -34,6 +36,7 @@ import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { pathBasename } from '@/lib/utils'
 import type { FileType } from '@/types/pipeline'
+import type { NodeGroup } from '@/types/pipeline'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
 
@@ -53,6 +56,7 @@ function CanvasInner() {
 
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
+  const groups = usePipelineStore((s) => s.groups)
   const onNodesChange = usePipelineStore((s) => s.onNodesChange)
   const onEdgesChange = usePipelineStore((s) => s.onEdgesChange)
   const onConnect = usePipelineStore((s) => s.onConnect)
@@ -67,8 +71,12 @@ function CanvasInner() {
   const duplicateNode = usePipelineStore((s) => s.duplicateNode)
   const copySelection = usePipelineStore((s) => s.copySelection)
   const pasteClipboard = usePipelineStore((s) => s.pasteClipboard)
+  const createGroup = usePipelineStore((s) => s.createGroup)
+  const updateGroup = usePipelineStore((s) => s.updateGroup)
+  const deleteGroup = usePipelineStore((s) => s.deleteGroup)
 
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
 
   /** Accept drop events from the tool palette */
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -218,6 +226,18 @@ function CanvasInner() {
     [setSelectedNode],
   )
 
+  const onNodeContextMenu = useCallback((event: React.MouseEvent) => {
+    const selected = usePipelineStore.getState().nodes.filter((node) => node.selected)
+    if (selected.length < 2) return
+    event.preventDefault()
+    setMenu({ x: event.clientX, y: event.clientY, kind: 'selection' })
+  }, [])
+
+  const onGroupContextMenu = useCallback((event: React.MouseEvent, group: NodeGroup) => {
+    event.preventDefault()
+    setMenu({ x: event.clientX, y: event.clientY, kind: 'group', group })
+  }, [])
+
   /** Keyboard shortcuts */
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -273,6 +293,7 @@ function CanvasInner() {
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onSelectionChange={onSelectionChange}
+        onNodeContextMenu={onNodeContextMenu}
         isValidConnection={isValidConnection}
         defaultEdgeOptions={defaultEdgeOptions}
         proOptions={proOptions}
@@ -301,8 +322,65 @@ function CanvasInner() {
           maskColor="rgba(0,0,0,0.5)"
           style={{ background: 'var(--color-bg-secondary)' }}
         />
+        <GroupOverlay groups={groups} nodes={nodes} onContextMenu={onGroupContextMenu} />
       </ReactFlow>
       {portPicker && <PortPickerPopover state={portPicker} />}
+      {menu && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+          <div
+            className="fixed z-50 min-w-[180px] rounded border border-border bg-bg-secondary py-1 shadow-xl"
+            style={{ left: menu.x, top: menu.y }}
+          >
+            {menu.kind === 'selection' && (
+              <button
+                className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
+                onClick={() => {
+                  const selected = usePipelineStore.getState().nodes.filter((node) => node.selected).map((node) => node.id)
+                  createGroup(selected)
+                  setMenu(null)
+                }}
+              >
+                Group into single sbatch
+              </button>
+            )}
+            {menu.kind === 'group' && menu.group && (
+              <>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
+                  onClick={() => {
+                    deleteGroup(menu.group!.id)
+                    setMenu(null)
+                  }}
+                >
+                  Ungroup
+                </button>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
+                  onClick={() => {
+                    const group = menu.group!
+                    const cpus = prompt('CPUs for grouped sbatch (blank = max across nodes)', group.sharedResources?.cpus?.toString() ?? '')
+                    const memoryGB = prompt('Memory GB for grouped sbatch (blank = max across nodes)', group.sharedResources?.memoryGB?.toString() ?? '')
+                    const timeHours = prompt('Time hours for grouped sbatch (blank = max across nodes)', group.sharedResources?.timeHours?.toString() ?? '')
+                    const partition = prompt('Partition for grouped sbatch (blank = default)', group.sharedResources?.partition ?? '')
+                    updateGroup(group.id, {
+                      sharedResources: {
+                        cpus: cpus ? Number(cpus) : undefined,
+                        memoryGB: memoryGB ? Number(memoryGB) : undefined,
+                        timeHours: timeHours ? Number(timeHours) : undefined,
+                        partition: partition || undefined,
+                      },
+                    })
+                    setMenu(null)
+                  }}
+                >
+                  Edit group resources...
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }

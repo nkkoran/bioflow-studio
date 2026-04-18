@@ -332,6 +332,59 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: 
     }
   }
 
+  for (const group of snapshot.groups ?? []) {
+    const groupNodeIds = new Set(group.nodeIds)
+    const members = group.nodeIds.map((id) => nodeById.get(id)).filter(Boolean) as PipelineSnapshot['nodes']
+    if (members.length !== group.nodeIds.length || members.length < 2) {
+      issues.push({
+        severity: 'error',
+        code: 'GROUP_NON_LINEAR',
+        message: `Group "${group.label}" must contain at least two existing nodes.`,
+      })
+      continue
+    }
+    const nonRunnable = members.find((node) => node.type === 'file' || node.type === 'note')
+    if (nonRunnable) {
+      issues.push({
+        severity: 'error',
+        nodeId: nonRunnable.id,
+        code: 'GROUP_NON_LINEAR',
+        message: `Group "${group.label}" contains a non-runnable node.`,
+        suggestion: 'Only tool, transform, and merge nodes can be grouped into one sbatch.',
+      })
+      continue
+    }
+
+    const internalEdges = snapshot.edges.filter((edge) => groupNodeIds.has(edge.source) && groupNodeIds.has(edge.target))
+    const counts = new Map<string, { in: number; out: number }>()
+    for (const id of group.nodeIds) counts.set(id, { in: 0, out: 0 })
+    for (const edge of internalEdges) {
+      counts.get(edge.source)!.out++
+      counts.get(edge.target)!.in++
+    }
+    const starts = [...counts.values()].filter((count) => count.in === 0 && count.out === 1).length
+    const ends = [...counts.values()].filter((count) => count.in === 1 && count.out === 0).length
+    const middlesOk = [...counts.values()].every((count) => count.in <= 1 && count.out <= 1)
+    if (internalEdges.length !== members.length - 1 || starts !== 1 || ends !== 1 || !middlesOk) {
+      issues.push({
+        severity: 'error',
+        code: 'GROUP_NON_LINEAR',
+        message: `Group "${group.label}" is not a single connected linear chain.`,
+        suggestion: 'Remove branches, fan-in, or disconnected nodes before grouping.',
+      })
+    }
+
+    const axes = new Set(members.map((node) => axisForNode(snapshot, node.id)).filter((axis) => axis !== undefined))
+    if (axes.size > 1) {
+      issues.push({
+        severity: 'error',
+        code: 'GROUP_DIFFERENT_AXIS',
+        message: `Group "${group.label}" mixes nodes with different axes.`,
+        suggestion: 'Group only nodes that run over the same split, or only non-axed nodes.',
+      })
+    }
+  }
+
   const errorCount = issues.filter((i) => i.severity === 'error').length
   const warningCount = issues.filter((i) => i.severity === 'warning').length
   const infoCount = issues.filter((i) => i.severity === 'info').length
@@ -342,6 +395,27 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: { schemas?: 
     warningCount,
     infoCount,
   }
+}
+
+function axisForNode(snapshot: PipelineSnapshot, nodeId: string, seen = new Set<string>()): string | undefined {
+  if (seen.has(nodeId)) return undefined
+  seen.add(nodeId)
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node) return undefined
+  if (node.type === 'file') {
+    const split = (node.data as FileNodeData).split
+    return split?.axis || undefined
+  }
+  if (node.type === 'merge') return undefined
+  const incoming = snapshot.edges.filter((edge) => edge.target === nodeId)
+  const axes = new Set<string>()
+  for (const edge of incoming) {
+    const axis = axisForNode(snapshot, edge.source, seen)
+    if (axis) axes.add(axis)
+  }
+  if (axes.size === 0) return undefined
+  if (axes.size === 1) return [...axes][0]
+  return '__mixed__'
 }
 
 /**

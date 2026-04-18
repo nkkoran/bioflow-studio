@@ -9,7 +9,7 @@
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
 import { X, Trash2, Copy, Plus, Folder } from 'lucide-react'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
@@ -26,6 +26,7 @@ import {
 import type {
   FileNodeData,
   FileNodeSplit,
+  SplitPattern,
   MergeNodeData,
   MergeStrategy,
   NoteNodeData,
@@ -523,10 +524,20 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
 
 function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const onConnect = usePipelineStore((s) => s.onConnect)
+  const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
 
   const split = data.split
   const outputParts = !data.isInput ? splitOutputPath(data) : null
+  const [preview, setPreview] = useState<{ items: FileNodeSplit['items']; missing: Set<string>; loading: boolean; error: string | null }>({
+    items: [],
+    missing: new Set(),
+    loading: false,
+    error: null,
+  })
 
   const setSplit = useCallback(
     (next: FileNodeSplit | undefined) => {
@@ -540,7 +551,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     setSplit({
       axis: split?.axis ?? 'chrom',
       items: [...items, { key: String(items.length + 1), path: '' }],
-      glob: split?.glob,
+      pattern: split?.pattern ?? { kind: 'manual' },
     })
   }, [split, setSplit])
 
@@ -561,59 +572,76 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     [split, setSplit],
   )
 
-  const resolveGlob = useCallback(async () => {
+  const pattern = split?.pattern ?? (split?.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }) as SplitPattern
+
+  const setPattern = useCallback((next: SplitPattern) => {
     if (!split) return
-    const pattern = split.glob?.trim()
-    if (!pattern) {
-      alert('Set a glob pattern first, e.g. /path/to/chr{1..22}.pgen')
-      return
-    }
-    if (!activeConnectionId) {
-      alert('Connect to a host first')
-      return
-    }
+    setSplit({ ...split, pattern: next })
+  }, [split, setSplit])
 
-    const range = pattern.match(/^(.*)\{(\d+)\.\.(\d+)\}(.*)$/)
-    if (range) {
-      const [, prefix, startS, endS, suffix] = range
-      const start = Number(startS)
-      const end = Number(endS)
-      const items: FileNodeSplit['items'] = []
-      for (let k = start; k <= end; k++) {
-        items.push({ key: String(k), path: `${prefix}${k}${suffix}` })
+  useEffect(() => {
+    if (!split) return
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      if (!activeConnectionId) {
+        setPreview({ items: [], missing: new Set(), loading: false, error: 'Connect to a host to preview files.' })
+        return
       }
-      setSplit({ ...split, items })
-      return
-    }
-
-    const starIdx = pattern.indexOf('*')
-    if (starIdx >= 0) {
-      const dir = pattern.slice(0, pattern.lastIndexOf('/'))
+      const currentPattern = split.pattern ?? (split.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }) as SplitPattern
+      const hasPattern =
+        currentPattern.kind === 'manual' ||
+        (currentPattern.kind === 'brace' && currentPattern.template.trim()) ||
+        (currentPattern.kind === 'glob' && currentPattern.template.trim()) ||
+        (currentPattern.kind === 'crossFolder' && currentPattern.parentDir.trim() && currentPattern.childGlob.trim() && currentPattern.file.trim())
+      if (!hasPattern) {
+        setPreview({ items: [], missing: new Set(), loading: false, error: null })
+        return
+      }
+      setPreview((prev) => ({ ...prev, loading: true, error: null }))
       try {
-        const entries = await window.api.sftp.ls(activeConnectionId, dir)
-        const re = new RegExp(
-          '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace('\\*', '(.+)') + '$',
-        )
-        const items: FileNodeSplit['items'] = []
-        for (const e of entries) {
-          const m = re.exec(e.path)
-          if (m) items.push({ key: m[1], path: e.path })
-        }
-        items.sort((a, b) => {
-          const na = Number(a.key)
-          const nb = Number(b.key)
-          if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
-          return a.key.localeCompare(b.key)
-        })
-        setSplit({ ...split, items })
+        const resolved = await window.api.fs.resolveSplit(activeConnectionId, currentPattern, split.items)
+        if (cancelled) return
+        setPreview({ items: resolved.items, missing: new Set(resolved.missing), loading: false, error: null })
       } catch (err: any) {
-        alert(`Could not list ${dir}: ${err?.message ?? err}`)
+        if (cancelled) return
+        setPreview({ items: [], missing: new Set(), loading: false, error: err?.message ?? String(err) })
       }
-      return
+    }, 300)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
     }
+  }, [activeConnectionId, split])
 
-    alert('Pattern must contain {N..M} range or a * wildcard')
-  }, [split, setSplit, activeConnectionId])
+  const acceptPreview = useCallback(() => {
+    if (!split) return
+    setSplit({ ...split, items: preview.items, pattern })
+  }, [split, setSplit, preview.items, pattern])
+
+  const addPlinkFileSet = useCallback(() => {
+    if (!split) return
+    const siblingExts: Array<'pvar' | 'psam'> = ['pvar', 'psam']
+    const outgoing = edges.filter((edge) => edge.source === nodeId)
+    for (const ext of siblingExts) {
+      const nextSplit: FileNodeSplit = {
+        ...split,
+        items: split.items.map((item) => ({ ...item, path: replacePlinkExt(item.path, ext) })),
+      }
+      const fileId = addFileNode(
+        { x: (nodes.find((node) => node.id === nodeId)?.position.x ?? 0) - 180, y: (nodes.find((node) => node.id === nodeId)?.position.y ?? 0) + (ext === 'pvar' ? 80 : 160) },
+        { isInput: true, label: `${data.label}.${ext}`, path: replacePlinkExt(data.path, ext), fileType: ext === 'psam' ? 'tsv' : 'pgen', split: nextSplit },
+      )
+      for (const edge of outgoing) {
+        const target = nodes.find((node) => node.id === edge.target)
+        if (!target || target.type !== 'tool') continue
+        const tool = getTool((target.data as ToolNodeData).toolId)
+        const port = tool?.inputs.find((candidate) => candidate.id.toLowerCase().includes(ext) || candidate.label.toLowerCase().includes(ext))
+        if (port) {
+          onConnect({ source: fileId, sourceHandle: 'output', target: target.id, targetHandle: port.id })
+        }
+      }
+    }
+  }, [addFileNode, data.label, data.path, edges, nodeId, nodes, onConnect, split])
 
   return (
     <div className="flex flex-col gap-3">
@@ -738,29 +766,69 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               placeholder="chrom"
               onChange={(e) => setSplit({ ...split, axis: e.target.value })}
             />
-            <div className="flex flex-col gap-1">
-              <label className="text-text-secondary text-xs font-medium">
-                Glob / range (optional helper)
-              </label>
-              <div className="flex gap-1">
-                <input
-                  type="text"
-                  value={split.glob ?? ''}
-                  placeholder="/path/chr{1..22}.pgen"
-                  onChange={(e) => setSplit({ ...split, glob: e.target.value })}
-                  className="h-8 flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent font-mono"
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={resolveGlob}
-                  className="h-8 px-2 text-[11px]"
-                  title="Resolve glob to items"
+            <div className="grid grid-cols-4 rounded border border-border bg-bg-primary p-0.5">
+              {(['manual', 'brace', 'glob', 'crossFolder'] as SplitPattern['kind'][]).map((kind) => (
+                <button
+                  key={kind}
+                  onClick={() => setPattern(defaultPattern(kind, pattern))}
+                  className={classNames(
+                    'rounded px-1.5 py-1 text-[10px]',
+                    pattern.kind === kind ? 'bg-accent/15 text-text-primary' : 'text-text-muted hover:text-text-primary',
+                  )}
                 >
-                  <Folder size={12} />
-                </Button>
-              </div>
+                  {kind === 'crossFolder' ? 'Cross-folder' : kind === 'brace' ? 'Brace range' : kind[0].toUpperCase() + kind.slice(1)}
+                </button>
+              ))}
             </div>
+
+            {pattern.kind === 'brace' && (
+              <Input
+                label="Brace template"
+                value={pattern.template}
+                placeholder="/scratch/chr{1..22}/geno.pgen"
+                onChange={(e) => setPattern({ kind: 'brace', template: e.target.value })}
+              />
+            )}
+            {pattern.kind === 'glob' && (
+              <div className="grid grid-cols-[1fr_88px] gap-2">
+                <Input
+                  label="Glob template"
+                  value={pattern.template}
+                  placeholder="/scratch/chr*/geno.pgen"
+                  onChange={(e) => setPattern({ ...pattern, template: e.target.value })}
+                />
+                <Input
+                  label="Capture"
+                  value={pattern.capture}
+                  placeholder="chrom"
+                  onChange={(e) => setPattern({ ...pattern, capture: e.target.value })}
+                />
+              </div>
+            )}
+            {pattern.kind === 'crossFolder' && (
+              <div className="grid grid-cols-1 gap-2">
+                <Input
+                  label="Parent directory"
+                  value={pattern.parentDir}
+                  placeholder="/scratch/chroms"
+                  onChange={(e) => setPattern({ ...pattern, parentDir: e.target.value })}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    label="Child folders"
+                    value={pattern.childGlob}
+                    placeholder="chr*"
+                    onChange={(e) => setPattern({ ...pattern, childGlob: e.target.value })}
+                  />
+                  <Input
+                    label="File"
+                    value={pattern.file}
+                    placeholder="geno.pgen"
+                    onChange={(e) => setPattern({ ...pattern, file: e.target.value })}
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="flex items-center justify-between mt-1">
               <label className="text-text-secondary text-xs font-medium">
@@ -805,6 +873,48 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 </div>
               )}
             </div>
+            <div className="rounded border border-border bg-bg-primary">
+              <div className="flex items-center justify-between border-b border-border px-2 py-1">
+                <span className="text-[10px] uppercase tracking-wide text-text-muted">Preview</span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="h-6 px-2 text-[10px]"
+                  disabled={preview.loading || preview.items.length === 0}
+                  onClick={acceptPreview}
+                >
+                  Accept
+                </Button>
+              </div>
+              <div className="max-h-40 overflow-y-auto">
+                {preview.loading && <div className="px-2 py-2 text-[11px] text-text-muted">Checking files...</div>}
+                {preview.error && <div className="px-2 py-2 text-[11px] text-error">{preview.error}</div>}
+                {!preview.loading && !preview.error && preview.items.length === 0 && (
+                  <div className="px-2 py-2 text-[11px] text-text-muted">Enter a pattern above to see which files would be used.</div>
+                )}
+                {!preview.loading && !preview.error && preview.items.length > 0 && (
+                  <table className="w-full text-[10px]">
+                    <tbody>
+                      {preview.items.map((item) => {
+                        const missing = preview.missing.has(item.key)
+                        return (
+                          <tr key={`${item.key}:${item.path}`} className={missing ? 'bg-error/10 text-error' : 'text-text-secondary'}>
+                            <td className="w-12 px-2 py-1 font-mono">{item.key}</td>
+                            <td className="px-2 py-1 font-mono truncate" title={item.path}>{item.path}</td>
+                            <td className="w-14 px-2 py-1 text-right">{missing ? 'missing' : 'exists'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+            {data.fileType === 'pgen' && split.items.length > 0 && (
+              <Button variant="secondary" size="sm" className="h-7 text-[11px]" onClick={addPlinkFileSet}>
+                PLINK2 file-set
+              </Button>
+            )}
             <p className="text-[10px] text-text-muted">
               Downstream tools will auto-fan-out over axis "{split.axis || '?'}".
             </p>
@@ -829,6 +939,19 @@ function joinOutputPath(folder: string, filename: string): string {
   if (!folder.trim()) return filename.trim()
   if (!filename.trim()) return folder.trim()
   return `${folder.replace(/\/+$/, '')}/${filename.trim()}`
+}
+
+function defaultPattern(kind: SplitPattern['kind'], current: SplitPattern): SplitPattern {
+  if (kind === current.kind) return current
+  if (kind === 'manual') return { kind: 'manual' }
+  if (kind === 'brace') return { kind: 'brace', template: current.kind === 'glob' ? current.template : '' }
+  if (kind === 'glob') return { kind: 'glob', template: current.kind === 'brace' ? current.template : '', capture: 'key' }
+  return { kind: 'crossFolder', parentDir: '', childGlob: 'chr*', file: '' }
+}
+
+function replacePlinkExt(path: string, ext: 'pvar' | 'psam'): string {
+  if (!path) return ''
+  return path.replace(/\.(pgen|pvar|psam)$/i, `.${ext}`)
 }
 
 const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] = [

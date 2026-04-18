@@ -3,7 +3,8 @@ import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { headFile } from '@/stores/fileStore'
 import { Tabs } from '@/components/ui/Tabs'
 import { DataTable } from './DataTable'
-import { detectDelimiter, parseTabularData } from './DelimiterDetector'
+import { RawTextView } from './RawTextView'
+import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
 
 export function DataPreview() {
@@ -23,7 +24,7 @@ export function DataPreview() {
             const content = await headFile(filePath, 500)
             if (content.length === 0) {
               setErrors((prev) => ({ ...prev, [tabId]: 'File is empty.' }))
-              setTabData(tabId, { headers: [], rows: [], delimiter: '\t' })
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
               return
             }
             // Crude binary-file guard: a run of null bytes or >5% non-printable chars
@@ -33,22 +34,43 @@ export function DataPreview() {
             if (sample.includes('\u0000') || nonPrintable / sample.length > 0.05) {
               setErrors((prev) => ({
                 ...prev,
-                [tabId]: 'File appears to be binary and cannot be previewed as tabular data.',
+                [tabId]: 'File appears to be binary and cannot be previewed as text.',
               }))
-              setTabData(tabId, { headers: [], rows: [], delimiter: '\t' })
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
               return
             }
-            const delimiter = detectDelimiter(content)
-            const { headers, rows } = parseTabularData(content, delimiter)
+            if (tab.mode === 'text' || tab.mode === 'binary' || tab.mode === 'image') {
+              setErrors((prev) => {
+                const { [tabId]: _, ...rest } = prev
+                return rest
+              })
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: content })
+              return
+            }
+            let delimiter: Delimiter = '\t'
+            let headers: string[] = []
+            let rows: string[][] = []
+            try {
+              delimiter = detectDelimiter(content)
+              ;({ headers, rows } = parseTabularData(content, delimiter))
+            } catch (err) {
+              console.warn('[DataPreview] tabular parse failed; falling back to raw text:', err)
+              setErrors((prev) => ({
+                ...prev,
+                [tabId]: 'Could not parse as a table. Showing raw text.',
+              }))
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: content })
+              return
+            }
             setErrors((prev) => {
               const { [tabId]: _, ...rest } = prev
               return rest
             })
-            setTabData(tabId, { headers, rows, delimiter })
+            setTabData(tabId, { headers, rows, delimiter, rawText: content })
           } catch (err: any) {
             const message = err?.message ?? String(err)
             setErrors((prev) => ({ ...prev, [tabId]: `Failed to load: ${message}` }))
-            useDataPreviewStore.getState().setTabData(tabId, { headers: [], rows: [], delimiter: '\t' })
+            useDataPreviewStore.getState().setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
           } finally {
             loadingRef.current.delete(tabId)
           }
@@ -61,7 +83,7 @@ export function DataPreview() {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted">
         <Table2 size={32} strokeWidth={1.5} />
-        <span className="text-sm">Double-click a tabular file to preview</span>
+        <span className="text-sm">Double-click a file to preview</span>
       </div>
     )
   }
@@ -81,6 +103,34 @@ export function DataPreview() {
         onClose={closeTab}
       />
 
+      {activeTab && !activeTab.loading && activeTab.data?.rawText !== undefined && (
+        <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+          <button
+            className={`rounded border px-2 py-0.5 text-[11px] ${
+              activeTab.mode === 'text'
+                ? 'border-accent bg-accent/10 text-text-primary'
+                : 'border-border text-text-muted hover:text-text-primary'
+            }`}
+            onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'text')}
+          >
+            Raw text
+          </button>
+          <button
+            className={`rounded border px-2 py-0.5 text-[11px] ${
+              activeTab.mode === 'tabular'
+                ? 'border-accent bg-accent/10 text-text-primary'
+                : 'border-border text-text-muted hover:text-text-primary'
+            }`}
+            onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'tabular')}
+          >
+            Table
+          </button>
+          {errors[activeTab.id] && (
+            <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
+          )}
+        </div>
+      )}
+
       <div className="flex-1 min-h-0">
         {activeTab?.loading && (
           <div className="flex items-center justify-center h-full text-text-muted">
@@ -88,11 +138,15 @@ export function DataPreview() {
           </div>
         )}
 
-        {activeTab && !activeTab.loading && activeTab.data && activeTab.data.headers.length > 0 && (
+        {activeTab && !activeTab.loading && activeTab.data && activeTab.mode === 'tabular' && activeTab.data.headers.length > 0 && (
           <DataTable filePath={activeTab.filePath} headers={activeTab.data.headers} rows={activeTab.data.rows} />
         )}
 
-        {activeTab && !activeTab.loading && (!activeTab.data || activeTab.data.headers.length === 0) && (
+        {activeTab && !activeTab.loading && activeTab.data?.rawText !== undefined && (activeTab.mode !== 'tabular' || activeTab.data.headers.length === 0) && activeTab.data.rawText.length > 0 && (
+          <RawTextView text={activeTab.data.rawText} />
+        )}
+
+        {activeTab && !activeTab.loading && (!activeTab.data || (activeTab.data.headers.length === 0 && !activeTab.data.rawText)) && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-text-muted text-sm p-6 text-center">
             <AlertCircle size={20} />
             <span>{errors[activeTab.id] ?? 'No rows found in this file.'}</span>

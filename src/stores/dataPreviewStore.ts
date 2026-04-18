@@ -1,16 +1,20 @@
 import { create } from 'zustand'
 import type { TransformFilterRule } from '@/types/pipeline'
 
+export type PreviewMode = 'tabular' | 'text' | 'binary' | 'image'
+
 interface DataPreviewData {
   headers: string[]
   rows: string[][]
   delimiter: string
+  rawText?: string
 }
 
 interface DataPreviewTab {
   id: string
   filePath: string
   fileName: string
+  mode: PreviewMode
   data: DataPreviewData | null
   loading: boolean
 }
@@ -23,7 +27,7 @@ interface DataPreviewStore {
   sort: Record<string, { column: string; dir: 'asc' | 'desc' } | undefined>
   schemas: Record<string, { columns: string[]; delimiter: string; fetchedAt: number }>
 
-  openFile: (filePath: string, fileName: string) => void
+  openFile: (filePath: string, fileName: string, mode?: PreviewMode) => void
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
   setTabData: (id: string, data: DataPreviewData) => void
@@ -31,6 +35,7 @@ interface DataPreviewStore {
   setFilters: (filePath: string, filters: TransformFilterRule[]) => void
   setSort: (filePath: string, sort: { column: string; dir: 'asc' | 'desc' } | undefined) => void
   setSchema: (filePath: string, schema: { columns: string[]; delimiter: string }) => void
+  clearTabs: () => void
 }
 
 let nextPreviewId = 1
@@ -43,17 +48,24 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
   sort: {},
   schemas: {},
 
-  openFile: (filePath, fileName) => {
+  openFile: (filePath, fileName, mode = 'tabular') => {
     set((state) => {
       // If already open, just activate it
       const existing = state.tabs.find((t) => t.filePath === filePath)
       if (existing) {
-        return { activeTabId: existing.id }
+        return {
+          activeTabId: existing.id,
+          tabs: state.tabs.map((t) =>
+            t.id === existing.id && t.mode !== mode
+              ? { ...t, mode, loading: true, data: null }
+              : t,
+          ),
+        }
       }
 
       const id = `preview-${nextPreviewId++}`
       return {
-        tabs: [...state.tabs, { id, filePath, fileName, data: null, loading: true }],
+        tabs: [...state.tabs, { id, filePath, fileName, mode, data: null, loading: true }],
         activeTabId: id,
       }
     })
@@ -128,4 +140,12 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
         },
       },
     })),
+
+  clearTabs: () => set({
+    tabs: [],
+    activeTabId: null,
+    visibleColumns: {},
+    filters: {},
+    sort: {},
+  }),
 }))

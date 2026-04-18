@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus } from '../../src/types/pipeline'
+import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern } from '../../src/types/pipeline'
 
 // Types matching src/types/
 export interface ConnectionConfig {
@@ -212,6 +212,14 @@ const api = {
   slurm: {
     queue: (connectionId: string): Promise<SlurmQueueEntry[]> =>
       ipcRenderer.invoke('slurm:queue', connectionId),
+  },
+  fs: {
+    resolveSplit: (
+      connectionId: string,
+      pattern: SplitPattern,
+      manualItems?: Array<{ key: string; path: string }>,
+    ): Promise<{ items: Array<{ key: string; path: string }>; missing: string[] }> =>
+      ipcRenderer.invoke('split:resolve', connectionId, pattern, manualItems),
   }
 }
 

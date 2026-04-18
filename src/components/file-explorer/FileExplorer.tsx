@@ -15,8 +15,8 @@ import { useConnectionStore } from '@/stores/connectionStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
-import { isTabularFile, pathBasename } from '@/lib/utils'
 import { inferFileType } from '@/lib/fileTypeInference'
+import { classifyPreview } from '@/lib/filePreviewClassifier'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { Breadcrumb } from './Breadcrumb'
@@ -58,6 +58,7 @@ export function FileExplorer() {
   const filePickMode = useUIStore((s) => s.filePickMode)
   const resolveFilePick = useUIStore((s) => s.resolveFilePick)
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
+  const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
@@ -150,14 +151,10 @@ export function FileExplorer() {
         resolveFilePick(entry.path, inferFileType(entry.name))
         return
       }
-      if (isTabularFile(entry.extension)) {
-        openPreview(entry.path, entry.name)
-      } else {
-        clearSelection()
-        selectFile(entry.path)
-      }
+      openPreview(entry.path, entry.name, classifyPreview(entry.name || entry.path))
+      setBottomPanelMode('data')
     },
-    [filePickMode.active, filePickMode.target, resolveFilePick, openPreview, clearSelection, selectFile],
+    [filePickMode.active, filePickMode.target, resolveFilePick, openPreview, setBottomPanelMode],
   )
 
   // Escape cancels an active pick.

@@ -20,12 +20,13 @@ interface DataTableProps {
 }
 
 const columnHelper = createColumnHelper<string[]>()
+const EMPTY_FILTERS: TransformFilterRule[] = []
 
 export function DataTable({ filePath, headers, rows }: DataTableProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const visibleColumns = useDataPreviewStore((s) => s.visibleColumns[filePath])
   const setVisibleColumns = useDataPreviewStore((s) => s.setVisibleColumns)
-  const filters = useDataPreviewStore((s) => s.filters[filePath] ?? [])
+  const filters = useDataPreviewStore((s) => s.filters[filePath] ?? EMPTY_FILTERS)
   const setFilters = useDataPreviewStore((s) => s.setFilters)
   const sort = useDataPreviewStore((s) => s.sort[filePath])
   const setSort = useDataPreviewStore((s) => s.setSort)

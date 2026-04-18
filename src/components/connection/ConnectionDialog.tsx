@@ -123,17 +123,17 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
     setConnectError(null)
 
     const config: ConnectionConfig = {
-      name: form.name,
-      host: form.host,
+      name: form.name.trim(),
+      host: form.host.trim(),
       port: form.port,
-      username: form.username,
+      username: form.username.trim(),
       authMethod: form.authMethod,
       ...(form.authMethod === 'key' && {
-        privateKeyPath: form.privateKeyPath,
+        privateKeyPath: form.privateKeyPath.trim(),
         passphrase: form.passphrase || undefined,
       }),
       ...(form.authMethod === 'password' && { password: form.password }),
-      ...(form.defaultDirectory && { defaultDirectory: form.defaultDirectory }),
+      ...(form.defaultDirectory.trim() && { defaultDirectory: form.defaultDirectory.trim() }),
     }
 
     const result = connectionConfigSchema.safeParse(config)

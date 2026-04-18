@@ -33,6 +33,7 @@ import type {
   TransformNodeData,
   FileNodeData,
   NoteNodeData,
+  NodeGroup,
 } from '../../src/types/pipeline'
 
 export interface StartOptions {
@@ -48,6 +49,21 @@ export interface StartOptions {
  */
 const DEFAULT_WORKDIR_SUBPATH_PARENT = 'bioflow'
 const MODULE_PREAMBLE = 'module --force purge && module load StdEnv/2023'
+
+interface RunPathSettings {
+  scriptsSubfolder: string
+  outputsSubfolder: string
+  logsSubfolder: string
+  createSubfolders: boolean
+  runFolderTemplate: string
+}
+
+interface RunDirs {
+  workDir: string
+  scriptsDir: string
+  logsDir: string
+  outputRoot: string
+}
 
 export class PipelineRunner {
   private static instance: PipelineRunner | null = null
@@ -86,13 +102,14 @@ export class PipelineRunner {
     // expand it, but keeping both paths consistent here avoids foot-guns.
     const home = await this.resolveHome(connectionId)
 
-    // Human-readable run directory: <root>/runs/<pipeline-slug>-<YYYYMMDD-HHmmss>
-    // Root is the user's configured default analysis folder, or ~/bioflow.
-    const runFolder = `${slugify(snapshot.name || 'pipeline')}-${timestampStamp()}`
+    // Human-readable run directory. Root is the user's configured default
+    // analysis folder, or ~/bioflow; the tail comes from settings.
+    const pathSettings = this.loadRunPathSettings()
     const workRoot = analysisFolder
       ? expandHome(analysisFolder, home)
       : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`
-    const workDir = (opts.workDir ?? `${workRoot}/runs/${runFolder}`).replace(/\/+$/, '')
+    const runDirs = buildRunDirs(opts.workDir, workRoot, snapshot, pathSettings, home)
+    const { workDir, scriptsDir, logsDir, outputRoot } = runDirs
 
     // Pre-compute human-readable slugs for every node (label-based with a short
     // id tail for uniqueness). Same slug feeds the planner and the script
@@ -102,7 +119,7 @@ export class PipelineRunner {
     // Plan axes (throws on cycles, unknown tools, ambiguous axes).
     topoSort(snapshot)
     const plans = planAxes(snapshot, {
-      outputRoot: `${workDir}/outputs`,
+      outputRoot,
       getTool,
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
       homeDir: home,
@@ -121,6 +138,9 @@ export class PipelineRunner {
       pipelineName: snapshot.name,
       connectionId,
       workDir,
+      scriptsDir,
+      logsDir,
+      outputRoot,
       homeDir: home,
       createdAt: now,
       updatedAt: now,
@@ -133,16 +153,16 @@ export class PipelineRunner {
 
     // One exec creates scripts/, logs/, and per-node output dirs (default or
     // override). Overrides are already `~`-expanded by resolveNodeOutputDir.
-    const dirs = new Set<string>([`${workDir}/scripts`, `${workDir}/logs`])
+    const dirs = new Set<string>([scriptsDir, logsDir])
     for (const n of snapshot.nodes) {
       if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
         const slug = nodeSlugs.get(n.id) ?? n.id
         const override = (n.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
-        dirs.add(resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home))
+        dirs.add(resolveNodeOutputDir(override, outputRoot, slug, home))
       }
     }
     for (const plan of plans.values()) {
-      if (plan.nodeType !== 'tool' && plan.nodeType !== 'merge') continue
+      if (plan.nodeType !== 'tool' && plan.nodeType !== 'merge' && plan.nodeType !== 'transform') continue
       for (const path of collectOutputPaths(plan.outputs)) {
         dirs.add(pathDirname(path))
       }
@@ -168,16 +188,17 @@ export class PipelineRunner {
     const connectionDefaults = await this.loadConnectionDefaults(connectionId)
     const analysisFolder = this.loadAnalysisFolder(connectionId)
     const home = await this.resolveHome(connectionId)
-    const runFolder = `${slugify(snapshot.name || 'pipeline')}-${timestampStamp()}`
+    const pathSettings = this.loadRunPathSettings()
     const workRoot = analysisFolder
       ? expandHome(analysisFolder, home)
       : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`
-    const workDir = (opts.workDir ?? `${workRoot}/runs/${runFolder}`).replace(/\/+$/, '')
+    const runDirs = buildRunDirs(opts.workDir, workRoot, snapshot, pathSettings, home)
+    const { workDir, logsDir, outputRoot } = runDirs
     const nodeSlugs = buildNodeSlugs(snapshot)
 
     topoSort(snapshot)
     const plans = planAxes(snapshot, {
-      outputRoot: `${workDir}/outputs`,
+      outputRoot,
       getTool,
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
       homeDir: home,
@@ -193,9 +214,9 @@ export class PipelineRunner {
       if (!node || !plan || (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform')) continue
 
       const slug = nodeSlugs.get(nodeId) ?? nodeId
-      const logDir = `${workDir}/logs`
+      const logDir = logsDir
       const override = (node.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
-      const outputDir = resolveNodeOutputDir(override, `${workDir}/outputs`, slug, home)
+      const outputDir = resolveNodeOutputDir(override, outputRoot, slug, home)
 
       if (node.type === 'tool') {
         const toolData = node.data as ToolNodeData
@@ -323,9 +344,12 @@ export class PipelineRunner {
 
     const connectionDefaults = await this.loadConnectionDefaults(run.connectionId)
     const nodeSlugs = buildNodeSlugs(snapshot)
+    const outputRoot = run.outputRoot ?? `${run.workDir}/outputs`
+    const scriptsDir = run.scriptsDir ?? `${run.workDir}/scripts`
+    const logsDir = run.logsDir ?? `${run.workDir}/logs`
     topoSort(snapshot)
     const plans = planAxes(snapshot, {
-      outputRoot: `${run.workDir}/outputs`,
+      outputRoot,
       getTool,
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
       homeDir: run.homeDir,
@@ -334,13 +358,13 @@ export class PipelineRunner {
     const affected = downstreamOf(snapshot, nodeId)
     if (!affected.has(nodeId)) affected.add(nodeId)
 
-    const dirs = new Set<string>([`${run.workDir}/scripts`, `${run.workDir}/logs`])
+    const dirs = new Set<string>([scriptsDir, logsDir])
     for (const id of affected) {
       const node = snapshot.nodes.find((candidate) => candidate.id === id)
       if (!node || (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform')) continue
       const slug = nodeSlugs.get(id) ?? id
       const override = (node.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
-      dirs.add(resolveNodeOutputDir(override, `${run.workDir}/outputs`, slug, run.homeDir))
+      dirs.add(resolveNodeOutputDir(override, outputRoot, slug, run.homeDir))
       const plan = plans.get(id)
       if (plan) {
         for (const path of collectOutputPaths(plan.outputs)) dirs.add(pathDirname(path))
@@ -467,6 +491,8 @@ export class PipelineRunner {
   ): Promise<void> {
     const { layers } = topoSort(snapshot)
     const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
+    const groupByNode = buildGroupByNode(snapshot)
+    const submittedGroups = new Set<string>()
 
     try {
       for (const layer of layers) {
@@ -476,6 +502,13 @@ export class PipelineRunner {
         for (const nodeId of layer) {
           const node = nodeById.get(nodeId)!
           if (node.type === 'file' || node.type === 'note') continue
+          const group = groupByNode.get(nodeId)
+          if (group) {
+            if (submittedGroups.has(group.id)) continue
+            submittedGroups.add(group.id)
+            pending.push(this.runGroup(run, group, snapshot, plans, connectionDefaults, nodeSlugs))
+            continue
+          }
           pending.push(this.runNode(run, node, plans, connectionDefaults, nodeSlugs))
         }
         await Promise.all(pending)
@@ -535,6 +568,171 @@ export class PipelineRunner {
     }
   }
 
+  private buildNodeScript(
+    run: RunState,
+    node: PipelineSnapshot['nodes'][number],
+    plans: Map<string, AxisPlan>,
+    connectionDefaults: ConnectionDefaults,
+    nodeSlugs: Map<string, string>,
+  ): { script: string; outputDir: string; outputPaths: string[]; arraySize?: number } | null {
+    const plan = plans.get(node.id)
+    if (!plan) throw new Error(`No axis plan for ${node.id}`)
+    const slug = nodeSlugs.get(node.id) ?? node.id
+    const logDir = run.logsDir ?? `${run.workDir}/logs`
+    const override =
+      node.type === 'tool'
+        ? (node.data as ToolNodeData).outputDirOverride
+        : node.type === 'merge'
+          ? (node.data as MergeNodeData).outputDirOverride
+          : node.type === 'transform'
+            ? (node.data as TransformNodeData).outputDirOverride
+            : undefined
+    const outputDir = resolveNodeOutputDir(override, run.outputRoot ?? `${run.workDir}/outputs`, slug, run.homeDir)
+
+    if (node.type === 'tool') {
+      const toolData = node.data as ToolNodeData
+      const tool = getTool(toolData.toolId)
+      if (!tool) return null
+      const gen = generateToolScript({
+        nodeId: node.id, nodeSlug: slug, tool, nodeData: toolData, axisPlan: plan,
+        outputDir, logDir, connectionDefaults,
+      })
+      return { script: gen.script, outputDir, outputPaths: collectOutputPaths(plan.outputs), arraySize: gen.arraySize }
+    }
+
+    if (node.type === 'merge') {
+      const mergeData = node.data as MergeNodeData
+      const inputVal = plan.inputs.input
+      if (!inputVal) return null
+      const effective: MergeNodeData = {
+        ...mergeData,
+        strategy: plan.resolvedMergeStrategy ?? mergeData.strategy,
+      }
+      const gen = generateMergeScript({
+        nodeId: node.id,
+        nodeSlug: slug,
+        mergeData: effective,
+        resolvedInputs: inputVal,
+        upstreamFileType: plan.upstreamFileType ?? 'any',
+        outputDir,
+        logDir,
+        connectionDefaults,
+      })
+      return { script: gen.script, outputDir, outputPaths: [gen.outputPath] }
+    }
+
+    if (node.type === 'transform') {
+      const transformData = node.data as TransformNodeData
+      const gen = generateTransformScript({
+        nodeId: node.id,
+        nodeSlug: slug,
+        transformData,
+        axisPlan: plan,
+        outputDir,
+        logDir,
+        connectionDefaults,
+      })
+      return { script: gen.script, outputDir, outputPaths: collectOutputPaths(plan.outputs), arraySize: gen.arraySize }
+    }
+
+    return null
+  }
+
+  private async runGroup(
+    run: RunState,
+    group: NodeGroup,
+    snapshot: PipelineSnapshot,
+    plans: Map<string, AxisPlan>,
+    connectionDefaults: ConnectionDefaults,
+    nodeSlugs: Map<string, string>,
+  ): Promise<void> {
+    const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
+    const nodes = orderGroupNodes(group, snapshot).map((id) => nodeById.get(id)).filter(Boolean) as PipelineSnapshot['nodes']
+    if (nodes.length === 0) return
+
+    const firstPlan = plans.get(nodes[0].id)
+    if (!firstPlan) throw new Error(`No axis plan for ${nodes[0].id}`)
+    const groupSlug = slugify(group.label || 'group') + '-' + group.id.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toLowerCase()
+    const scriptPath = `${run.scriptsDir ?? `${run.workDir}/scripts`}/${groupSlug}.sbatch`
+    const built = nodes.map((node) => ({ node, built: this.buildNodeScript(run, node, plans, connectionDefaults, nodeSlugs) }))
+    const missing = built.find((entry) => !entry.built)
+    if (missing) {
+      this.failNode(run, run.nodes[missing.node.id], `Could not build grouped script for ${missing.node.id}`)
+      return
+    }
+
+    const script = mergeScriptsForGroup(group, groupSlug, run.logsDir ?? `${run.workDir}/logs`, built.map((entry) => entry.built!.script))
+    await this.sftp.write(run.connectionId, scriptPath, script)
+
+    for (const entry of built) {
+      const ns = run.nodes[entry.node.id]
+      ns.scriptPath = scriptPath
+      ns.outputDir = entry.built!.outputDir
+      ns.outputPaths = entry.built!.outputPaths
+      ns.submittedAt = Date.now()
+      ns.isArray = firstPlan.mode === 'array'
+      ns.arraySize = firstPlan.keys?.length
+    }
+
+    const depIds = groupDependencyJobIds(group, run, plans)
+    const parts = ['sbatch']
+    if (depIds.length > 0) parts.push(`--dependency=afterok:${depIds.join(':')}`)
+    parts.push(shellQuote(scriptPath))
+    const { stdout, stderr, exitCode } = await this.ssh.exec(run.connectionId, parts.join(' '))
+    if (exitCode !== 0) {
+      for (const entry of built) this.failNode(run, run.nodes[entry.node.id], `sbatch failed (${exitCode}): ${(stderr || stdout).trim()}`)
+      return
+    }
+    const match = stdout.match(/Submitted batch job (\d+)/)
+    if (!match) {
+      for (const entry of built) this.failNode(run, run.nodes[entry.node.id], `Could not parse sbatch output: ${stdout.trim()}`)
+      return
+    }
+    const jobId = match[1]
+    for (const entry of built) {
+      const ns = run.nodes[entry.node.id]
+      ns.jobId = jobId
+      ns.status = 'queued'
+      this.emitNodeStatus(run.runId, entry.node.id, 'queued', jobId)
+    }
+
+    await new Promise<void>((resolve) => {
+      this.tracker.watch({
+        connectionId: run.connectionId,
+        jobId,
+        isArray: firstPlan.mode === 'array',
+        onStart: () => {
+          for (const entry of built) {
+            const ns = run.nodes[entry.node.id]
+            ns.status = 'running'
+            ns.startedAt = Date.now()
+            this.emitNodeStatus(run.runId, entry.node.id, 'running', jobId)
+          }
+        },
+        onFinish: (outcome) => {
+          for (const entry of built) {
+            const ns = run.nodes[entry.node.id]
+            ns.finishedAt = Date.now()
+            if (outcome.kind === 'done') {
+              ns.status = 'done'
+              ns.exitCode = outcome.exitCode
+              this.emitNodeStatus(run.runId, entry.node.id, 'done', jobId)
+            } else if (outcome.kind === 'cancelled') {
+              ns.status = 'cancelled'
+              this.emitNodeStatus(run.runId, entry.node.id, 'cancelled', jobId)
+            } else {
+              ns.status = 'failed'
+              ns.exitCode = outcome.exitCode
+              ns.error = outcome.reason
+              this.emitNodeStatus(run.runId, entry.node.id, 'failed', jobId, outcome.reason)
+            }
+          }
+          resolve()
+        },
+      })
+    })
+  }
+
   private async runNode(
     run: RunState,
     node: PipelineSnapshot['nodes'][number],
@@ -546,7 +744,7 @@ export class PipelineRunner {
     if (!plan) throw new Error(`No axis plan for ${node.id}`)
 
     const slug = nodeSlugs.get(node.id) ?? node.id
-    const logDir = `${run.workDir}/logs`
+    const logDir = run.logsDir ?? `${run.workDir}/logs`
     const override =
       node.type === 'tool'
         ? (node.data as ToolNodeData).outputDirOverride
@@ -555,8 +753,8 @@ export class PipelineRunner {
           : node.type === 'transform'
             ? (node.data as TransformNodeData).outputDirOverride
             : undefined
-    const outputDir = resolveNodeOutputDir(override, `${run.workDir}/outputs`, slug, run.homeDir)
-    const scriptPath = `${run.workDir}/scripts/${slug}.sbatch`
+    const outputDir = resolveNodeOutputDir(override, run.outputRoot ?? `${run.workDir}/outputs`, slug, run.homeDir)
+    const scriptPath = `${run.scriptsDir ?? `${run.workDir}/scripts`}/${slug}.sbatch`
     const ns = run.nodes[node.id]
 
     let script: string
@@ -795,12 +993,46 @@ export class PipelineRunner {
       const store = getSettingsStore() as unknown as { get: (k: string) => unknown }
       const rawAccount = store.get(`connection:${connectionId}:slurmAccount`)
       const rawPartition = store.get(`connection:${connectionId}:slurmPartition`)
+      const rawDefaultPartition = store.get('settings:defaultPartition')
       const account = typeof rawAccount === 'string' && rawAccount.trim() ? rawAccount.trim() : undefined
-      const partition = typeof rawPartition === 'string' && rawPartition.trim() ? rawPartition.trim() : undefined
+      const partition =
+        typeof rawDefaultPartition === 'string' && rawDefaultPartition.trim() ? rawDefaultPartition.trim()
+        : typeof rawPartition === 'string' && rawPartition.trim() ? rawPartition.trim()
+        : undefined
       return { account, partition, modulePreamble: MODULE_PREAMBLE }
     } catch (err) {
       console.error('[PipelineRunner] loadConnectionDefaults failed:', err)
       return { modulePreamble: MODULE_PREAMBLE }
+    }
+  }
+
+  private loadRunPathSettings(): RunPathSettings {
+    try {
+      const store = getSettingsStore() as unknown as { get: (k: string) => unknown }
+      const str = (key: string, fallback: string) => {
+        const value = store.get(key)
+        return typeof value === 'string' && value.trim() ? value.trim() : fallback
+      }
+      const bool = (key: string, fallback: boolean) => {
+        const value = store.get(key)
+        return typeof value === 'boolean' ? value : fallback
+      }
+      return {
+        scriptsSubfolder: str('settings:paths:scriptsSubfolder', 'scripts'),
+        outputsSubfolder: str('settings:paths:outputsSubfolder', 'outputs'),
+        logsSubfolder: str('settings:paths:logsSubfolder', 'logs'),
+        createSubfolders: bool('settings:paths:createSubfolders', true),
+        runFolderTemplate: str('settings:paths:runFolderTemplate', 'runs/{pipelineSlug}-{timestamp}'),
+      }
+    } catch (err) {
+      console.error('[PipelineRunner] loadRunPathSettings failed:', err)
+      return {
+        scriptsSubfolder: 'scripts',
+        outputsSubfolder: 'outputs',
+        logsSubfolder: 'logs',
+        createSubfolders: true,
+        runFolderTemplate: 'runs/{pipelineSlug}-{timestamp}',
+      }
     }
   }
 }
@@ -815,6 +1047,155 @@ function expandHome(path: string, home: string): string {
   if (p === '~') return home
   if (p.startsWith('~/')) return `${home}/${p.slice(2)}`
   return p
+}
+
+function buildRunDirs(
+  explicitWorkDir: string | undefined,
+  workRoot: string,
+  snapshot: PipelineSnapshot,
+  settings: RunPathSettings,
+  home: string,
+): RunDirs {
+  const workDir = (explicitWorkDir ?? resolveRunFolder(workRoot, snapshot, settings.runFolderTemplate, home)).replace(/\/+$/, '')
+  if (!settings.createSubfolders) {
+    return { workDir, scriptsDir: workDir, logsDir: workDir, outputRoot: workDir }
+  }
+  return {
+    workDir,
+    scriptsDir: `${workDir}/${cleanPathSegment(settings.scriptsSubfolder || 'scripts')}`,
+    logsDir: `${workDir}/${cleanPathSegment(settings.logsSubfolder || 'logs')}`,
+    outputRoot: `${workDir}/${cleanPathSegment(settings.outputsSubfolder || 'outputs')}`,
+  }
+}
+
+function buildGroupByNode(snapshot: PipelineSnapshot): Map<string, NodeGroup> {
+  const out = new Map<string, NodeGroup>()
+  for (const group of snapshot.groups ?? []) {
+    for (const nodeId of group.nodeIds) out.set(nodeId, group)
+  }
+  return out
+}
+
+function orderGroupNodes(group: NodeGroup, snapshot: PipelineSnapshot): string[] {
+  const ids = new Set(group.nodeIds)
+  const incoming = new Map<string, number>()
+  for (const id of ids) incoming.set(id, 0)
+  for (const edge of snapshot.edges) {
+    if (ids.has(edge.source) && ids.has(edge.target)) {
+      incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1)
+    }
+  }
+  const start = [...incoming.entries()].find(([, count]) => count === 0)?.[0] ?? group.nodeIds[0]
+  const ordered: string[] = []
+  let current: string | undefined = start
+  while (current && ids.has(current) && !ordered.includes(current)) {
+    ordered.push(current)
+    current = snapshot.edges.find((edge) => edge.source === current && ids.has(edge.target))?.target
+  }
+  return ordered.length === group.nodeIds.length ? ordered : group.nodeIds
+}
+
+function mergeScriptsForGroup(group: NodeGroup, groupSlug: string, logDir: string, scripts: string[]): string {
+  if (scripts.length === 0) return ''
+  const firstHeader = scripts[0].split('\n').filter((line) => line.startsWith('#!') || line.startsWith('#SBATCH'))
+  const isArray = firstHeader.some((line) => line.startsWith('#SBATCH --array='))
+  const maxResources = maxScriptResources(scripts)
+  const header = firstHeader.map((line) => {
+    if (line.startsWith('#SBATCH --job-name=')) return `#SBATCH --job-name=bioflow-${groupSlug}`
+    if (line.startsWith('#SBATCH --output=')) return isArray ? `#SBATCH --output=${logDir}/${groupSlug}-%A_%a.out` : `#SBATCH --output=${logDir}/${groupSlug}-%j.out`
+    if (line.startsWith('#SBATCH --error=')) return isArray ? `#SBATCH --error=${logDir}/${groupSlug}-%A_%a.err` : `#SBATCH --error=${logDir}/${groupSlug}-%j.err`
+    if (line.startsWith('#SBATCH --cpus-per-task=')) return `#SBATCH --cpus-per-task=${group.sharedResources?.cpus ?? maxResources.cpus}`
+    if (line.startsWith('#SBATCH --mem=')) return `#SBATCH --mem=${group.sharedResources?.memoryGB ?? maxResources.memoryGB}G`
+    if (line.startsWith('#SBATCH --time=')) return `#SBATCH --time=${formatTime(group.sharedResources?.timeHours ?? maxResources.timeHours)}`
+    if (group.sharedResources?.partition && line.startsWith('#SBATCH --partition=')) return `#SBATCH --partition=${group.sharedResources.partition}`
+    return line
+  })
+  const seenModules = new Set<string>()
+  const bodies = scripts.map((script) => stripScriptHeader(script, seenModules))
+  return [...header, '', 'set -euo pipefail', '', ...bodies].join('\n')
+}
+
+function maxScriptResources(scripts: string[]): { cpus: number; memoryGB: number; timeHours: number } {
+  let cpus = 1
+  let memoryGB = 4
+  let timeHours = 1
+  for (const script of scripts) {
+    for (const line of script.split('\n')) {
+      const cpu = line.match(/^#SBATCH --cpus-per-task=(\d+)/)
+      if (cpu) cpus = Math.max(cpus, Number(cpu[1]))
+      const mem = line.match(/^#SBATCH --mem=(\d+)G/)
+      if (mem) memoryGB = Math.max(memoryGB, Number(mem[1]))
+      const time = line.match(/^#SBATCH --time=(\d+):(\d+):/)
+      if (time) timeHours = Math.max(timeHours, Number(time[1]) + Number(time[2]) / 60)
+    }
+  }
+  return { cpus, memoryGB, timeHours }
+}
+
+function stripScriptHeader(script: string, seenModules: Set<string>): string {
+  const lines = script.split('\n')
+  const firstBody = lines.findIndex((line) => line.trim() === 'set -euo pipefail')
+  const body = lines.slice(firstBody >= 0 ? firstBody + 1 : 0)
+  return body
+    .filter((line) => {
+      if (line.trim() === 'set -euo pipefail') return false
+      if (line.startsWith('module ')) {
+        if (seenModules.has(line)) return false
+        seenModules.add(line)
+      }
+      return true
+    })
+    .join('\n')
+}
+
+function groupDependencyJobIds(group: NodeGroup, run: RunState, plans: Map<string, AxisPlan>): string[] {
+  const groupNodes = new Set(group.nodeIds)
+  const ids = new Set<string>()
+  for (const nodeId of group.nodeIds) {
+    const plan = plans.get(nodeId)
+    for (const upstream of plan?.dependsOnArrayNodeIds ?? []) {
+      if (groupNodes.has(upstream)) continue
+      const jobId = run.nodes[upstream]?.jobId
+      if (jobId) ids.add(jobId)
+    }
+  }
+  return [...ids]
+}
+
+function formatTime(hours: number): string {
+  const h = Math.max(0, Math.floor(hours))
+  const m = Math.max(0, Math.round((hours - h) * 60))
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`
+}
+
+function resolveRunFolder(
+  workRoot: string,
+  snapshot: PipelineSnapshot,
+  template: string,
+  home: string,
+): string {
+  const rendered = renderRunTemplate(template || 'runs/{pipelineSlug}-{timestamp}', snapshot, home)
+  if (rendered.startsWith('/') || rendered === '~' || rendered.startsWith('~/')) {
+    return expandHome(rendered, home)
+  }
+  return `${workRoot.replace(/\/+$/, '')}/${rendered.replace(/^\/+/, '')}`
+}
+
+function renderRunTemplate(template: string, snapshot: PipelineSnapshot, home: string): string {
+  const pipelineName = snapshot.name || 'pipeline'
+  const timestamp = timestampStamp()
+  const date = timestamp.slice(0, 8)
+  const user = pathBasename(home) || 'user'
+  return template
+    .replaceAll('{pipelineSlug}', slugify(pipelineName))
+    .replaceAll('{pipelineName}', slugify(pipelineName))
+    .replaceAll('{timestamp}', timestamp)
+    .replaceAll('{date}', date)
+    .replaceAll('{user}', slugify(user))
+}
+
+function cleanPathSegment(value: string): string {
+  return value.trim().replace(/^\/+|\/+$/g, '') || 'outputs'
 }
 
 function collectOutputPaths(outputs: Record<string, { kind: string; path?: string; paths?: string[] }>): string[] {

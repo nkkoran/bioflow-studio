@@ -6,11 +6,14 @@
  * Handle ids match ToolPort.id from the tool registry so edges encode which
  * port they attach to.
  */
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { classNames } from '@/lib/utils'
 import { getTool } from '@/lib/toolRegistry'
 import type { ToolNodeData } from '@/types/pipeline'
+import { usePipelineStore } from '@/stores/pipelineStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { computeNodeOutputPreview } from '@/lib/outputPathPreview'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 
 interface StatusBadgeProps {
@@ -46,9 +49,38 @@ const CATEGORY_COLORS: Record<string, string> = {
   'custom': 'border-fuchsia-500/40',
 }
 
-function ToolNodeInner({ data, selected }: NodeProps) {
+function ToolNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as ToolNodeData
   const tool = getTool(nodeData.toolId)
+  const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
+  const groups = usePipelineStore((s) => s.groups)
+  const pipelineId = usePipelineStore((s) => s.pipelineId)
+  const pipelineName = usePipelineStore((s) => s.pipelineName)
+  const pipelineDescription = usePipelineStore((s) => s.pipelineDescription)
+  const pathSettings = useSettingsStore((s) => s.settings.paths)
+  const outputPreview = useMemo(() => computeNodeOutputPreview(id, {
+    version: 1,
+    id: pipelineId,
+    name: pipelineName,
+    description: pipelineDescription,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    nodes: nodes.map((node) => ({
+      id: node.id,
+      type: node.type ?? 'tool',
+      position: node.position,
+      data: node.data as any,
+    })),
+    edges: edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      sourceHandle: edge.sourceHandle ?? undefined,
+      target: edge.target,
+      targetHandle: edge.targetHandle ?? undefined,
+    })),
+    groups,
+  }, pathSettings), [id, nodes, edges, groups, pipelineId, pipelineName, pipelineDescription, pathSettings])
 
   if (!tool) {
     return (
@@ -79,6 +111,15 @@ function ToolNodeInner({ data, selected }: NodeProps) {
         </div>
         <StatusBadge status={nodeData.status} />
       </div>
+
+      {outputPreview && (
+        <div
+          className="border-b border-border px-3 py-1 text-[10px] font-mono text-text-muted truncate"
+          title={outputPreview}
+        >
+          {outputPreview}
+        </div>
+      )}
 
       {/* Ports — each row is a fixed-height flex container with the Handle
           absolutely positioned relative to that row so the circle lines up

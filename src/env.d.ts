@@ -91,5 +91,12 @@ interface Window {
         reason: string
       }>>
     }
+    fs: {
+      resolveSplit: (
+        connectionId: string,
+        pattern: import('./types/pipeline').SplitPattern,
+        manualItems?: Array<{ key: string; path: string }>,
+      ) => Promise<{ items: Array<{ key: string; path: string }>; missing: string[] }>
+    }
   }
 }

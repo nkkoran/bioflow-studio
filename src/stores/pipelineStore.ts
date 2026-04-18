@@ -13,6 +13,7 @@ import type {
   MergeNodeData,
   NoteNodeData,
   PipelineSnapshot,
+  NodeGroup,
   TransformNodeData,
   ToolNodeData,
 } from '@/types/pipeline'
@@ -24,6 +25,7 @@ export type BioflowEdge = Edge
 interface HistoryEntry {
   nodes: BioflowNode[]
   edges: BioflowEdge[]
+  groups: NodeGroup[]
 }
 
 interface PipelineState {
@@ -35,6 +37,7 @@ interface PipelineState {
   /** Graph */
   nodes: BioflowNode[]
   edges: BioflowEdge[]
+  groups: NodeGroup[]
 
   /** Selected node id (for the inspector panel) */
   selectedNodeId: string | null
@@ -71,6 +74,7 @@ interface PipelineState {
   addMergeNode: (position: { x: number; y: number }, data?: Partial<MergeNodeData>) => string
   addTransformNode: (position: { x: number; y: number }, data?: Partial<TransformNodeData>) => string
   addNoteNode: (position: { x: number; y: number }) => string
+  addNodesAndEdges: (nodes: BioflowNode[], edges: BioflowEdge[]) => void
 
   updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData>) => void
   deleteNode: (nodeId: string) => void
@@ -78,6 +82,9 @@ interface PipelineState {
   duplicateNode: (nodeId: string) => void
   copySelection: () => void
   pasteClipboard: () => void
+  createGroup: (nodeIds: string[], label?: string) => string
+  updateGroup: (groupId: string, patch: Partial<NodeGroup>) => void
+  deleteGroup: (groupId: string) => void
 
   setSelectedNode: (nodeId: string | null) => void
 
@@ -87,6 +94,7 @@ interface PipelineState {
   loadSnapshot: (snapshot: PipelineSnapshot) => void
   exportSnapshot: () => PipelineSnapshot
   reset: () => void
+  listPipelines: () => Promise<Array<{ id: string; name: string; updatedAt: number }>>
 
   setNodeStatus: (nodeId: string, status: ToolNodeData['status'], jobId?: string, error?: string) => void
 }
@@ -113,6 +121,7 @@ function pushHistory(state: PipelineState): Pick<PipelineState, 'past' | 'future
   const entry: HistoryEntry = {
     nodes: state.nodes,
     edges: state.edges,
+    groups: state.groups,
   }
   const past = [...state.past, entry].slice(-HISTORY_LIMIT)
   return { past, future: [] }
@@ -125,6 +134,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
 
   nodes: [],
   edges: [],
+  groups: [],
   selectedNodeId: null,
 
   past: [],
@@ -282,6 +292,16 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     return id
   },
 
+  addNodesAndEdges: (newNodes, newEdges) => {
+    set((state) => ({
+      nodes: [...state.nodes, ...newNodes],
+      edges: [...state.edges, ...newEdges],
+      selectedNodeId: newNodes[0]?.id ?? state.selectedNodeId,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+  },
+
   updateNodeData: (nodeId, patch) => {
     set((state) => ({
       nodes: state.nodes.map((n) =>
@@ -295,6 +315,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     set((state) => ({
       nodes: state.nodes.filter((n) => n.id !== nodeId),
       edges: state.edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+      groups: state.groups
+        .map((group) => ({ ...group, nodeIds: group.nodeIds.filter((id) => id !== nodeId) }))
+        .filter((group) => group.nodeIds.length > 1),
       selectedNodeId: state.selectedNodeId === nodeId ? null : state.selectedNodeId,
       ...pushHistory(state),
       dirty: true,
@@ -338,6 +361,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       clipboard: {
         nodes: selectedNodes,
         edges: selectedEdges,
+        groups: [],
       },
     })
   },
@@ -382,6 +406,36 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     })
   },
 
+  createGroup: (nodeIds, label) => {
+    const unique = [...new Set(nodeIds)].filter(Boolean)
+    if (unique.length < 2) return ''
+    const id = makeId('group')
+    set((state) => ({
+      groups: [...state.groups, { id, label: label ?? `Group ${state.groups.length + 1}`, nodeIds: unique }],
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  updateGroup: (groupId, patch) => {
+    set((state) => ({
+      groups: state.groups.map((group) =>
+        group.id === groupId ? { ...group, ...patch, id: group.id } : group,
+      ),
+      ...pushHistory(state),
+      dirty: true,
+    }))
+  },
+
+  deleteGroup: (groupId) => {
+    set((state) => ({
+      groups: state.groups.filter((group) => group.id !== groupId),
+      ...pushHistory(state),
+      dirty: true,
+    }))
+  },
+
   setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
   undo: () => {
@@ -391,8 +445,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     set({
       nodes: prev.nodes,
       edges: prev.edges,
+      groups: prev.groups,
       past: state.past.slice(0, -1),
-      future: [{ nodes: state.nodes, edges: state.edges }, ...state.future],
+      future: [{ nodes: state.nodes, edges: state.edges, groups: state.groups }, ...state.future],
       dirty: true,
     })
   },
@@ -404,7 +459,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     set({
       nodes: next.nodes,
       edges: next.edges,
-      past: [...state.past, { nodes: state.nodes, edges: state.edges }],
+      groups: next.groups,
+      past: [...state.past, { nodes: state.nodes, edges: state.edges, groups: state.groups }],
       future: state.future.slice(1),
       dirty: true,
     })
@@ -434,6 +490,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         pipelineDescription: snapshot.description ?? '',
         nodes,
         edges: snapshot.edges,
+        groups: snapshot.groups ?? [],
         selectedNodeId: null,
         past: restored.past,
         future: restored.future,
@@ -466,6 +523,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         target: e.target,
         targetHandle: e.targetHandle ?? undefined,
       })),
+      groups: state.groups,
     }
   },
 
@@ -476,11 +534,23 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       pipelineDescription: '',
       nodes: [],
       edges: [],
+      groups: [],
       selectedNodeId: null,
       past: [],
       future: [],
       dirty: false,
     })
+  },
+
+  listPipelines: async () => {
+    const ids = (await window.api.store.get<string[]>('pipelines:ids')) ?? []
+    const rows = await Promise.all(ids.map(async (id) => {
+      const snap = await window.api.store.get<PipelineSnapshot>(`pipeline:${id}`)
+      return snap ? { id: snap.id, name: snap.name, updatedAt: snap.updatedAt } : null
+    }))
+    return rows
+      .filter((row): row is { id: string; name: string; updatedAt: number } => row !== null)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
   },
 
   setNodeStatus: (nodeId, status, jobId, error) => {
