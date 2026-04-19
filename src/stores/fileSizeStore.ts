@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 
 const TTL_MS = 30_000
 
@@ -11,6 +11,7 @@ interface CachedSize {
 interface FileSizeState {
   sizes: Record<string, CachedSize>
   getSize: (connectionId: string, path: string) => Promise<number>
+  pruneConnections: (liveConnectionIds: string[]) => void
 }
 
 function keyFor(connectionId: string, path: string): string {
@@ -38,4 +39,19 @@ export const useFileSizeStore = create<FileSizeState>((set, get) => ({
       return 0
     }
   },
+
+  pruneConnections: (liveConnectionIds) => {
+    const live = new Set([LOCAL_CONNECTION_ID, ...liveConnectionIds])
+    set((state) => ({
+      sizes: Object.fromEntries(Object.entries(state.sizes).filter(([key]) => live.has(key.split(':', 1)[0]))),
+    }))
+  },
 }))
+
+useConnectionStore.subscribe((state) => {
+  useFileSizeStore.getState().pruneConnections(
+    Object.entries(state.connections)
+      .filter(([, connection]) => connection.status === 'connected')
+      .map(([id]) => id),
+  )
+})

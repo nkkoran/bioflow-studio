@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
-import { headFile } from '@/stores/fileStore'
+import { headPreviewFile, readFileBase64, statFile } from '@/stores/fileStore'
+import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
 import { Tabs } from '@/components/ui/Tabs'
 import { DataTable } from './DataTable'
 import { RawTextView } from './RawTextView'
@@ -11,6 +12,8 @@ export function DataPreview() {
   const { tabs, activeTabId, setActiveTab, closeTab, setTabData } = useDataPreviewStore()
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [ignoredSizeGuard, setIgnoredSizeGuard] = useState<Record<string, boolean>>({})
+  const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
 
   useEffect(() => {
     for (const tab of tabs) {
@@ -21,7 +24,29 @@ export function DataPreview() {
 
         ;(async () => {
           try {
-            const content = await headFile(filePath, 500)
+            const stat = await statFile(filePath)
+            if (stat.size > MAX_PREVIEW_BYTES && !ignoredSizeGuard[tabId]) {
+              setErrors((prev) => ({
+                ...prev,
+                [tabId]: `This file is ${(stat.size / 1_000_000).toFixed(1)} MB. Preview is paused to avoid loading a very large file.`,
+              }))
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
+              return
+            }
+
+            if (tab.mode === 'image' || tab.mode === 'pdf') {
+              const base64 = await readFileBase64(filePath, MAX_PREVIEW_BYTES)
+              const mime = tab.mode === 'pdf' ? 'application/pdf' : mimeForImage(filePath)
+              setMediaUrls((prev) => ({ ...prev, [tabId]: `data:${mime};base64,${base64}` }))
+              setErrors((prev) => {
+                const { [tabId]: _, ...rest } = prev
+                return rest
+              })
+              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
+              return
+            }
+
+            const content = await headPreviewFile(filePath, 500)
             if (content.length === 0) {
               setErrors((prev) => ({ ...prev, [tabId]: 'File is empty.' }))
               setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
@@ -39,7 +64,7 @@ export function DataPreview() {
               setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
               return
             }
-            if (tab.mode === 'text' || tab.mode === 'binary' || tab.mode === 'image') {
+            if (tab.mode === 'text' || tab.mode === 'binary') {
               setErrors((prev) => {
                 const { [tabId]: _, ...rest } = prev
                 return rest
@@ -77,7 +102,7 @@ export function DataPreview() {
         })()
       }
     }
-  }, [tabs, setTabData])
+  }, [ignoredSizeGuard, tabs, setTabData])
 
   if (tabs.length === 0) {
     return (
@@ -128,6 +153,17 @@ export function DataPreview() {
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
           )}
+          {errors[activeTab.id]?.includes('Preview is paused') && (
+            <button
+              className="rounded border border-border px-2 py-0.5 text-[11px] text-text-primary hover:bg-bg-hover"
+              onClick={() => {
+                setIgnoredSizeGuard((prev) => ({ ...prev, [activeTab.id]: true }))
+                useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, activeTab.mode)
+              }}
+            >
+              Open raw text mode
+            </button>
+          )}
         </div>
       )}
 
@@ -142,11 +178,21 @@ export function DataPreview() {
           <DataTable filePath={activeTab.filePath} headers={activeTab.data.headers} rows={activeTab.data.rows} />
         )}
 
-        {activeTab && !activeTab.loading && activeTab.data?.rawText !== undefined && (activeTab.mode !== 'tabular' || activeTab.data.headers.length === 0) && activeTab.data.rawText.length > 0 && (
+        {activeTab && !activeTab.loading && activeTab.mode === 'image' && mediaUrls[activeTab.id] && (
+          <div className="flex h-full items-center justify-center bg-bg-primary p-4">
+            <img src={mediaUrls[activeTab.id]} alt={activeTab.fileName} className="max-h-full max-w-full object-contain" />
+          </div>
+        )}
+
+        {activeTab && !activeTab.loading && activeTab.mode === 'pdf' && mediaUrls[activeTab.id] && (
+          <iframe title={activeTab.fileName} src={mediaUrls[activeTab.id]} className="h-full w-full border-0 bg-bg-primary" />
+        )}
+
+        {activeTab && !activeTab.loading && activeTab.data?.rawText !== undefined && activeTab.mode !== 'image' && activeTab.mode !== 'pdf' && (activeTab.mode !== 'tabular' || activeTab.data.headers.length === 0) && activeTab.data.rawText.length > 0 && (
           <RawTextView text={activeTab.data.rawText} />
         )}
 
-        {activeTab && !activeTab.loading && (!activeTab.data || (activeTab.data.headers.length === 0 && !activeTab.data.rawText)) && (
+        {activeTab && !activeTab.loading && activeTab.mode !== 'image' && activeTab.mode !== 'pdf' && (!activeTab.data || (activeTab.data.headers.length === 0 && !activeTab.data.rawText)) && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-text-muted text-sm p-6 text-center">
             <AlertCircle size={20} />
             <span>{errors[activeTab.id] ?? 'No rows found in this file.'}</span>
@@ -156,4 +202,13 @@ export function DataPreview() {
       </div>
     </div>
   )
+}
+
+function mimeForImage(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase()
+  if (ext === 'jpg') return 'image/jpeg'
+  if (ext === 'svg') return 'image/svg+xml'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  return 'image/png'
 }

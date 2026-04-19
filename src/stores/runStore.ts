@@ -14,6 +14,7 @@ import { create } from 'zustand'
 import type { PipelineSnapshot, RunState, RunStatus } from '@/types/pipeline'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 const LOG_RING_SIZE = 500
 
@@ -241,7 +242,9 @@ function mergeFetchedLog(existing: string[], fetched: string[]): string[] {
 }
 
 function notifyRunFinished(runId: string, status: RunStatus, pipelineName?: string): void {
-  if (typeof window === 'undefined' || !('Notification' in window)) return
+  if (typeof window === 'undefined') return
+  const settings = useSettingsStore.getState().settings
+  if ((status === 'done' && !settings.notifyOnRunFinish) || (status === 'failed' && !settings.notifyOnRunFail)) return
   const name = pipelineName?.trim() || `Run ${runId.slice(0, 8)}`
   const title = status === 'done'
     ? `${name} finished`
@@ -249,6 +252,8 @@ function notifyRunFinished(runId: string, status: RunStatus, pipelineName?: stri
       ? `${name} failed`
       : `${name} cancelled`
   const body = `Pipeline run is ${status}.`
+  if (settings.notifySoundEnabled) playNotificationSound(status)
+  if (!('Notification' in window)) return
   if (Notification.permission === 'granted') {
     new Notification(title, { body })
     return
@@ -258,4 +263,20 @@ function notifyRunFinished(runId: string, status: RunStatus, pipelineName?: stri
       if (permission === 'granted') new Notification(title, { body })
     })
   }
+}
+
+function playNotificationSound(status: RunStatus): void {
+  const audioContextClass = window.AudioContext || (window as any).webkitAudioContext
+  if (!audioContextClass) return
+  const ctx = new audioContextClass()
+  const oscillator = ctx.createOscillator()
+  const gain = ctx.createGain()
+  oscillator.type = status === 'failed' ? 'sawtooth' : 'sine'
+  oscillator.frequency.value = status === 'failed' ? 220 : 660
+  gain.gain.value = 0.05
+  oscillator.connect(gain)
+  gain.connect(ctx.destination)
+  oscillator.start()
+  gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25)
+  oscillator.stop(ctx.currentTime + 0.3)
 }

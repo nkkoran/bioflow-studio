@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { DatasetGuideDialog } from '@/components/settings/DatasetGuideDialog'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
@@ -625,6 +625,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const edges = usePipelineStore((s) => s.edges)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
   const schemas = useDataPreviewStore((s) => s.schemas)
   const setSchema = useDataPreviewStore((s) => s.setSchema)
   const tool = getTool(data.toolId)
@@ -734,6 +735,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               )?.data as FileNodeData | undefined)?.split?.items.length
             : undefined,
           hasFilter: hasFilteringParam(data),
+          partitionMaxMemGB: settings.partitionMaxMemGB,
         }))
       } finally {
         if (!cancelled) setEstimating(false)
@@ -741,7 +743,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     }
     void loadEstimate()
     return () => { cancelled = true }
-  }, [activeConnectionId, axedInputPorts, data, nodeId, snapshot, tool])
+  }, [activeConnectionId, axedInputPorts, data, nodeId, settings.partitionMaxMemGB, snapshot, tool])
 
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
@@ -1097,15 +1099,19 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
 
   const split = data.split
   const outputParts = !data.isInput ? splitOutputPath(data) : null
+  const [uploading, setUploading] = useState(false)
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ items: FileNodeSplit['items']; missing: Set<string>; loading: boolean; error: string | null }>({
     items: [],
     missing: new Set(),
     loading: false,
     error: null,
   })
+  const [refreshNonce, setRefreshNonce] = useState(0)
 
   const setSplit = useCallback(
     (next: FileNodeSplit | undefined) => {
@@ -1179,7 +1185,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [activeConnectionId, split])
+  }, [activeConnectionId, refreshNonce, split])
 
   const acceptPreview = useCallback(() => {
     if (!split) return
@@ -1210,6 +1216,27 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       }
     }
   }, [addFileNode, data.label, data.path, edges, nodeId, nodes, onConnect, split])
+
+  const uploadLocalFile = useCallback(async () => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !data.path.trim()) return
+    setUploading(true)
+    setUploadMessage(null)
+    try {
+      await window.api.local.stat(data.path)
+      const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
+      const fileName = data.path.split('/').pop() || 'input'
+      const uploadDir = `${home}/${settings.paths.uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
+      const remotePath = `${uploadDir}/${fileName}`
+      await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
+      await window.api.sftp.upload(activeConnectionId, data.path, remotePath)
+      updateNodeData(nodeId, { path: remotePath })
+      setUploadMessage(`Uploaded to ${remotePath}`)
+    } catch (err: any) {
+      setUploadMessage(err?.message ?? String(err))
+    } finally {
+      setUploading(false)
+    }
+  }, [activeConnectionId, data.path, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
 
   return (
     <div className="flex flex-col gap-3">
@@ -1245,6 +1272,14 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               Pick…
             </Button>
           </div>
+          {activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="sm" className="h-7 text-[11px]" disabled={uploading} onClick={() => void uploadLocalFile()}>
+                {uploading ? 'Uploading...' : 'Upload local file'}
+              </Button>
+              {uploadMessage && <span className="truncate text-[10px] text-text-muted">{uploadMessage}</span>}
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -1444,15 +1479,26 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             <div className="rounded border border-border bg-bg-primary">
               <div className="flex items-center justify-between border-b border-border px-2 py-1">
                 <span className="text-[10px] uppercase tracking-wide text-text-muted">Preview</span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-6 px-2 text-[10px]"
-                  disabled={preview.loading || preview.items.length === 0}
-                  onClick={acceptPreview}
-                >
-                  Accept
-                </Button>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-[10px]"
+                    disabled={preview.loading}
+                    onClick={() => setRefreshNonce((value) => value + 1)}
+                  >
+                    Refresh
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="h-6 px-2 text-[10px]"
+                    disabled={preview.loading || preview.items.length === 0}
+                    onClick={acceptPreview}
+                  >
+                    Accept
+                  </Button>
+                </div>
               </div>
               <div className="max-h-40 overflow-y-auto">
                 {preview.loading && <div className="px-2 py-2 text-[11px] text-text-muted">Checking files...</div>}

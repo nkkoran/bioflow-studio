@@ -54,7 +54,15 @@ export function ValidationBadge() {
   }, [open])
 
   const handleValidate = () => {
-    const r = validatePipeline(exportSnapshot(), { schemas, annotationDefaults: { annovarDbPath: settings.annovarDbPath, vepCachePath: settings.vepCachePath } })
+    const r = validatePipeline(exportSnapshot(), {
+      schemas,
+      annotationDefaults: {
+        annovarDbPath: settings.annovarDbPath,
+        annovarScriptsPath: settings.annovarScriptsPath,
+        vepCachePath: settings.vepCachePath,
+        vepPath: settings.vepPath,
+      },
+    })
     setResult(r)
     validatedAt.current = { nodeCount: nodes.length, edgeCount: edges.length }
     setOpen(true)

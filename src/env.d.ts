@@ -33,11 +33,13 @@ interface Window {
       ls: (id: string, remotePath: string) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (id: string, remotePath: string) => Promise<import('./types/files').FileStat>
       read: (id: string, remotePath: string, offset?: number, length?: number) => Promise<string>
+      readBase64: (id: string, remotePath: string, offset?: number, length?: number) => Promise<string>
       head: (id: string, remotePath: string, lines: number) => Promise<string>
       mkdir: (id: string, remotePath: string) => Promise<void>
       rename: (id: string, oldPath: string, newPath: string) => Promise<void>
       delete: (id: string, remotePath: string) => Promise<void>
       write: (id: string, remotePath: string, content: string) => Promise<void>
+      upload: (id: string, localPath: string, remotePath: string) => Promise<void>
     }
     terminal: {
       create: (connectionId: string) => Promise<string>
@@ -50,12 +52,15 @@ interface Window {
     store: {
       get: <T>(key: string) => Promise<T | undefined>
       set: <T>(key: string, value: T) => Promise<void>
+      delete: (key: string) => Promise<void>
     }
     local: {
       ls: (dirPath: string) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (filePath: string) => Promise<import('./types/files').FileStat>
       read: (filePath: string, offset?: number, length?: number) => Promise<string>
+      readBase64: (filePath: string, offset?: number, length?: number) => Promise<string>
       head: (filePath: string, lines: number) => Promise<string>
+      headGzip: (filePath: string, lines: number) => Promise<string>
       mkdir: (dirPath: string) => Promise<void>
       rename: (oldPath: string, newPath: string) => Promise<void>
       delete: (filePath: string) => Promise<void>

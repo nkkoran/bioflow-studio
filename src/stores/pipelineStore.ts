@@ -96,6 +96,7 @@ interface PipelineState {
   markSaved: () => void
   reset: () => void
   listPipelines: () => Promise<Array<{ id: string; name: string; updatedAt: number }>>
+  deletePipeline: (id: string) => Promise<void>
 
   setNodeStatus: (nodeId: string, status: ToolNodeData['status'], jobId?: string, error?: string) => void
 }
@@ -551,9 +552,38 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       const snap = await window.api.store.get<PipelineSnapshot>(`pipeline:${id}`)
       return snap ? { id: snap.id, name: snap.name, updatedAt: snap.updatedAt } : null
     }))
-    return rows
+    const liveRows = rows
       .filter((row): row is { id: string; name: string; updatedAt: number } => row !== null)
       .sort((a, b) => b.updatedAt - a.updatedAt)
+    const liveIds = liveRows.map((row) => row.id)
+    if (liveIds.length !== ids.length || liveIds.some((id, index) => id !== ids[index])) {
+      await window.api.store.set('pipelines:ids', liveIds)
+    }
+    return liveRows
+  },
+
+  deletePipeline: async (id) => {
+    const ids = (await window.api.store.get<string[]>('pipelines:ids')) ?? []
+    await window.api.store.set('pipelines:ids', ids.filter((existing) => existing !== id))
+    await window.api.store.delete(`pipeline:${id}`)
+    set((state) => {
+      const { [id]: _history, ...historyByPipeline } = state.historyByPipeline
+      if (state.pipelineId !== id) return { historyByPipeline }
+      return {
+        pipelineId: makeId('pipeline'),
+        pipelineName: 'Untitled pipeline',
+        pipelineDescription: '',
+        nodes: [],
+        edges: [],
+        groups: [],
+        selectedNodeId: null,
+        past: [],
+        future: [],
+        dirty: false,
+        clipboard: null,
+        historyByPipeline,
+      }
+    })
   },
 
   setNodeStatus: (nodeId, status, jobId, error) => {

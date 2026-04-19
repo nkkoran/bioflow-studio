@@ -377,3 +377,107 @@ Verification: build a PLINK2 GWAS with a tiny 10k-variant `.pvar` and see a smal
 - ANNOVAR/VEP database downloads kicked off from the app (requires item 8 plus a download-progress UI; next phase).
 - Visual node grouping with collapse/expand (item 5's group is structural only; always rendered).
 - Remote-workspace sync (e.g. checkout a project folder that includes both the pipeline JSON and the input manifest).
+
+---
+
+# Phase 5 — Polish & Finalization Pass (audit 2026-04-18)
+
+## Context
+
+Items 1–9 landed; item 10 is partly done. A thorough audit across the runtime, UI, validator, and tool registry surfaces two classes of problems: (a) real bugs that silently break advertised features, and (b) UX gaps where the implementation works but the user experience doesn't match what a GWAS researcher actually needs. This pass closes both. The target is a finalized app that a researcher can open cold and run a per-chromosome GWAS + clump + score + annotate pipeline without hitting surprises.
+
+Citations use `file:line` against the tree as of 2026-04-18. Each bullet below is an independently mergeable change.
+
+## A. Bugs to fix (ordered by severity)
+
+### HIGH — runtime correctness
+
+- **Grouped sbatch: no log streaming at all, and per-node attribution impossible.** `runGroup` in [electron/pipeline/PipelineRunner.ts](electron/pipeline/PipelineRunner.ts) has no `tail -F` hookup (compare with `runNode` at line 908), and `mergeScriptsForGroup` writes one shared `.out` for the whole group. **Fix:** emit `echo '::bioflow-step:<nodeId>:start'` / `:end` markers between member scripts in `mergeScriptsForGroup`; add a `tail -F` pair to `runGroup` that demuxes lines by the currently-open marker and forwards `emitJobLog(runId, activeNodeId, chunk, stream)`. When no marker is active, drop chunks to the first member to keep something visible.
+- **Login-node concurrent runs — verify, then harden.** `ssh.execStream` already calls `client.exec(...)` which opens a new SSH channel (so ssh2 multiplexing should cover concurrency). **Fix:** add a smoke test that fires two login-mode shell nodes simultaneously on the same connection and confirms output stays separate. If ssh2 serializes under load (we have seen this on older hpc sshd configs), introduce a small per-connection semaphore in `SshManager` that opens an auxiliary channel above N=2 concurrent login jobs.
+- **ANNOVAR tool is not runnable on a fresh cluster.** [src/lib/toolRegistry.ts](src/lib/toolRegistry.ts) `annovar.table_annovar` has no `module` field and the existing guide skips (1) mandatory user registration at annovar.openbioinformatics.org, (2) tarball extraction, (3) `ANNOVAR_HOME`/PATH export, (4) per-database download loop. **Fix:**
+  - Add optional `annovarPath` param (absolute path to the `annovar/` directory).
+  - Make `module` optional; if neither is set, add validator rule `ANNOVAR_PATH_MISSING` (error).
+  - Rewrite `DatasetGuideDialog` `annovar-humandb` content into four numbered stages with copy-buttons: registration reminder → `tar -xf annovar.latest.tar.gz` → `export PATH="$HOME/annovar:$PATH"` → `cd $HOME/annovar && for db in refGene cytoBand exac03 avsnp150 dbnsfp42a clinvar_20221231 gnomad211_exome; do ./annotate_variation.pl -buildver hg38 -downdb -webfrom annovar $db humandb/; done`.
+- **VEP tool similarly missing module.** [toolRegistry.ts](src/lib/toolRegistry.ts) `vep` entry needs `module: 'vep/110'` or a `vepPath` param; validator rule `VEP_PATH_MISSING`; guide's `vep_install -a cf --CACHE_VERSION 110 --ASSEMBLY GRCh38 --SPECIES homo_sapiens -d $HOME/vep_cache` called out as login-mode work.
+- **ANNOVAR first-run wizard (resolved decision: wizard with manual fallback).** New `src/components/settings/AnnovarSetupWizard.tsx`: detects `humandb/` under `settings:annovarDbPath`; if missing, drives the four-stage script as a single login-mode job with progress. "I'll do it myself" opens the existing `DatasetGuideDialog`.
+
+### MEDIUM — split resolver correctness
+
+- **Brace expansion only parses the first `{N..M}`.** [electron/ipc/fsHandlers.ts](electron/ipc/fsHandlers.ts) regex handles one group per template; `chr{1..22}.{bed,bim,fam}` silently drops the second group. **Fix:** recursive expansion yielding cartesian product; cap at 10 000 results.
+- **Glob capture field is unescaped.** Same file embeds the user's `capture` string directly into a `RegExp`. **Fix:** accept only a token name (`chr`, `sample`), escape the rest of the template, inject `([A-Za-z0-9._-]+?)` for the token slot.
+- **`createSubfolders=false` — confirm applied correctly.** `buildRunDirs` at line 1154 does branch on the setting; re-verify end-to-end that the script/output/log paths all flatten when it's false and that `mkdir -p` doesn't still create stray subfolders.
+- **Run-folder template tokens: inconsistent slugs.** `{pipelineName}` and node labels both go through slugify but in different files. **Fix:** extract one `slugify()` helper to `src/lib/slug.ts`, import from both main and renderer.
+- **Resource estimator: no hard cap.** [src/lib/resourceEstimator.ts](src/lib/resourceEstimator.ts) linear scaling on a 100 GB input suggests 800 GB mem. **Fix:** cap `memGB` at `settings:partitionMaxMemGB` (default 192 for Rorqual) and mark the estimate `confidence: 'low'` when capped.
+- **Estimator cache leaks across connections.** [src/stores/fileSizeStore.ts](src/stores/fileSizeStore.ts) never prunes. **Fix:** subscribe to `connectionStore` and drop entries whose `connectionId` is no longer live.
+- **Preview size guard unused.** [DataPreview.tsx](src/components/data-preview/DataPreview.tsx) defines `MAX_PREVIEW_BYTES` but skips the `sftp.stat` gate. **Fix:** `sftp.stat` before `headFile`; when over the guard, render an "Open in raw text mode" prompt instead of auto-reading 500 lines.
+- **`.gz` files misclassified.** [src/lib/filePreviewClassifier.ts](src/lib/filePreviewClassifier.ts) strips only the final extension. **Fix:** compound-ext peel (reuse `inferFileType`'s logic); add a "Preview gzipped" action that pipes through `zcat | head -n 500` via SSH.
+
+### MEDIUM — persistence & UI drift
+
+- **Pipeline switcher: stale ids accumulate.** [src/stores/pipelineStore.ts](src/stores/pipelineStore.ts) `pipelines:ids` is append-only. **Fix:** on `listPipelines`, verify each id has a live `pipeline:<id>` blob; drop dead ones. Add a delete-with-confirmation action in `PipelineSwitcher.tsx`.
+- **Pipeline rename doesn't propagate to run history (resolved decision: rewrite).** Add `pipelineStore.renamePipeline(id, name)` that updates `pipeline:<id>`, `historyByPipeline[id]`, and walks `runStore.runs` rewriting `pipelineName` on every run whose `pipelineId === id`. Persist via `pipeline:runs:v1` key in the settings store.
+- **Array split items become stale on reload.** No re-resolve. **Fix:** add a "Refresh" button next to the pattern controls; auto-refresh on inspector open when `pattern.kind !== 'manual'`.
+- **`notifySoundEnabled` has no audio path.** Setting is read but nothing plays. **Fix:** bundle `src/assets/notify.wav`, play via `new Audio(url).play()` in `runStore` subscribers on `done`/`failed` when the setting is true.
+
+### LOW — icons, polish, estimator coverage
+
+- **Resource estimator missing common tools.** Add samtools, bwa, fastqc, multiqc, bcftools.merge entries to the heuristics table.
+- **Node icon mapping scattered.** Centralize in `src/lib/toolIcons.ts` (item 10g).
+- **Login-node warning banner** (item 10f): run `hostname && ulimit -t` once at connect time; toast when CPU-time limit < 30 min.
+- **Axis chips on edges** (item 10b): render `{axis}×{N}` via custom `edgeTypes`.
+- **Column mapping in inspector** (item 10c): surface the `columnRef` selector for tools that declare column-typed params.
+
+## B. Additional features (prioritized)
+
+1. **ANNOVAR/VEP first-run wizard** — see HIGH above. Depends on login-node hardening.
+2. **Pipeline templates library** — "Start from template" entry on the switcher: plink2 GWAS, REGENIE two-step, GRS-with-clumping, per-chromosome VCF QC. Each template is a `PipelineSnapshot` with TODO placeholders where user inputs go. Files: new `src/lib/pipelineTemplates.ts`, surface in `PipelineSwitcher.tsx`.
+3. **Failed-job diagnostic helper** — on node-fail, show the last 50 lines of `.err` plus a heuristic ("OOMKilled" → bump mem 2×; `TIMEOUT` → bump time 2×; `command not found` → module missing). One-click "Apply suggestion and rerun". Files: new `src/components/jobs/FailureDiagnostic.tsx`, heuristics in `src/lib/failureHeuristics.ts`.
+4. **Local-to-remote upload helper** — when a FileNode `path` points to a local file, offer SFTP-upload to `settings:paths:uploadsSubfolder` on first run. New preload method `api.sftp.upload(id, localPath, remotePath)` backed by `SftpPool.write` streaming.
+5. **Grouped-sbatch log navigator** — per-member log tabs in JobsPanel once step-markers land.
+6. **Image/PDF preview** — PNG/JPG via `<img src="data:...">`, PDF via `<iframe>`. `classifyPreview` gets an `'image'` branch.
+7. **File explorer search** — recursive `find | head -n 500` over SSH, bound to cwd. Ctrl-F opens a search input above the tree.
+8. **Pipeline diff on reload** — when loading a pipeline with in-memory edits, modal shows node-add/remove/param-change summary before clobbering.
+9. **Per-partition caps in estimator** — parse `scontrol show partition` on connect; clamp estimator output to the chosen partition's `MaxMemPerNode` / `MaxTime`.
+
+## C. Resolved architectural decisions
+
+1. **ANNOVAR install** — Wizard with manual fallback (default: wizard; "I'll do it myself" opens the static guide).
+2. **Login-node concurrency** — Multiplex ssh2 channels per job on the shared connection. Verify on Rorqual; fall back to a semaphore only if output interleaves in testing.
+3. **Grouped sbatch logs** — Step-marker demux; `ScriptGenerator` emits markers, log tailer routes chunks to the active member.
+4. **Pipeline rename** — Rewrite captured `pipelineName` on rename across `pipelineStore` + `runStore`.
+
+## D. Critical files (by section)
+
+- [electron/pipeline/PipelineRunner.ts](electron/pipeline/PipelineRunner.ts) — `runGroup` log tail + demux, step-marker handling, slug helper extraction
+- [electron/pipeline/ScriptGenerator.ts](electron/pipeline/ScriptGenerator.ts) — emit step-markers in grouped output
+- [electron/ipc/fsHandlers.ts](electron/ipc/fsHandlers.ts) — brace expansion recursion, glob capture escape
+- [src/lib/toolRegistry.ts](src/lib/toolRegistry.ts) — annovar/vep module + path fields, new validator-friendly shape
+- [src/lib/pipelineValidator.ts](src/lib/pipelineValidator.ts) — `ANNOVAR_PATH_MISSING`, `VEP_PATH_MISSING`
+- `src/components/settings/DatasetGuideDialog.tsx` — rewrite ANNOVAR/VEP guides into staged copy-blocks
+- New `src/components/settings/AnnovarSetupWizard.tsx` — wizard flow
+- [src/lib/resourceEstimator.ts](src/lib/resourceEstimator.ts) + [src/stores/fileSizeStore.ts](src/stores/fileSizeStore.ts) — partition cap, connection-scoped pruning, additional tools
+- [src/stores/pipelineStore.ts](src/stores/pipelineStore.ts) + `src/components/layout/PipelineSwitcher.tsx` — prune stale ids, delete action, rename propagation
+- [src/components/data-preview/DataPreview.tsx](src/components/data-preview/DataPreview.tsx) + `src/lib/filePreviewClassifier.ts` — size guard, gz handling
+- [src/components/pipeline/NodeInspector.tsx](src/components/pipeline/NodeInspector.tsx) — split refresh, column mapping
+- New `src/lib/slug.ts`, `src/assets/notify.wav`, `src/lib/toolIcons.ts`, `src/lib/pipelineTemplates.ts`, `src/lib/failureHeuristics.ts`
+- New `src/components/jobs/FailureDiagnostic.tsx`
+
+## E. Verification plan
+
+1. **Grouped logs** — group 3 nodes, run, click each in JobsPanel, confirm only that member's lines appear; confirm the shared `.out` on disk matches the concatenation.
+2. **Login concurrency** — fire two login-mode shell nodes simultaneously; stdout stays separate, both exit codes tracked.
+3. **ANNOVAR cold-start** — fresh account: add ANNOVAR node, run wizard, confirm `humandb/` populates, pipeline produces an annotated TSV.
+4. **Cross-folder brace** — `chr{1..22}.{bed,bim,fam}` resolves to 66 green rows.
+5. **createSubfolders=false** — run pipeline; `ls runDir` shows flat layout.
+6. **Preview `.vcf.gz`** — double-click → zcat-piped preview; large file triggers size-guard prompt.
+7. **Estimator cap** — 120 GB input caps at partition max with low confidence.
+8. **Pipeline rename** — rename; existing runs in JobsPanel update their labels immediately.
+9. **Deleted pipeline** — delete from switcher; reload app; stale `pipeline:<id>` key is gone.
+10. **Failed-job diagnostic** — force an OOM; failure card shows "Bump memory 2×" button; clicking reruns with the new override.
+
+## F. Out of scope for this pass
+
+- Learned resource estimation from `sacct` history (still future).
+- Multi-host login-node parallelism.
+- Full module registry with `module spider` autocomplete.
+- Remote-workspace sync.

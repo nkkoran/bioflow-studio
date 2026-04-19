@@ -11,6 +11,7 @@ import {
 } from 'fs'
 import { join, extname, basename } from 'path'
 import { homedir } from 'os'
+import { gunzipSync } from 'zlib'
 import type { RemoteFileEntry, FileStat } from '../ssh/types'
 
 function modeToPermissions(mode: number): string {
@@ -96,6 +97,13 @@ export function registerLocalFileHandlers(): void {
     return buffer.subarray(start, end).toString('utf-8')
   })
 
+  ipcMain.handle('local:read-base64', async (_event, filePath: string, offset?: number, length?: number): Promise<string> => {
+    const buffer = readFileSync(resolvePath(filePath))
+    const start = offset ?? 0
+    const end = length != null ? start + length : buffer.length
+    return buffer.subarray(start, end).toString('base64')
+  })
+
   ipcMain.handle('local:head', async (_event, filePath: string, lines: number): Promise<string> => {
     const resolved = resolvePath(filePath)
     // Read first 64KB then return first N lines
@@ -103,6 +111,12 @@ export function registerLocalFileHandlers(): void {
     const content = fd.length > 65536 ? fd.slice(0, 65536) : fd
     const allLines = content.split('\n')
     return allLines.slice(0, lines).join('\n')
+  })
+
+  ipcMain.handle('local:head-gzip', async (_event, filePath: string, lines: number): Promise<string> => {
+    const buffer = gunzipSync(readFileSync(resolvePath(filePath)))
+    const content = buffer.subarray(0, 256 * 1024).toString('utf-8')
+    return content.split('\n').slice(0, lines).join('\n')
   })
 
   ipcMain.handle('local:mkdir', async (_event, dirPath: string): Promise<void> => {

@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
+import { Button } from '@/components/ui/Button'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
+import { AnnovarSetupWizard } from './AnnovarSetupWizard'
 
 const SECTIONS = ['General', 'Paths', 'Tools', 'Notifications', 'Advanced'] as const
 type Section = typeof SECTIONS[number]
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [section, setSection] = useState<Section>('General')
+  const [annovarWizardOpen, setAnnovarWizardOpen] = useState(false)
   const settings = useSettingsStore((s) => s.settings)
   const load = useSettingsStore((s) => s.load)
   const setSetting = useSettingsStore((s) => s.setSetting)
@@ -55,6 +58,14 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 value={settings.defaultPartition}
                 placeholder="Use connection partition"
                 onChange={(e) => text('settings:defaultPartition', e.target.value)}
+              />
+              <Input
+                label="Partition memory cap (GB)"
+                type="number"
+                min={1}
+                step={1}
+                value={settings.partitionMaxMemGB}
+                onChange={(e) => number('settings:partitionMaxMemGB', Number(e.target.value))}
               />
               <Checkbox
                 label="Open Jobs tab when a run starts"
@@ -119,6 +130,12 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                   onChange={(e) => text('settings:paths:logsSubfolder', e.target.value)}
                 />
               </div>
+              <Input
+                label="Uploads folder"
+                value={settings.paths.uploadsSubfolder}
+                placeholder="uploads"
+                onChange={(e) => text('settings:paths:uploadsSubfolder', e.target.value)}
+              />
             </div>
           )}
 
@@ -159,6 +176,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               <p className="text-[11px] text-text-muted">
                 Node inspector values override these defaults. ANNOVAR scripts may need manual download from the ANNOVAR site before database installs can run.
               </p>
+              <div>
+                <Button variant="secondary" size="sm" onClick={() => setAnnovarWizardOpen(true)}>
+                  ANNOVAR setup wizard
+                </Button>
+              </div>
             </div>
           )}
 
@@ -189,6 +211,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
           )}
         </div>
       </div>
+      <AnnovarSetupWizard open={annovarWizardOpen} onClose={() => setAnnovarWizardOpen(false)} />
     </Dialog>
   )
 }

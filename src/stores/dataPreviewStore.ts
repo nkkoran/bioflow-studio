@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { TransformFilterRule } from '@/types/pipeline'
 
-export type PreviewMode = 'tabular' | 'text' | 'binary' | 'image'
+export type PreviewMode = 'tabular' | 'text' | 'binary' | 'image' | 'pdf'
 
 interface DataPreviewData {
   headers: string[]

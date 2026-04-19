@@ -4,6 +4,7 @@ export interface PathSettings {
   scriptsSubfolder: string
   outputsSubfolder: string
   logsSubfolder: string
+  uploadsSubfolder: string
   createSubfolders: boolean
   runFolderTemplate: string
 }
@@ -16,6 +17,7 @@ export interface AppSettings {
   vepPath: string
   vepCachePath: string
   defaultPartition: string
+  partitionMaxMemGB: number
   autoOpenJobsTabOnRun: boolean
   autosaveEnabled: boolean
   autosaveIntervalSeconds: number
@@ -30,6 +32,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     scriptsSubfolder: 'scripts',
     outputsSubfolder: 'outputs',
     logsSubfolder: 'logs',
+    uploadsSubfolder: 'uploads',
     createSubfolders: true,
     runFolderTemplate: 'runs/{pipelineSlug}-{timestamp}',
   },
@@ -39,6 +42,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   vepPath: '',
   vepCachePath: '',
   defaultPartition: '',
+  partitionMaxMemGB: 192,
   autoOpenJobsTabOnRun: true,
   autosaveEnabled: true,
   autosaveIntervalSeconds: 15,
@@ -70,6 +74,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         scriptsSubfolder: await readSetting('settings:paths:scriptsSubfolder', DEFAULT_SETTINGS.paths.scriptsSubfolder),
         outputsSubfolder: await readSetting('settings:paths:outputsSubfolder', DEFAULT_SETTINGS.paths.outputsSubfolder),
         logsSubfolder: await readSetting('settings:paths:logsSubfolder', DEFAULT_SETTINGS.paths.logsSubfolder),
+        uploadsSubfolder: await readSetting('settings:paths:uploadsSubfolder', DEFAULT_SETTINGS.paths.uploadsSubfolder),
         createSubfolders: await readSetting('settings:paths:createSubfolders', DEFAULT_SETTINGS.paths.createSubfolders),
         runFolderTemplate: await readSetting('settings:paths:runFolderTemplate', DEFAULT_SETTINGS.paths.runFolderTemplate),
       },
@@ -79,6 +84,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       vepPath: await readSetting('settings:vepPath', DEFAULT_SETTINGS.vepPath),
       vepCachePath: await readSetting('settings:vepCachePath', DEFAULT_SETTINGS.vepCachePath),
       defaultPartition: await readSetting('settings:defaultPartition', DEFAULT_SETTINGS.defaultPartition),
+      partitionMaxMemGB: await readSetting('settings:partitionMaxMemGB', DEFAULT_SETTINGS.partitionMaxMemGB),
       autoOpenJobsTabOnRun: await readSetting('settings:autoOpenJobsTabOnRun', DEFAULT_SETTINGS.autoOpenJobsTabOnRun),
       autosaveEnabled: await readSetting('settings:autosaveEnabled', DEFAULT_SETTINGS.autosaveEnabled),
       autosaveIntervalSeconds: await readSetting('settings:autosaveIntervalSeconds', DEFAULT_SETTINGS.autosaveIntervalSeconds),
@@ -98,6 +104,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:paths:scriptsSubfolder': next.paths.scriptsSubfolder = String(value); break
       case 'settings:paths:outputsSubfolder': next.paths.outputsSubfolder = String(value); break
       case 'settings:paths:logsSubfolder': next.paths.logsSubfolder = String(value); break
+      case 'settings:paths:uploadsSubfolder': next.paths.uploadsSubfolder = String(value); break
       case 'settings:paths:createSubfolders': next.paths.createSubfolders = Boolean(value); break
       case 'settings:paths:runFolderTemplate': next.paths.runFolderTemplate = String(value); break
       case 'settings:toolsRoot': next.toolsRoot = String(value); break
@@ -106,6 +113,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:vepPath': next.vepPath = String(value); break
       case 'settings:vepCachePath': next.vepCachePath = String(value); break
       case 'settings:defaultPartition': next.defaultPartition = String(value); break
+      case 'settings:partitionMaxMemGB': next.partitionMaxMemGB = Math.max(1, Number(value) || DEFAULT_SETTINGS.partitionMaxMemGB); break
       case 'settings:autoOpenJobsTabOnRun': next.autoOpenJobsTabOnRun = Boolean(value); break
       case 'settings:autosaveEnabled': next.autosaveEnabled = Boolean(value); break
       case 'settings:autosaveIntervalSeconds': next.autosaveIntervalSeconds = Math.max(5, Number(value) || DEFAULT_SETTINGS.autosaveIntervalSeconds); break

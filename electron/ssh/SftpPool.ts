@@ -1,6 +1,7 @@
 import type { SFTPWrapper, FileEntry as SshFileEntry } from 'ssh2'
 import { SshManager } from './SshManager'
 import type { RemoteFileEntry, FileStat } from './types'
+import { createReadStream } from 'fs'
 
 interface PoolEntry {
   available: SFTPWrapper[]
@@ -187,9 +188,29 @@ export class SftpPool {
     offset?: number,
     length?: number,
   ): Promise<string> {
+    const buffer = await this.readBuffer(connectionId, remotePath, offset, length)
+    return buffer.toString('utf-8')
+  }
+
+  async readBase64(
+    connectionId: string,
+    remotePath: string,
+    offset?: number,
+    length?: number,
+  ): Promise<string> {
+    const buffer = await this.readBuffer(connectionId, remotePath, offset, length)
+    return buffer.toString('base64')
+  }
+
+  private async readBuffer(
+    connectionId: string,
+    remotePath: string,
+    offset?: number,
+    length?: number,
+  ): Promise<Buffer> {
     const sftp = await this.acquire(connectionId)
     try {
-      return await new Promise<string>((resolve, reject) => {
+      return await new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
         const readStream = sftp.createReadStream(remotePath, {
           start: offset,
@@ -201,7 +222,7 @@ export class SftpPool {
         })
 
         readStream.on('end', () => {
-          resolve(Buffer.concat(chunks).toString('utf-8'))
+          resolve(Buffer.concat(chunks))
         })
 
         readStream.on('error', reject)
@@ -305,6 +326,23 @@ export class SftpPool {
         writeStream.on('error', reject)
         writeStream.on('close', () => resolve())
         writeStream.end(Buffer.from(content, 'utf-8'))
+      })
+      this.invalidateCache(connectionId, parentDir(remotePath))
+    } finally {
+      this.release(connectionId, sftp)
+    }
+  }
+
+  async upload(connectionId: string, localPath: string, remotePath: string): Promise<void> {
+    const sftp = await this.acquire(connectionId)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const readStream = createReadStream(localPath)
+        const writeStream = sftp.createWriteStream(remotePath)
+        readStream.on('error', reject)
+        writeStream.on('error', reject)
+        writeStream.on('finish', resolve)
+        readStream.pipe(writeStream)
       })
       this.invalidateCache(connectionId, parentDir(remotePath))
     } finally {

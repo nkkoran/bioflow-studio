@@ -11,4 +11,8 @@ export function registerStoreHandlers(): void {
   ipcMain.handle('store:set', async (_event, key: string, value: any) => {
     store.set(key, value)
   })
+
+  ipcMain.handle('store:delete', async (_event, key: string) => {
+    store.delete(key)
+  })
 }

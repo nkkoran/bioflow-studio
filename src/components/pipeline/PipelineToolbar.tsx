@@ -283,7 +283,15 @@ export function PipelineToolbar() {
       // left the toolbar in an inconsistent state.
       let result
       try {
-        result = validatePipeline(snapshot, { schemas, annotationDefaults: { annovarDbPath: settings.annovarDbPath, vepCachePath: settings.vepCachePath } })
+        result = validatePipeline(snapshot, {
+          schemas,
+          annotationDefaults: {
+            annovarDbPath: settings.annovarDbPath,
+            annovarScriptsPath: settings.annovarScriptsPath,
+            vepCachePath: settings.vepCachePath,
+            vepPath: settings.vepPath,
+          },
+        })
       } catch (err: any) {
         console.error('[PipelineToolbar] validatePipeline threw:', err)
         flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
@@ -313,7 +321,15 @@ export function PipelineToolbar() {
 
     let result
     try {
-      result = validatePipeline(snapshot, { schemas, annotationDefaults: { annovarDbPath: settings.annovarDbPath, vepCachePath: settings.vepCachePath } })
+      result = validatePipeline(snapshot, {
+        schemas,
+        annotationDefaults: {
+          annovarDbPath: settings.annovarDbPath,
+          annovarScriptsPath: settings.annovarScriptsPath,
+          vepCachePath: settings.vepCachePath,
+          vepPath: settings.vepPath,
+        },
+      })
     } catch (err: any) {
       flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
       return

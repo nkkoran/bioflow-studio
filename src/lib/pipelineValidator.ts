@@ -42,7 +42,12 @@ export interface ValidationResult {
 
 export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
   schemas?: SchemaCache
-  annotationDefaults?: { annovarDbPath?: string; vepCachePath?: string }
+  annotationDefaults?: {
+    annovarDbPath?: string
+    annovarScriptsPath?: string
+    vepCachePath?: string
+    vepPath?: string
+  }
 }): ValidationResult {
   const issues: ValidationIssue[] = []
   const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
@@ -239,6 +244,30 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
             code: 'ANNOT_DATABASE_MISSING',
             message: `${tool.name} needs ${tool.requiresDatabase.name}, but no database path is set.`,
             suggestion: 'Open the dataset guide from the node inspector, download the database, then set the database path.',
+          })
+        }
+      }
+
+      if (d.toolId === 'annovar.table_annovar') {
+        const toolPath = String(d.paramValues?.annovarPath ?? d.paramValues?.toolPath ?? opts?.annotationDefaults?.annovarScriptsPath ?? '').trim()
+        if (!toolPath) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'ANNOVAR_PATH_MISSING',
+            message: 'ANNOVAR needs the folder containing table_annovar.pl before it can run.',
+            suggestion: 'Set the ANNOVAR scripts folder in Settings or on this node, or use the setup button to install it under your tools folder.',
+          })
+        }
+      }
+
+      if (d.toolId === 'vep') {
+        const toolPath = String(d.paramValues?.vepPath ?? d.paramValues?.toolPath ?? opts?.annotationDefaults?.vepPath ?? '').trim()
+        if (!toolPath && !tool.module) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'VEP_PATH_MISSING',
+            message: 'VEP needs either a module or the path to a VEP executable before it can run.',
+            suggestion: 'Set the VEP executable path in Settings or on this node, or use the setup button to install it under your tools folder.',
           })
         }
       }

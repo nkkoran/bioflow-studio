@@ -11,8 +11,10 @@ const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'])
 export function classifyPreview(pathOrName: string): PreviewMode {
   const ext = getFileExtension(pathOrName)
   const lower = pathOrName.toLowerCase()
+  if (lower.endsWith('.vcf.gz') || lower.endsWith('.tsv.gz') || lower.endsWith('.csv.gz') || lower.endsWith('.txt.gz')) return 'text'
   if (isTabularFile(ext) || lower.endsWith('.pgen.pvar')) return 'tabular'
   if (IMAGE_EXTENSIONS.has(ext)) return 'image'
+  if (ext === 'pdf') return 'pdf'
   if (TEXT_EXTENSIONS.has(ext)) return 'text'
   return 'binary'
 }

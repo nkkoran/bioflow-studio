@@ -47,6 +47,42 @@ export async function headFile(filePath: string, lines: number): Promise<string>
   }
 }
 
+export async function statFile(filePath: string): Promise<{ size: number; modified: number; isDirectory: boolean; permissions: string }> {
+  const { activeConnectionId } = useConnectionStore.getState()
+  if (!activeConnectionId) throw new Error('Not connected')
+
+  return activeConnectionId === LOCAL_CONNECTION_ID
+    ? window.api.local.stat(filePath)
+    : window.api.sftp.stat(activeConnectionId, filePath)
+}
+
+export async function headPreviewFile(filePath: string, lines: number): Promise<string> {
+  const { activeConnectionId } = useConnectionStore.getState()
+  if (!activeConnectionId) throw new Error('Not connected')
+
+  if (!filePath.toLowerCase().endsWith('.gz')) return headFile(filePath, lines)
+  if (activeConnectionId === LOCAL_CONNECTION_ID) return window.api.local.headGzip(filePath, lines)
+  const command = `gzip -cd -- ${shellQuote(filePath)} 2>/dev/null | head -n ${Math.max(1, Math.floor(lines))}`
+  const result = await window.api.ssh.exec(activeConnectionId, command)
+  if (result.exitCode !== 0 && !result.stdout) {
+    throw new Error((result.stderr || `gzip preview failed with exit ${result.exitCode}`).trim())
+  }
+  return result.stdout
+}
+
+export async function readFileBase64(filePath: string, maxBytes: number): Promise<string> {
+  const { activeConnectionId } = useConnectionStore.getState()
+  if (!activeConnectionId) throw new Error('Not connected')
+
+  return activeConnectionId === LOCAL_CONNECTION_ID
+    ? window.api.local.readBase64(filePath, 0, maxBytes)
+    : window.api.sftp.readBase64(activeConnectionId, filePath, 0, maxBytes)
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
 export const useFileStore = create<FileStore>((set, get) => ({
   cwd: '~',
   entries: [],

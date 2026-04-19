@@ -46,7 +46,9 @@ export function LogViewer({ run, connectionId }: Props) {
   const [stream, setStream] = useState<Stream>('stdout')
   const [taskIdx, setTaskIdx] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [diagnosing, setDiagnosing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [diagnostic, setDiagnostic] = useState<string | null>(null)
 
   const scrollRef = useRef<HTMLPreElement>(null)
   const autoScrollRef = useRef(true)
@@ -132,6 +134,24 @@ export function LogViewer({ run, connectionId }: Props) {
     autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 20
   }
 
+  const diagnoseFailure = useCallback(async () => {
+    if (!ns?.jobId || ns.jobId.startsWith('login-')) return
+    setDiagnosing(true)
+    setDiagnostic(null)
+    try {
+      const jobId = ns.jobId.replace(/[^0-9_.-]/g, '')
+      const result = await window.api.ssh.exec(
+        connectionId,
+        `sacct -j ${jobId} --format=JobID,State,ExitCode,Elapsed,MaxRSS,ReqMem,NodeList,Reason -P 2>/dev/null | head -n 20`,
+      )
+      setDiagnostic((result.stdout || result.stderr || `sacct exited ${result.exitCode}`).trim())
+    } catch (err: any) {
+      setDiagnostic(err?.message ?? String(err))
+    } finally {
+      setDiagnosing(false)
+    }
+  }, [connectionId, ns])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   if (!ns) {
@@ -183,6 +203,17 @@ export function LogViewer({ run, connectionId }: Props) {
         >
           Refresh
         </Button>
+        {ns.status === 'failed' && ns.jobId && !ns.jobId.startsWith('login-') && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void diagnoseFailure()}
+            disabled={diagnosing}
+            className="h-6 px-2 text-[10px]"
+          >
+            {diagnosing ? 'Checking...' : 'Diagnose'}
+          </Button>
+        )}
       </div>
 
       {/* Log body */}
@@ -192,6 +223,7 @@ export function LogViewer({ run, connectionId }: Props) {
         className="flex-1 overflow-auto m-0 px-3 py-2 text-[11px] leading-relaxed font-mono bg-bg-primary text-text-primary whitespace-pre-wrap break-all"
       >
         {error && <div className="text-warning italic">{error}</div>}
+        {diagnostic && <div className="mb-2 whitespace-pre-wrap rounded border border-warning/40 bg-warning/10 p-2 text-warning">{diagnostic}</div>}
         {!error && displayContent.length === 0 && !loading && (
           <div className="text-text-muted italic">
             {ns.status === 'queued' ? 'Waiting for job to start…' : '— empty —'}

@@ -685,7 +685,13 @@ export class PipelineRunner {
       return
     }
 
-    const script = mergeScriptsForGroup(group, groupSlug, run.logsDir ?? `${run.workDir}/logs`, built.map((entry) => entry.built!.script))
+    const logDir = run.logsDir ?? `${run.workDir}/logs`
+    const script = mergeScriptsForGroup(
+      group,
+      groupSlug,
+      logDir,
+      built.map((entry) => ({ nodeId: entry.node.id, script: entry.built!.script })),
+    )
     await this.sftp.write(run.connectionId, scriptPath, script)
 
     for (const entry of built) {
@@ -713,14 +719,25 @@ export class PipelineRunner {
       return
     }
     const jobId = match[1]
+    const stdoutPath = firstPlan.mode === 'array'
+      ? `${logDir}/${groupSlug}-${jobId}_%a.out`
+      : `${logDir}/${groupSlug}-${jobId}.out`
+    const stderrPath = firstPlan.mode === 'array'
+      ? `${logDir}/${groupSlug}-${jobId}_%a.err`
+      : `${logDir}/${groupSlug}-${jobId}.err`
     for (const entry of built) {
       const ns = run.nodes[entry.node.id]
       ns.jobId = jobId
+      ns.stdoutPath = stdoutPath
+      ns.stderrPath = stderrPath
       ns.status = 'queued'
       this.emitNodeStatus(run.runId, entry.node.id, 'queued', jobId)
     }
 
     await new Promise<void>((resolve) => {
+      let cancelTailOut: (() => void) | null = null
+      let cancelTailErr: (() => void) | null = null
+
       this.tracker.watch({
         connectionId: run.connectionId,
         jobId,
@@ -732,8 +749,28 @@ export class PipelineRunner {
             ns.startedAt = Date.now()
             this.emitNodeStatus(run.runId, entry.node.id, 'running', jobId)
           }
+
+          if (firstPlan.mode !== 'array') {
+            const firstNodeId = built[0]?.node.id ?? group.nodeIds[0]
+            const demuxOut = makeGroupLogDemuxer((nodeId, chunk) => this.emitJobLog(run.runId, nodeId, chunk, 'stdout'), firstNodeId)
+            const demuxErr = makeGroupLogDemuxer((nodeId, chunk) => this.emitJobLog(run.runId, nodeId, chunk, 'stderr'), firstNodeId)
+            const { cancel: co } = this.ssh.execStream(
+              run.connectionId,
+              `tail -F -n +1 ${shellQuote(stdoutPath)} 2>/dev/null`,
+              (chunk) => demuxOut(chunk),
+            )
+            const { cancel: ce } = this.ssh.execStream(
+              run.connectionId,
+              `tail -F -n +1 ${shellQuote(stderrPath)} 2>/dev/null`,
+              (chunk) => demuxErr(chunk),
+            )
+            cancelTailOut = co
+            cancelTailErr = ce
+          }
         },
         onFinish: (outcome) => {
+          cancelTailOut?.()
+          cancelTailErr?.()
           for (const entry of built) {
             const ns = run.nodes[entry.node.id]
             ns.finishedAt = Date.now()
@@ -1189,11 +1226,16 @@ function orderGroupNodes(group: NodeGroup, snapshot: PipelineSnapshot): string[]
   return ordered.length === group.nodeIds.length ? ordered : group.nodeIds
 }
 
-function mergeScriptsForGroup(group: NodeGroup, groupSlug: string, logDir: string, scripts: string[]): string {
+function mergeScriptsForGroup(
+  group: NodeGroup,
+  groupSlug: string,
+  logDir: string,
+  scripts: Array<{ nodeId: string; script: string }>,
+): string {
   if (scripts.length === 0) return ''
-  const firstHeader = scripts[0].split('\n').filter((line) => line.startsWith('#!') || line.startsWith('#SBATCH'))
+  const firstHeader = scripts[0].script.split('\n').filter((line) => line.startsWith('#!') || line.startsWith('#SBATCH'))
   const isArray = firstHeader.some((line) => line.startsWith('#SBATCH --array='))
-  const maxResources = maxScriptResources(scripts)
+  const maxResources = maxScriptResources(scripts.map((entry) => entry.script))
   const header = firstHeader.map((line) => {
     if (line.startsWith('#SBATCH --job-name=')) return `#SBATCH --job-name=bioflow-${groupSlug}`
     if (line.startsWith('#SBATCH --output=')) return isArray ? `#SBATCH --output=${logDir}/${groupSlug}-%A_%a.out` : `#SBATCH --output=${logDir}/${groupSlug}-%j.out`
@@ -1205,8 +1247,45 @@ function mergeScriptsForGroup(group: NodeGroup, groupSlug: string, logDir: strin
     return line
   })
   const seenModules = new Set<string>()
-  const bodies = scripts.map((script) => stripScriptHeader(script, seenModules))
+  const bodies = scripts.flatMap(({ nodeId, script }) => {
+    const markerId = shellQuote(nodeId)
+    return [
+      `echo "::bioflow-step:${nodeId}:start"`,
+      `echo "::bioflow-step:${nodeId}:start" >&2`,
+      stripScriptHeader(script, seenModules),
+      `echo "::bioflow-step:${nodeId}:end"`,
+      `echo "::bioflow-step:${nodeId}:end" >&2`,
+      '',
+      `# Finished grouped node ${markerId}`,
+    ]
+  })
   return [...header, '', 'set -euo pipefail', '', ...bodies].join('\n')
+}
+
+function makeGroupLogDemuxer(
+  emit: (nodeId: string, chunk: string) => void,
+  fallbackNodeId: string,
+): (chunk: string) => void {
+  let activeNodeId: string | null = null
+  let buffer = ''
+  return (chunk: string) => {
+    buffer += chunk
+    const lines = buffer.split(/\n/)
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const start = line.match(/^::bioflow-step:(.+):start\r?$/)
+      if (start) {
+        activeNodeId = start[1]
+        continue
+      }
+      const end = line.match(/^::bioflow-step:(.+):end\r?$/)
+      if (end) {
+        activeNodeId = null
+        continue
+      }
+      emit(activeNodeId ?? fallbackNodeId, `${line}\n`)
+    }
+  }
 }
 
 function maxScriptResources(scripts: string[]): { cpus: number; memoryGB: number; timeHours: number } {

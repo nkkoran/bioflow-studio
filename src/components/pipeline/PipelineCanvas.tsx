@@ -17,7 +17,12 @@ import {
   MiniMap,
   ReactFlowProvider,
   useReactFlow,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
   type Connection,
+  type EdgeProps,
+  type EdgeTypes,
   type NodeTypes,
   type OnSelectionChangeParams,
 } from '@xyflow/react'
@@ -31,12 +36,12 @@ import { TransformNode } from './nodes/TransformNode'
 import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { BUNDLE_DRAG_MIME, DRAG_MIME } from './ToolPalette'
-import { usePipelineStore } from '@/stores/pipelineStore'
+import { usePipelineStore, type BioflowNode } from '@/stores/pipelineStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
 import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { pathBasename } from '@/lib/utils'
-import type { FileType } from '@/types/pipeline'
+import type { FileNodeData, FileType, ToolNodeData } from '@/types/pipeline'
 import type { NodeGroup } from '@/types/pipeline'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
@@ -47,6 +52,10 @@ const nodeTypes: NodeTypes = {
   note: NoteNode,
   merge: MergeNode,
   transform: TransformNode,
+}
+
+const edgeTypes: EdgeTypes = {
+  axis: AxisEdge,
 }
 
 const proOptions = { hideAttribution: true }
@@ -79,6 +88,11 @@ function CanvasInner() {
 
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
+  const displayEdges = useMemo(() => edges.map((edge) => ({
+    ...edge,
+    type: 'axis',
+    data: { axis: edgeAxisLabel(edge.source, nodes) },
+  })), [edges, nodes])
 
   /** Accept drop events from the tool palette */
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -298,8 +312,9 @@ function CanvasInner() {
     <div ref={wrapperRef} className="flex-1 h-full w-full" onDrop={onDrop} onDragOver={onDragOver}>
       <ReactFlow
         nodes={nodes}
-        edges={edges}
+        edges={displayEdges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
@@ -394,6 +409,34 @@ function CanvasInner() {
       )}
     </div>
   )
+}
+
+function AxisEdge(props: EdgeProps) {
+  const [edgePath, labelX, labelY] = getBezierPath(props)
+  const axis = typeof props.data?.axis === 'string' ? props.data.axis : ''
+  return (
+    <>
+      <BaseEdge id={props.id} path={edgePath} style={props.style} markerEnd={props.markerEnd} />
+      {axis && (
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan rounded border border-accent/40 bg-bg-secondary px-1.5 py-0.5 text-[9px] font-mono text-accent shadow"
+            style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+          >
+            {axis}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  )
+}
+
+function edgeAxisLabel(sourceId: string, nodes: BioflowNode[]): string {
+  const source = nodes.find((node) => node.id === sourceId)
+  if (!source) return ''
+  if (source.type === 'file') return (source.data as FileNodeData).split?.axis ?? ''
+  if (source.type === 'tool') return (source.data as ToolNodeData).arrayOver ? String((source.data as ToolNodeData).arrayOver) : ''
+  return ''
 }
 
 function findDropTargetTool(

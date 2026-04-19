@@ -16,6 +16,10 @@ export function registerFileHandlers(): void {
     return pool.read(connectionId, remotePath, offset, length)
   })
 
+  ipcMain.handle('sftp:read-base64', async (_event, connectionId: string, remotePath: string, offset?: number, length?: number) => {
+    return pool.readBase64(connectionId, remotePath, offset, length)
+  })
+
   ipcMain.handle('sftp:head', async (_event, connectionId: string, remotePath: string, lines: number) => {
     return pool.head(connectionId, remotePath, lines)
   })
@@ -34,5 +38,9 @@ export function registerFileHandlers(): void {
 
   ipcMain.handle('sftp:write', async (_event, connectionId: string, remotePath: string, content: string) => {
     return pool.write(connectionId, remotePath, content)
+  })
+
+  ipcMain.handle('sftp:upload', async (_event, connectionId: string, localPath: string, remotePath: string) => {
+    return pool.upload(connectionId, localPath, remotePath)
   })
 }

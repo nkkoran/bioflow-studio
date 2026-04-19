@@ -170,6 +170,11 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
                   Connected {formatUptime(Date.now() - activeEntry.connectedAt)}
                 </div>
               )}
+              {!isLocal && (
+                <div className="mt-2 rounded border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+                  Keep heavy work on Slurm. Login-node actions are for setup, downloads, and quick checks only.
+                </div>
+              )}
             </div>
             <div className="p-2 flex flex-col gap-1">
               {!isLocal && (

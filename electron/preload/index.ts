@@ -106,6 +106,8 @@ const api = {
       ipcRenderer.invoke('sftp:stat', id, remotePath),
     read: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
       ipcRenderer.invoke('sftp:read', id, remotePath, offset, length),
+    readBase64: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
+      ipcRenderer.invoke('sftp:read-base64', id, remotePath, offset, length),
     head: (id: string, remotePath: string, lines: number): Promise<string> =>
       ipcRenderer.invoke('sftp:head', id, remotePath, lines),
     mkdir: (id: string, remotePath: string): Promise<void> =>
@@ -115,7 +117,9 @@ const api = {
     delete: (id: string, remotePath: string): Promise<void> =>
       ipcRenderer.invoke('sftp:delete', id, remotePath),
     write: (id: string, remotePath: string, content: string): Promise<void> =>
-      ipcRenderer.invoke('sftp:write', id, remotePath, content)
+      ipcRenderer.invoke('sftp:write', id, remotePath, content),
+    upload: (id: string, localPath: string, remotePath: string): Promise<void> =>
+      ipcRenderer.invoke('sftp:upload', id, localPath, remotePath)
   },
   terminal: {
     create: (connectionId: string): Promise<string> =>
@@ -146,7 +150,9 @@ const api = {
     get: <T>(key: string): Promise<T | undefined> =>
       ipcRenderer.invoke('store:get', key),
     set: <T>(key: string, value: T): Promise<void> =>
-      ipcRenderer.invoke('store:set', key, value)
+      ipcRenderer.invoke('store:set', key, value),
+    delete: (key: string): Promise<void> =>
+      ipcRenderer.invoke('store:delete', key)
   },
   local: {
     ls: (dirPath: string): Promise<RemoteFileEntry[]> =>
@@ -155,8 +161,12 @@ const api = {
       ipcRenderer.invoke('local:stat', filePath),
     read: (filePath: string, offset?: number, length?: number): Promise<string> =>
       ipcRenderer.invoke('local:read', filePath, offset, length),
+    readBase64: (filePath: string, offset?: number, length?: number): Promise<string> =>
+      ipcRenderer.invoke('local:read-base64', filePath, offset, length),
     head: (filePath: string, lines: number): Promise<string> =>
       ipcRenderer.invoke('local:head', filePath, lines),
+    headGzip: (filePath: string, lines: number): Promise<string> =>
+      ipcRenderer.invoke('local:head-gzip', filePath, lines),
     mkdir: (dirPath: string): Promise<void> =>
       ipcRenderer.invoke('local:mkdir', dirPath),
     rename: (oldPath: string, newPath: string): Promise<void> =>

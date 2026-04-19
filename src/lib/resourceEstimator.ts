@@ -7,6 +7,7 @@ export interface EstimateInput {
   isArray: boolean
   arraySize?: number
   hasFilter: boolean
+  partitionMaxMemGB?: number
 }
 
 export interface EstimateOutput {
@@ -64,6 +65,26 @@ export function estimateResources(input: EstimateInput): EstimateOutput {
     memGB = Math.min(64, roundUp(Math.max(8, 8 + sizeGB * 2), 4))
     timeHours = Math.max(1, Math.min(8, roundUp(Math.max(1, sizeGB / 2), 0.5)))
     rationale.push('VCF/BCF size scales bcftools memory and time.')
+  } else if (id.startsWith('samtools.')) {
+    cpus = 4
+    memGB = Math.min(32, roundUp(Math.max(8, 4 + sizeGB), 4))
+    timeHours = Math.max(1, Math.min(8, roundUp(Math.max(1, sizeGB / 3), 0.5)))
+    rationale.push('BAM/CRAM input size scales samtools time and a modest memory baseline.')
+  } else if (id.startsWith('bwa.')) {
+    cpus = 8
+    memGB = Math.min(64, roundUp(Math.max(16, 8 + sizeGB), 4))
+    timeHours = Math.max(2, Math.min(24, roundUp(Math.max(2, sizeGB / 2), 1)))
+    rationale.push('Read alignment benefits from more CPUs and memory proportional to FASTQ size.')
+  } else if (id === 'fastqc') {
+    cpus = 2
+    memGB = 4
+    timeHours = Math.max(0.5, Math.min(4, roundUp(Math.max(0.5, sizeGB / 4), 0.5)))
+    rationale.push('FastQC uses a small fixed memory baseline and time from input size.')
+  } else if (id === 'multiqc') {
+    cpus = 1
+    memGB = 4
+    timeHours = 0.5
+    rationale.push('MultiQC aggregates reports and usually needs only a small allocation.')
   } else if (id === 'plink2.clump') {
     cpus = 4
     memGB = 16
@@ -89,11 +110,19 @@ export function estimateResources(input: EstimateInput): EstimateOutput {
     rationale.push('Using registry defaults because no tool-specific heuristic exists.')
   }
 
+  let confidence = confidenceFor(input.inputSizes)
+  const cap = input.partitionMaxMemGB
+  if (cap && memGB > cap) {
+    memGB = cap
+    confidence = 'low'
+    rationale.push(`Memory estimate was capped at the configured partition limit (${cap} GB).`)
+  }
+
   return {
     cpus,
     memGB,
     timeHours,
     rationale,
-    confidence: confidenceFor(input.inputSizes),
+    confidence,
   }
 }
