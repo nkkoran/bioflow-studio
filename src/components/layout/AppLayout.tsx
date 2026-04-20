@@ -87,6 +87,9 @@ export function AppLayout() {
     void useSettingsStore.getState().load().catch((err) => {
       console.error('[AppLayout] load settings failed:', err)
     })
+    void useUIStore.getState().loadAdvancedExpanded().catch((err) => {
+      console.error('[AppLayout] load advanced params state failed:', err)
+    })
     return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
   }, [])
 

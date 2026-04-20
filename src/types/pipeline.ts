@@ -23,6 +23,8 @@ export interface ToolParam {
   flag?: string             // CLI flag (e.g., "--maf")
   label: string             // display label
   description?: string
+  docUrl?: string
+  advanced?: boolean
   type: 'string' | 'number' | 'boolean' | 'file' | 'select' | 'multi-select'
   default?: string | number | boolean
   required?: boolean
@@ -165,6 +167,7 @@ export interface NodeGroup {
 export interface FileNodeData {
   label: string
   path: string                  // remote path; used when split is absent
+  source?: 'local' | 'remote'
   fileType: FileType
   isInput: boolean              // true = source, false = sink
   outputFilename?: string
@@ -189,6 +192,7 @@ export type MergeStrategy =
 export interface MergeNodeData {
   label: string
   strategy: MergeStrategy
+  convergeMode?: 'axed-fan-in' | 'parallel-branches'
   /** See ToolNodeData.outputDirOverride. */
   outputDirOverride?: string
   slurmOverride?: {
@@ -326,7 +330,7 @@ export interface RunState {
 export interface DryRunScript {
   nodeId: string
   label: string
-  mode: 'single' | 'array' | 'fanIn' | 'skip'
+  mode: 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
   script: string
   outputPaths: string[]
   arraySize?: number

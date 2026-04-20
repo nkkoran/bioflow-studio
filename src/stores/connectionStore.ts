@@ -19,6 +19,7 @@ interface ConnectionEntry {
   status: ConnectionState
   connectedAt: number | null
   isLocal: boolean
+  reused?: boolean
 }
 
 interface ConnectionStore {
@@ -53,7 +54,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     set((state) => ({
       connections: {
         ...state.connections,
-        [tempId]: { config: cleanConfig, status: 'connecting', connectedAt: null, isLocal: false },
+          [tempId]: { config: cleanConfig, status: 'connecting', connectedAt: null, isLocal: false },
       },
     }))
 
@@ -67,6 +68,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             status: 'connected',
             connectedAt: Date.now(),
             isLocal: false,
+            reused: result.reused,
           },
         },
         activeConnectionId: result.id,
@@ -196,6 +198,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             status: entry.connected ? 'connected' : 'disconnected',
             connectedAt: entry.connectedAt,
             isLocal: false,
+            reused: false,
           }
         }
         // If nothing is active and we hydrated at least one connection, pick

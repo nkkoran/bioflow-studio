@@ -19,6 +19,12 @@ import { useSettingsStore } from '@/stores/settingsStore'
 const LOG_RING_SIZE = 500
 
 export interface NodeLogBuffer { stdout: string[]; stderr: string[] }
+export interface FailureDiagnostic {
+  tail: string[]
+  cause: string
+  suggestion: string
+  fix?: { kind: 'memory' | 'time'; multiplier: number }
+}
 
 interface RunStoreState {
   activeRunId: string | null
@@ -27,6 +33,7 @@ interface RunStoreState {
   runs: Record<string, RunState>
   /** Per-node log ring buffers. Keyed by nodeId. */
   logs: Record<string, NodeLogBuffer>
+  diagnostics: Record<string, FailureDiagnostic>
 
   startRun: (connectionId: string, snapshot: PipelineSnapshot) => Promise<string>
   cancelRun: (runId: string) => Promise<void>
@@ -42,6 +49,7 @@ interface RunStoreState {
   setLog: (nodeId: string, stream: 'stdout' | 'stderr', lines: string[]) => void
   /** Replace a node's log buffer without merging — used when switching array tasks. */
   replaceLog: (nodeId: string, stream: 'stdout' | 'stderr', lines: string[]) => void
+  setDiagnostic: (nodeId: string, diagnostic: FailureDiagnostic) => void
   /** Clear log buffers — called on new run start to avoid stale output. */
   clearLogs: () => void
 
@@ -53,6 +61,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   selectedNodeId: null,
   runs: {},
   logs: {},
+  diagnostics: {},
 
   startRun: async (connectionId, snapshot) => {
     const { runId } = await window.api.pipeline.run(connectionId, snapshot)
@@ -134,6 +143,9 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     })
   },
 
+  setDiagnostic: (nodeId, diagnostic) =>
+    set((state) => ({ diagnostics: { ...state.diagnostics, [nodeId]: diagnostic } })),
+
   clearLogs: () => set({ logs: {} }),
 
   subscribeToEvents: () => {
@@ -178,6 +190,11 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
               status: (node?.status ?? status) as any,
               jobId: node?.jobId ?? jobId ?? previous.jobId,
               error: node ? node.error : error,
+            }
+            if (nextNode.status === 'failed') {
+              void fetchFailureDiagnostic(run, nodeId, nextNode.stderrPath).then((diagnostic) => {
+                if (diagnostic) get().setDiagnostic(nodeId, diagnostic)
+              })
             }
             const nodes = {
               ...run.nodes,
@@ -263,6 +280,44 @@ function notifyRunFinished(runId: string, status: RunStatus, pipelineName?: stri
       if (permission === 'granted') new Notification(title, { body })
     })
   }
+}
+
+async function fetchFailureDiagnostic(
+  run: RunState,
+  nodeId: string,
+  stderrPath?: string,
+): Promise<FailureDiagnostic | null> {
+  const path = stderrPath || run.nodes[nodeId]?.stderrPath
+  if (!path || path.includes('%')) return null
+  try {
+    const text = (await window.api.ssh.exec(run.connectionId, `tail -n 50 ${shellQuote(path)} 2>/dev/null || true`)).stdout
+    const tail = text.split(/\r?\n/).slice(-50)
+    return diagnoseTail(tail)
+  } catch {
+    return null
+  }
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_\-./]+$/.test(value)) return value
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function diagnoseTail(tail: string[]): FailureDiagnostic {
+  const text = tail.join('\n')
+  if (/out of memory|oom-kill|oom killed|MemoryError/i.test(text)) {
+    return { tail, cause: 'Likely out of memory', suggestion: 'Increase memory and rerun this step.', fix: { kind: 'memory', multiplier: 2 } }
+  }
+  if (/TIMEOUT|time limit|CANCELLED.*time/i.test(text)) {
+    return { tail, cause: 'Likely hit the Slurm time limit', suggestion: 'Increase wall time and rerun this step.', fix: { kind: 'time', multiplier: 1.5 } }
+  }
+  if (/command not found|No such file or directory: .*plink|No such file or directory: .*regenie|No such file or directory: .*bcftools/i.test(text)) {
+    return { tail, cause: 'Tool or module was not found', suggestion: 'Check the module name or tool path in the node/settings.' }
+  }
+  if (/Invalid chromosome|No variants remaining/i.test(text)) {
+    return { tail, cause: 'Input/filter removed the expected variants', suggestion: 'Check chromosome labels and filter thresholds for this input.' }
+  }
+  return { tail, cause: 'The job failed', suggestion: 'Review the last stderr lines and adjust the node settings before rerunning.' }
 }
 
 function playNotificationSound(status: RunStatus): void {

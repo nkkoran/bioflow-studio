@@ -14,6 +14,7 @@ export interface ConnectionResult {
   id: string
   host: string
   username: string
+  reused?: boolean
 }
 
 export interface LoginPolicy {

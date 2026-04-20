@@ -8,10 +8,11 @@
  *
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
-import { X, Trash2, Copy, Plus, Folder } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { X, Trash2, Copy, Plus, Folder, Info, RefreshCcw, ChevronDown } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { Tooltip } from '@/components/ui/Tooltip'
 import { DatasetGuideDialog } from '@/components/settings/DatasetGuideDialog'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
@@ -25,9 +26,9 @@ import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
 import { ANNOVAR_FEATURES, VEP_FEATURES, annovarDbNames, annovarParamsForFeatures } from '@/lib/annotationCatalog'
 import {
   connectedInputPath,
-  connectedInputSchema,
   parseHeader,
 } from '@/lib/schemaResolver'
+import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -126,6 +127,7 @@ function ParamField({
   value: unknown
   onChange: (v: unknown) => void
 }) {
+  const label = <ParamLabel param={param} />
   switch (param.type) {
     case 'boolean':
       return (
@@ -136,7 +138,7 @@ function ParamField({
             onChange={(e) => onChange(e.target.checked)}
             className="accent-accent"
           />
-          <span className="text-xs text-text-primary">{param.label}</span>
+          <span className="text-xs text-text-primary">{label}</span>
           {param.required && <span className="text-error text-[10px]">*</span>}
         </label>
       )
@@ -145,6 +147,7 @@ function ParamField({
       return (
         <Input
           label={param.label + (param.required ? ' *' : '')}
+          labelNode={label}
           type="number"
           value={value === undefined || value === null ? '' : String(value)}
           min={param.min}
@@ -162,8 +165,7 @@ function ParamField({
       return (
         <div className="flex flex-col gap-1">
           <label className="text-text-secondary text-xs font-medium">
-            {param.label}
-            {param.required && <span className="text-error ml-0.5">*</span>}
+            {label}
           </label>
           <select
             value={value === undefined ? '' : String(value)}
@@ -184,6 +186,7 @@ function ParamField({
       return (
         <Input
           label={param.label + (param.required ? ' *' : '')}
+          labelNode={label}
           type="text"
           value={value === undefined || value === null ? '' : String(value)}
           placeholder={param.placeholder}
@@ -198,32 +201,98 @@ function ColumnParamField({
   value,
   columns,
   loading,
+  refreshing,
+  onRefresh,
   onChange,
 }: {
   param: ToolParam
   value: unknown
   columns: string[]
   loading: boolean
+  refreshing?: boolean
+  onRefresh?: () => void
   onChange: (v: unknown) => void
 }) {
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const [focused, setFocused] = useState(false)
   const current = String(value ?? '')
-  const selected = current.split(',').map((v) => v.trim()).filter(Boolean)
+  const selected = current.split(/[,\s]+/).map((v) => v.trim()).filter(Boolean)
+  const token = current.split(/[,\s]+/).pop()?.toLowerCase() ?? ''
+  const suggestions = columns
+    .filter((column) => !selected.includes(column) || column.toLowerCase().includes(token))
+    .filter((column) => column.toLowerCase().includes(token))
+    .slice(0, 12)
   const toggleColumn = (column: string) => {
     const next = selected.includes(column)
       ? selected.filter((value) => value !== column)
       : [...selected, column]
-    onChange(next.join(','))
+    onChange(next.join(' '))
+  }
+  const insertColumn = (column: string) => {
+    const cursor = inputRef.current?.selectionStart ?? current.length
+    const before = current.slice(0, cursor)
+    const after = current.slice(cursor)
+    const start = Math.max(before.lastIndexOf(','), before.lastIndexOf(' '), before.lastIndexOf('\t')) + 1
+    const endOffset = after.search(/[,\s]/)
+    const end = endOffset === -1 ? current.length : cursor + endOffset
+    const separator = current.includes(',') ? ', ' : ' '
+    const prefix = current.slice(0, start).replace(/[,\s]*$/, '')
+    const suffix = current.slice(end).replace(/^[,\s]*/, '')
+    const next = [prefix, column, suffix].filter(Boolean).join(separator)
+    onChange(next)
+    window.setTimeout(() => inputRef.current?.focus(), 0)
   }
 
   return (
     <div className="flex flex-col gap-1">
-      <Input
-        label={param.label + (param.required ? ' *' : '')}
-        type="text"
-        value={current}
-        placeholder={columns.length > 0 ? 'Pick columns below or type names' : (loading ? 'Loading columns...' : param.placeholder)}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <div className="flex items-end gap-1.5">
+        <div className="relative flex flex-1 flex-col gap-1">
+          <label className="text-text-secondary text-xs font-medium">
+            <ParamLabel param={param} />
+          </label>
+          <input
+            ref={inputRef}
+            type="text"
+            value={current}
+            placeholder={columns.length > 0 ? 'Start typing a column name...' : (loading ? 'Loading columns...' : param.placeholder)}
+            onFocus={() => {
+              setFocused(true)
+              if (columns.length === 0 && !loading && onRefresh) onRefresh()
+            }}
+            onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+            onChange={(e) => onChange(e.target.value)}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          {focused && columns.length > 0 && suggestions.length > 0 && (
+            <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+              {suggestions.map((column) => (
+                <button
+                  key={column}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    insertColumn(column)
+                  }}
+                  className="block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover"
+                >
+                  {column}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {onRefresh && (
+          <button
+            type="button"
+            title="Refresh upstream columns"
+            onClick={onRefresh}
+            className="mb-0 flex h-8 items-center gap-1 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text-primary"
+          >
+            <RefreshCcw size={13} className={refreshing ? 'animate-spin' : ''} />
+            Columns
+          </button>
+        )}
+      </div>
       {columns.length > 0 ? (
         <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
           {columns.map((column) => {
@@ -251,6 +320,44 @@ function ColumnParamField({
         </p>
       )}
     </div>
+  )
+}
+
+function ParamLabel({ param }: { param: ToolParam }) {
+  const text = (
+    <>
+      {param.label}
+      {param.required && <span className="text-error ml-0.5">*</span>}
+    </>
+  )
+  if (!param.description && !param.docUrl) return <>{text}</>
+  return (
+    <Tooltip
+      side="right"
+      content={
+        <span className="block max-w-[260px] whitespace-normal leading-relaxed">
+          {param.description && <span className="block">{param.description}</span>}
+          {param.docUrl && (
+            <button
+              type="button"
+              className="mt-1 text-accent underline"
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                window.open(param.docUrl, '_blank', 'noopener,noreferrer')
+              }}
+            >
+              View docs
+            </button>
+          )}
+        </span>
+      }
+    >
+      <span className="inline-flex cursor-help items-center gap-1">
+        <span>{text}</span>
+        <Info size={11} className="text-text-muted" />
+      </span>
+    </Tooltip>
   )
 }
 
@@ -646,6 +753,9 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const [estimating, setEstimating] = useState(false)
   const [showEstimateWhy, setShowEstimateWhy] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
+  const [refreshingSchemaPath, setRefreshingSchemaPath] = useState<string | null>(null)
+  const advancedExpanded = useUIStore((s) => s.advancedExpanded[data.toolId] ?? false)
+  const setAdvancedExpanded = useUIStore((s) => s.setAdvancedExpanded)
 
   /**
    * Inputs whose upstream source carries an axis — either a file node with
@@ -689,6 +799,26 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     [nodeId, data.slurmOverride, updateNodeData],
   )
 
+  const loadSchemaForPath = useCallback(async (path: string, options?: { force?: boolean }) => {
+    if (!activeConnectionId || !path) return
+    if (!options?.force && schemas[path]) return
+    setRefreshingSchemaPath(path)
+    try {
+      const [stat, text] = await Promise.all([
+        window.api.sftp.stat(activeConnectionId, path).catch(() => null),
+        window.api.sftp.head(activeConnectionId, path, 30),
+      ])
+      const current = useDataPreviewStore.getState().schemas[path]
+      if (!options?.force && current && stat?.modified && current.modified === stat.modified) return
+      const schema = parseHeader(text, path)
+      if (schema.columns.length > 0) {
+        setSchema(path, { columns: schema.columns, delimiter: schema.delimiter, modified: stat?.modified })
+      }
+    } finally {
+      setRefreshingSchemaPath(null)
+    }
+  }, [activeConnectionId, schemas, setSchema])
+
   useEffect(() => {
     if (!activeConnectionId || !tool) return
     const refs = tool.params.filter((param) => param.columnRef)
@@ -699,10 +829,8 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         const path = connectedInputPath(snapshot, nodeId, param.columnSourcePortId ?? 'input')
         if (!path || schemas[path]) continue
         try {
-          const text = await window.api.sftp.head(activeConnectionId!, path, 30)
           if (cancelled) return
-          const schema = parseHeader(text, path)
-          if (schema.columns.length > 0) setSchema(path, { columns: schema.columns, delimiter: schema.delimiter })
+          await loadSchemaForPath(path)
         } catch {
           // Missing schema is non-blocking; users can still type values.
         }
@@ -710,7 +838,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     }
     void loadSchemas()
     return () => { cancelled = true }
-  }, [activeConnectionId, loadingSchemaKey, nodeId, schemas, setSchema, snapshot, tool])
+  }, [activeConnectionId, loadingSchemaKey, loadSchemaForPath, nodeId, schemas, snapshot, tool])
 
   useEffect(() => {
     if (!activeConnectionId || !tool) {
@@ -777,6 +905,8 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const visibleParams = tool.requiresDatabase
     ? tool.params.filter((param) => !ANNOTATION_INTERNAL_PARAMS.has(param.name))
     : tool.params
+  const commonParams = visibleParams.filter((param) => !param.advanced)
+  const advancedParams = visibleParams.filter((param) => param.advanced)
   const applyEstimate = () => {
     if (!estimate) return
     updateNodeData(nodeId, {
@@ -897,9 +1027,9 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           Parameters
         </h4>
         <div className="flex flex-col gap-2">
-          {visibleParams.map((p) => {
+          {commonParams.map((p) => {
             const schema = p.columnRef
-              ? connectedInputSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+              ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
               : null
             const inputPath = p.columnRef
               ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
@@ -920,6 +1050,8 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                       value={data.paramValues[p.name]}
                       columns={schema?.columns ?? []}
                       loading={Boolean(inputPath && !schema)}
+                      refreshing={refreshingSchemaPath === inputPath}
+                      onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
                       onChange={(v) => setParam(p.name, v)}
                     />
                   )
@@ -932,6 +1064,52 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                   />
                 )
           })}
+          {advancedParams.length > 0 && (
+            <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
+                onClick={() => setAdvancedExpanded(data.toolId, !advancedExpanded)}
+              >
+                <ChevronDown size={13} className={classNames('transition-transform', advancedExpanded ? 'rotate-180' : '')} />
+                Advanced
+                <span className="ml-auto text-[10px] text-text-muted">{advancedParams.length}</span>
+              </button>
+              {advancedExpanded && (
+                <div className="flex flex-col gap-2 border-t border-border p-2">
+                  {advancedParams.map((p) => {
+                    const schema = p.columnRef
+                      ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                      : null
+                    const inputPath = p.columnRef
+                      ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                      : null
+                    return p.columnRef
+                      ? (
+                          <ColumnParamField
+                            key={p.name}
+                            param={p}
+                            value={data.paramValues[p.name]}
+                            columns={schema?.columns ?? []}
+                            loading={Boolean(inputPath && !schema)}
+                            refreshing={refreshingSchemaPath === inputPath}
+                            onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                            onChange={(v) => setParam(p.name, v)}
+                          />
+                        )
+                      : (
+                          <ParamField
+                            key={p.name}
+                            param={p}
+                            value={data.paramValues[p.name]}
+                            onChange={(v) => setParam(p.name, v)}
+                          />
+                        )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
           {visibleParams.length === 0 && (
             <div className="text-xs text-text-muted italic">No parameters</div>
           )}
@@ -1286,7 +1464,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       const remotePath = `${uploadDir}/${fileName}`
       await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
       await window.api.sftp.upload(activeConnectionId, data.path, remotePath)
-      updateNodeData(nodeId, { path: remotePath })
+      updateNodeData(nodeId, { path: remotePath, source: 'remote' })
       setUploadMessage(`Uploaded to ${remotePath}`)
     } catch (err: any) {
       setUploadMessage(err?.message ?? String(err))
@@ -1305,34 +1483,70 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       {data.isInput ? (
         <div className="flex flex-col gap-1">
           <label className="text-text-secondary text-xs font-medium">Input file path</label>
+          <div className="flex rounded-md border border-border bg-bg-tertiary p-1">
+            {[
+              { value: 'remote', label: 'Remote' },
+              { value: 'local', label: 'Local' },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => updateNodeData(nodeId, { source: option.value as FileNodeData['source'] })}
+                className={classNames(
+                  'h-7 flex-1 rounded text-xs transition-colors',
+                  (data.source ?? 'remote') === option.value
+                    ? 'bg-accent text-white'
+                    : 'text-text-secondary hover:text-text-primary',
+                )}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <div className="flex items-end gap-1.5">
             <Input
               value={data.path}
-              placeholder="/project/username/data/input.vcf.gz"
+              placeholder={(data.source ?? 'remote') === 'local' ? '/Users/you/data/phenotype.txt' : '/project/username/data/input.vcf.gz'}
               onChange={(e) => updateNodeData(nodeId, { path: e.target.value })}
               className="flex-1"
             />
-            <Button
-              variant="secondary"
-              size="sm"
-              className="h-8 px-2 shrink-0"
-              title="Pick a file from the sidebar"
-              onClick={() =>
-                useUIStore.getState().startFilePick({
-                  nodeId,
-                  requesterLabel: data.label,
-                  accept: data.fileType !== 'any' ? [data.fileType] : undefined,
-                })
-              }
-            >
-              <Folder size={12} className="mr-1" />
-              Pick…
-            </Button>
+            {(data.source ?? 'remote') === 'local' ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-8 px-2 shrink-0"
+                title="Pick a local file"
+                onClick={async () => {
+                  const path = await window.api.dialog.openFile()
+                  if (path) updateNodeData(nodeId, { path, source: 'local' })
+                }}
+              >
+                <Folder size={12} className="mr-1" />
+                Browse local…
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-8 px-2 shrink-0"
+                title="Pick a file from the sidebar"
+                onClick={() =>
+                  useUIStore.getState().startFilePick({
+                    requesterLabel: data.label,
+                    accept: data.fileType !== 'any' ? [data.fileType] : undefined,
+                    onResolve: ({ path, fileType }) => updateNodeData(nodeId, { path, fileType, source: 'remote' }),
+                  })
+                }
+              >
+                <Folder size={12} className="mr-1" />
+                Pick…
+              </Button>
+            )}
           </div>
-          {activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
+          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
             <div className="flex items-center gap-2">
               <Button variant="secondary" size="sm" className="h-7 text-[11px]" disabled={uploading} onClick={() => void uploadLocalFile()}>
-                {uploading ? 'Uploading...' : 'Upload local file'}
+                {uploading ? 'Uploading...' : 'Upload to cluster'}
               </Button>
               {uploadMessage && <span className="truncate text-[10px] text-text-muted">{uploadMessage}</span>}
             </div>
@@ -2264,11 +2478,36 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <p className="text-xs text-text-muted mt-2">
-          Collapses an axed edge (per-chrom, per-sample, ...) back into a single
-          file. Submitted as a single Slurm job with
-          <code className="px-1 font-mono text-[11px]">--dependency=afterok</code>
-          on the upstream array.
+          Combines many upstream outputs into one file. Use axed fan-in for
+          per-chromosome arrays, or parallel branches for independent branches
+          that should converge.
         </p>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Converge Mode
+        </h4>
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+          {[
+            { value: 'axed-fan-in', label: 'Axed fan-in' },
+            { value: 'parallel-branches', label: 'Parallel branches' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => updateNodeData(nodeId, { convergeMode: option.value as MergeNodeData['convergeMode'] })}
+              className={classNames(
+                'h-7 rounded text-xs transition-colors',
+                (data.convergeMode ?? 'axed-fan-in') === option.value
+                  ? 'bg-accent text-white'
+                  : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div>
@@ -2396,7 +2635,7 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
   const setSchema = useDataPreviewStore((s) => s.setSchema)
   const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
   const inputPath = connectedInputPath(snapshot, nodeId, 'input')
-  const schema = connectedInputSchema(snapshot, nodeId, 'input', schemas)
+  const schema = resolveUpstreamSchema(snapshot, nodeId, 'input', schemas)
   const columns = schema?.columns ?? []
   const selected = data.selectedColumns?.length ? data.selectedColumns : columns
   const filters = data.filters ?? []

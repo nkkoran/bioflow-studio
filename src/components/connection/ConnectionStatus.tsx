@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { ConnectionDialog } from './ConnectionDialog'
-import { Wifi, WifiOff, ChevronDown, Settings, Server } from 'lucide-react'
+import { Wifi, WifiOff, ChevronDown, Settings, Server, Bug, RefreshCcw } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useUIStore } from '@/stores/uiStore'
+import { useClusterInfoStore } from '@/stores/clusterInfoStore'
+import { ConnectionLogDrawer } from './ConnectionLogDrawer'
 
 interface ConnectionStatusProps {
   /** When true, collapse to an icon-only pill (used in narrow TopBar widths). */
@@ -15,6 +17,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [slurmOpen, setSlurmOpen] = useState(false)
+  const [logOpen, setLogOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const { connections, activeConnectionId, disconnect, connectLocal } = useConnectionStore()
@@ -170,6 +173,11 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
                   Connected {formatUptime(Date.now() - activeEntry.connectedAt)}
                 </div>
               )}
+              {activeEntry.reused && (
+                <div className="mt-1 text-[11px] text-accent">
+                  Reused existing session
+                </div>
+              )}
               {!isLocal && (
                 <div className="mt-2 rounded border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
                   Keep heavy work on Slurm. Login-node actions are for setup, downloads, and quick checks only.
@@ -177,6 +185,15 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
               )}
             </div>
             <div className="p-2 flex flex-col gap-1">
+              {!isLocal && (
+                <button
+                  onClick={() => setLogOpen(true)}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
+                >
+                  <Bug size={14} />
+                  SSH diagnostic log
+                </button>
+              )}
               {!isLocal && (
                 <button
                   onClick={() => setSlurmOpen((v) => !v)}
@@ -216,6 +233,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
       </div>
 
       <ConnectionDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+      <ConnectionLogDrawer open={logOpen} onClose={() => setLogOpen(false)} connectionId={activeConnectionId} />
     </>
   )
 }
@@ -231,6 +249,10 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
   const [analysisFolder, setAnalysisFolder] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
+  const accountInfo = useClusterInfoStore((s) => s.accountsByConnection[connectionId])
+  const accountsLoading = useClusterInfoStore((s) => s.loadingAccounts[connectionId])
+  const accountError = useClusterInfoStore((s) => s.errorByConnection[connectionId])
+  const loadAccounts = useClusterInfoStore((s) => s.loadAccounts)
 
   // Load current values once.
   useEffect(() => {
@@ -246,9 +268,12 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
       setPartition(p ?? '')
       setAnalysisFolder(f ?? '')
       setLoaded(true)
+      void loadAccounts(connectionId).then((result) => {
+        if (!cancelled && !a && result.accounts.length === 1) setAccount(result.accounts[0])
+      }).catch(() => undefined)
     })()
     return () => { cancelled = true }
-  }, [connectionId])
+  }, [connectionId, loadAccounts])
 
   const save = useCallback(async () => {
     // electron-store rejects undefined ("Use delete() to clear values"), so we
@@ -276,12 +301,39 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
 
   return (
     <div className="px-3 py-2 flex flex-col gap-2 border border-border rounded bg-bg-tertiary/40">
-      <Input
-        label="Slurm account"
-        value={account}
-        onChange={(e) => setAccount(e.target.value)}
-        placeholder="rrg-xxxx"
-      />
+      <div className="flex flex-col gap-1">
+        <label className="text-text-secondary text-xs font-medium">Slurm account</label>
+        <div className="flex items-center gap-1.5">
+          <input
+            value={account}
+            onChange={(e) => setAccount(e.target.value)}
+            placeholder="rrg-xxxx"
+            list={`slurm-accounts-${connectionId}`}
+            className="h-8 min-w-0 flex-1 rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          <button
+            type="button"
+            className="h-8 rounded-md border border-border bg-bg-secondary px-2 text-text-muted hover:bg-bg-hover hover:text-text-primary"
+            title="Refresh Slurm accounts"
+            onClick={() => void loadAccounts(connectionId, { force: true })}
+          >
+            <RefreshCcw size={13} className={accountsLoading ? 'animate-spin' : ''} />
+          </button>
+        </div>
+        <datalist id={`slurm-accounts-${connectionId}`}>
+          {(accountInfo?.accounts ?? []).map((candidate) => (
+            <option key={candidate} value={candidate} />
+          ))}
+        </datalist>
+        <div className="text-[10px] text-text-muted">
+          {accountsLoading
+            ? 'Looking up accounts...'
+            : accountInfo
+              ? `Source: ${accountInfo.source}${accountInfo.accounts.length ? ` · ${accountInfo.accounts.length} account${accountInfo.accounts.length === 1 ? '' : 's'}` : ''}`
+              : 'Free text is still allowed if discovery is unavailable.'}
+          {accountError ? ` Discovery failed: ${accountError}` : ''}
+        </div>
+      </div>
       <Input
         label="Default partition"
         value={partition}

@@ -16,6 +16,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { computeNodeOutputPreview } from '@/lib/outputPathPreview'
 import { iconForTool } from '@/lib/toolIcons'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
+import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -97,12 +98,13 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
 
   return (
-    <div
+    <ToolHoverCard tool={tool} connectedPorts={connectedInputs.size + connectedOutputs.size}>
+      <div
       className={classNames(
         'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[260px] transition-all',
         selected ? 'border-accent ring-2 ring-accent/30' : borderColor,
       )}
-    >
+      >
       {/* Header */}
       <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
         <div className="flex-1 min-w-0">
@@ -218,7 +220,8 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           job: {nodeData.jobId}
         </div>
       )}
-    </div>
+      </div>
+    </ToolHoverCard>
   )
 }
 

@@ -9,9 +9,10 @@ import {
   AlertCircle,
   FolderOpen,
   ServerOff,
+  Upload,
 } from 'lucide-react'
 import { useFileStore } from '@/stores/fileStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
@@ -63,6 +64,8 @@ export function FileExplorer() {
   const [searchQuery, setSearchQuery] = useState('')
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
   const [sortDropdownOpen, setSortDropdownOpen] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null)
 
   // Context menu state
   const [contextEntry, setContextEntry] = useState<RemoteFileEntry | null>(null)
@@ -185,6 +188,27 @@ export function FileExplorer() {
   }, [])
 
   const isCurrentBookmarked = bookmarks.includes(cwd)
+  const canUploadLocal = Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
+
+  const uploadLocalFile = useCallback(async () => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+    const localPath = await window.api.dialog.openFile()
+    if (!localPath) return
+    const name = localPath.split('/').pop() || 'upload'
+    const remotePath = `${cwd.replace(/\/+$/, '')}/${name}`
+    setUploading(true)
+    setUploadMessage(null)
+    try {
+      await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
+      setUploadMessage(`Uploaded ${name}`)
+      await refresh()
+    } catch (err) {
+      setUploadMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setUploading(false)
+      window.setTimeout(() => setUploadMessage(null), 4000)
+    }
+  }, [activeConnectionId, cwd, refresh])
 
   // Not connected state
   if (!isConnected) {
@@ -258,6 +282,21 @@ export function FileExplorer() {
           />
         </Tooltip>
 
+        {canUploadLocal && (
+          <Tooltip content="Upload a file from this computer to the current folder">
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Upload className={`h-3.5 w-3.5 ${uploading ? 'animate-pulse' : ''}`} />}
+              onClick={() => void uploadLocalFile()}
+              disabled={uploading}
+              title="Upload local file"
+            >
+              <span className="text-xs">Upload</span>
+            </Button>
+          </Tooltip>
+        )}
+
         {/* Sort dropdown */}
         <div className="relative ml-auto">
           <Button
@@ -297,6 +336,12 @@ export function FileExplorer() {
           )}
         </div>
       </div>
+
+      {uploadMessage && (
+        <div className="border-b border-border px-3 py-1 text-[10px] text-text-muted">
+          {uploadMessage}
+        </div>
+      )}
 
       {/* Bookmarks section */}
       {bookmarks.length > 0 && (

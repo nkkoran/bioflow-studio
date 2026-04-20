@@ -29,7 +29,7 @@ export function LoginPolicyToast() {
           <div className="text-sm font-medium text-text-primary">Login-node limit detected</div>
           <div className="mt-1 text-xs leading-5 text-text-secondary">
             {warning.policy.hostname || warning.entry.config.host} reports a CPU time limit of{' '}
-            <span className="font-mono text-warning">{formatSeconds(warning.policy.cpuTimeLimitSeconds)}</span>.
+            <span className="font-mono text-warning">{formatSeconds(warning.policy.cpuTimeLimitSeconds ?? 0)}</span>.
             Keep real pipeline work on Slurm; login-node mode is best for quick setup checks.
           </div>
           {warning.policy.memLimitMB && (

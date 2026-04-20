@@ -22,7 +22,7 @@ export type AxedValue =
   | { kind: 'multi'; paths: string[] }
   | { kind: 'array'; axis: string; keys: string[]; paths: string[]; pathTemplate?: string }
 
-export type NodeMode = 'single' | 'array' | 'fanIn' | 'skip'
+export type NodeMode = 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
 
 export interface AxisPlan {
   nodeId: string
@@ -36,6 +36,8 @@ export interface AxisPlan {
   arrayPortId?: string
   /** Upstream array producers whose jobIds we depend on (afterok). */
   dependsOnArrayNodeIds: string[]
+  /** Upstream runnable producers whose final jobIds this node should depend on. */
+  dependsOnNodeIds?: string[]
   /** Resolved input paths per port (keyed by portId). */
   inputs: Record<string, AxedValue>
   /** What downstream consumers see for each output port. */
@@ -349,7 +351,21 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       // Merge always collapses. If its input port is kind 'array', it's a fanIn.
       // Otherwise it's a trivial single job.
       const data = node.data as MergeNodeData
-      const mode: NodeMode = dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single'
+      const convergeMode = data.convergeMode ?? 'axed-fan-in'
+      const directRunnableDeps = new Set<string>()
+      if (convergeMode === 'parallel-branches') {
+        for (const edge of snapshot.edges) {
+          if (edge.target !== nodeId) continue
+          const source = nodeById.get(edge.source)
+          if (source?.type === 'tool' || source?.type === 'merge' || source?.type === 'transform') {
+            directRunnableDeps.add(edge.source)
+          }
+        }
+      }
+      const mode: NodeMode =
+        convergeMode === 'parallel-branches'
+          ? 'branchFanIn'
+          : dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single'
       const upstreamFt = (inferMergeOutputType(node, resolvedInputs, snapshot, ctx) ?? 'any') as FileType
       const resolvedStrategy = resolveMergeStrategyStatic(data.strategy, upstreamFt)
       const outExt = mergeOutputExt(resolvedStrategy)
@@ -363,6 +379,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         nodeType: 'merge',
         mode,
         dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+        dependsOnNodeIds: [...directRunnableDeps],
         inputs: resolvedInputs,
         outputs: { output: { kind: 'single', path: outPath } },
         upstreamFileType: upstreamFt,

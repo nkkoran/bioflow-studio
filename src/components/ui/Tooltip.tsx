@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react'
+import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { classNames } from '@/lib/utils'
 
 interface TooltipProps {
@@ -23,8 +23,20 @@ export function Tooltip({
 }: TooltipProps) {
   const [visible, setVisible] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    }
+  }, [])
 
   const show = useCallback(() => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current)
+      hideTimerRef.current = null
+    }
     timerRef.current = setTimeout(() => setVisible(true), delay)
   }, [delay])
 
@@ -33,7 +45,7 @@ export function Tooltip({
       clearTimeout(timerRef.current)
       timerRef.current = null
     }
-    setVisible(false)
+    hideTimerRef.current = setTimeout(() => setVisible(false), 700)
   }, [])
 
   return (
@@ -43,7 +55,7 @@ export function Tooltip({
         <span
           className={classNames(
             'absolute z-50 whitespace-nowrap rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary shadow-lg',
-            'pointer-events-none',
+            'pointer-events-auto',
             positionStyles[side],
           )}
         >

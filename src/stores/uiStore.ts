@@ -43,6 +43,7 @@ interface UIStore {
   rightPanelWidth: number
   rightPanelOpen: boolean
   filePickMode: FilePickMode
+  advancedExpanded: Record<string, boolean>
 
   setSidebarWidth: (width: number) => void
   setBottomPanelHeight: (height: number) => void
@@ -51,6 +52,8 @@ interface UIStore {
   setTheme: (theme: Theme) => void
   setRightPanelWidth: (width: number) => void
   toggleRightPanel: () => void
+  setAdvancedExpanded: (toolId: string, expanded: boolean) => void
+  loadAdvancedExpanded: () => Promise<void>
 
   /**
    * Ask the FileExplorer to pick a file or folder. Supply either `nodeId` (the
@@ -80,6 +83,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   rightPanelWidth: 320,
   rightPanelOpen: false,
   filePickMode: IDLE_PICK,
+  advancedExpanded: {},
 
   setSidebarWidth: (width) => set({ sidebarWidth: width }),
   setBottomPanelHeight: (height) => set({ bottomPanelHeight: height }),
@@ -88,6 +92,19 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setTheme: (theme) => set({ theme }),
   setRightPanelWidth: (width) => set({ rightPanelWidth: width }),
   toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
+  setAdvancedExpanded: (toolId, expanded) => {
+    set((state) => {
+      const advancedExpanded = { ...state.advancedExpanded, [toolId]: expanded }
+      void window.api.store.set('ui:advancedExpanded', advancedExpanded).catch((err) => {
+        console.warn('[uiStore] failed to persist advanced params state:', err)
+      })
+      return { advancedExpanded }
+    })
+  },
+  loadAdvancedExpanded: async () => {
+    const stored = await window.api.store.get<Record<string, boolean>>('ui:advancedExpanded')
+    if (stored && typeof stored === 'object') set({ advancedExpanded: stored })
+  },
 
   startFilePick: ({ target = 'file', nodeId, requesterLabel, accept, onResolve }) => {
     set({

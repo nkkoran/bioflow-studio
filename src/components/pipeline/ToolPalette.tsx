@@ -13,8 +13,9 @@ import { classNames } from '@/lib/utils'
 import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
 import { TOOL_BUNDLES } from '@/lib/toolBundles'
 import { iconForBundle, iconForCategory, iconForNodeType } from '@/lib/toolIcons'
-import type { ToolDef } from '@/types/pipeline'
+import type { ToolCategory, ToolDef } from '@/types/pipeline'
 import type { ToolBundle } from '@/lib/toolBundles'
+import { ToolHoverCard } from './ToolHoverCard'
 
 export const DRAG_MIME = 'application/bioflow-tool'
 export const BUNDLE_DRAG_MIME = 'application/bioflow-bundle'
@@ -31,22 +32,24 @@ function PaletteItem({ tool }: PaletteItemProps) {
   }
 
   return (
-    <div
-      draggable
-      onDragStart={onDragStart}
-      className={classNames(
-        'px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
-        'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
-        'transition-colors select-none',
-      )}
-      title={tool.description}
-    >
-      <div className="flex items-center gap-1.5 font-medium text-text-primary">
-        <Icon size={11} className="shrink-0 text-text-muted" />
-        <span className="truncate">{tool.name}</span>
+    <ToolHoverCard tool={tool}>
+      <div
+        draggable
+        onDragStart={onDragStart}
+        className={classNames(
+          'px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
+          'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
+          'transition-colors select-none',
+        )}
+        title={tool.description}
+      >
+        <div className="flex items-center gap-1.5 font-medium text-text-primary">
+          <Icon size={11} className="shrink-0 text-text-muted" />
+          <span className="truncate">{tool.name}</span>
+        </div>
+        <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
       </div>
-      <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
-    </div>
+    </ToolHoverCard>
   )
 }
 
@@ -194,7 +197,7 @@ export function ToolPalette() {
         )}
         {groups.map(({ category, tools }) => {
           const isCollapsed = collapsed.has(category)
-          const CategoryIcon = iconForCategory(category)
+          const CategoryIcon = iconForCategory(category as ToolCategory)
           return (
             <div key={category} className="mb-1">
               <button

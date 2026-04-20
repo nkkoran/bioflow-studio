@@ -1,8 +1,8 @@
 # Phase 6 — Polish, Real-World Ergonomics, and Parallel Branches
 
-**Status:** in progress. Track A is implemented; several Phase 6 ergonomics fixes
-landed during interactive testing and are recorded below. Remaining planned work
-is still listed in Tracks B-D.
+**Status:** in progress. Tracks A and B are implemented; several Phase 6
+ergonomics fixes landed during interactive testing and are recorded below.
+Remaining planned work is still listed in Tracks C-D.
 
 ## Project context
 
@@ -27,17 +27,17 @@ plan.
 | A-12 | PLINK2 fileset/script generation cleanup | implemented |
 | A-13 | Script preview copy/select usability | implemented |
 | A-14 | SSH channel-open resilience | implemented |
-| B-1 | Slurm account dropdown | planned |
-| B-2a | SSH MFA diagnostic log | planned |
-| B-2b | SSH session reuse | planned (channel retry/home cache/SFTP conservation implemented separately in A-14) |
-| B-3 | Advanced params collapsible | planned |
-| B-4a | Node hover card | planned |
-| B-4b | Param tooltip + docUrl | planned |
-| B-5 | Column matching + cache + refresh | partially implemented (shared delimiter/schema parser; cache invalidation refresh remains planned) |
-| B-6 | Parallel-branch merge | planned |
-| B-7 | Pipeline templates gallery | planned |
-| B-8 | Failed-job diagnostic helper | planned |
-| B-9 | Local→remote upload helper | planned |
+| B-1 | Slurm account dropdown | implemented |
+| B-2a | SSH MFA diagnostic log | implemented |
+| B-2b | SSH session reuse | implemented |
+| B-3 | Advanced params collapsible | implemented |
+| B-4a | Node hover card | implemented |
+| B-4b | Param tooltip + docUrl | implemented |
+| B-5 | Column matching + cache + refresh | implemented |
+| B-6 | Parallel-branch merge | implemented |
+| B-7 | Pipeline templates gallery | implemented |
+| B-8 | Failed-job diagnostic helper | implemented |
+| B-9 | Local→remote upload helper | implemented |
 | C-7 | Delimiter detection + filter UI | partially implemented (shared detector + schema use; manual override/filter operators remain planned) |
 | C-8 | Jobs tab declutter | planned |
 | C-9 | Data preview tab hygiene | planned |
@@ -227,6 +227,8 @@ connection has recently used SFTP/file-preview channels.
 
 ### B-1. Slurm account dropdown
 
+**Status:** implemented.
+
 **Motivation:** today users paste their Slurm account as free text on first connect; mistyped accounts silently reject `sbatch`. A dropdown populated from the cluster eliminates the class.
 
 **Data model & IPC:**
@@ -245,6 +247,8 @@ connection has recently used SFTP/file-preview channels.
 
 ### B-2a. SSH MFA diagnostic log
 
+**Status:** implemented.
+
 **Motivation:** Compute Canada TOTP auth is fragile — misleading "Password:" prompt, banner ordering, partial-success subtleties. When a connection fails, users see a generic error with no trace.
 
 **Plan:**
@@ -256,6 +260,8 @@ connection has recently used SFTP/file-preview channels.
 
 ### B-2b. SSH session reuse
 
+**Status:** implemented.
+
 **Motivation:** clicking "Reconnect" or double-connecting wastefully tears down a live client and runs TOTP again.
 
 **Plan:**
@@ -266,6 +272,8 @@ connection has recently used SFTP/file-preview channels.
 **Verification:** connect, then hit Connect again with the same creds — no new TOTP prompt, UI shows reused indicator.
 
 ### B-3. Advanced params collapsible
+
+**Status:** implemented.
 
 **Motivation:** PLINK2 and REGENIE inspectors are dense with rarely-touched flags (`--memory`, `--threads` overrides, `--output-missing-phenotype`) that drown the common ones (`--glm`, `--pheno`, `--covar`).
 
@@ -281,6 +289,8 @@ connection has recently used SFTP/file-preview channels.
 
 ### B-4a. Node hover card
 
+**Status:** implemented.
+
 **Motivation:** hovering a palette item or a canvas node gives no information today.
 
 **Plan:**
@@ -290,6 +300,8 @@ connection has recently used SFTP/file-preview channels.
 **Verification:** hover an unplaced palette item for ~0.5s, see card; hover a canvas node with some connected ports, card shows `3/5 ports connected`.
 
 ### B-4b. Param tooltips + doc links
+
+**Status:** implemented.
 
 **Plan:**
 - Extend `ToolParam` with `description?: string`, `docUrl?: string`.
@@ -302,9 +314,7 @@ connection has recently used SFTP/file-preview channels.
 
 **Motivation:** today the Tool Inspector's `columnRef` selector re-fetches column lists every time the inspector re-opens and doesn't survive a file edit correctly — users see stale column names from a previous version.
 
-**Status:** partially implemented. The shared delimiter/header parser and
-delimiter-aware inspector schema loading are done. Mtime-keyed cache, explicit
-refresh UI, and full transform schema propagation remain planned.
+**Status:** implemented.
 
 **Data model:**
 - Existing `src/stores/fileSchemaStore.ts` caches schemas; extend the cache key to `${connectionId}:${path}:${mtimeMs}`. Fetch `mtime` via `sftp:stat` alongside the header read.
@@ -325,6 +335,8 @@ refresh UI, and full transform schema propagation remain planned.
   of one collapsed header for space-delimited files.
 
 ### B-6. Parallel-branch merge
+
+**Status:** implemented.
 
 **Motivation:** users want two independent PLINK2 branches (e.g., male-only + female-only) to flow into one merge and continue downstream as one. Today this triggers axis-collision errors.
 
@@ -365,6 +377,8 @@ interface MergeNodeData {
 
 ### B-7. Pipeline templates gallery
 
+**Status:** implemented.
+
 **Motivation:** first-time users stare at an empty canvas. Phase 4 shipped internal templates but only reachable via the Open dialog.
 
 **Plan:**
@@ -376,6 +390,8 @@ interface MergeNodeData {
 **Verification:** create three templates from scratch in one session; each loads runnable except for placeholder input paths.
 
 ### B-8. Failed-job diagnostic helper
+
+**Status:** implemented.
 
 **Motivation:** when a run fails, users scroll the `.err` tail manually and guess at the cause.
 
@@ -391,6 +407,8 @@ interface MergeNodeData {
 **Verification:** intentionally OOM a plink2 job; diagnostic shows "Likely OOM"; applying the fix bumps mem and reruns the pipeline from that node.
 
 ### B-9. Local→remote upload helper
+
+**Status:** implemented.
 
 **Motivation:** users have a phenotype file on their laptop. Today they must scp it manually to `/scratch` before wiring it into a FileNode.
 
@@ -526,7 +544,7 @@ and manual delimiter override remain planned.
 Batches — each mergeable and verifiable on its own.
 
 **Current branch completed:** A-10g, A-10b, A-10f, A-11, A-12, A-13,
-A-14, plus the implemented portions of B-5/C-7.
+A-14, B-1 through B-9, plus the implemented portions of C-7.
 
 1. **Batch 1 — low-risk carry-forward + plumbing.** A-10g (icons), A-10b (edge chips), A-10f (login banner), B-1 (account dropdown), B-2a (debug log), B-2b (session reuse). All additive; no model changes.
 2. **Batch 2 — inspector ergonomics.** B-3 (advanced collapsible), B-4a (hover card), B-4b (param tooltip + docUrl), B-5 (column matching + refresh). Shared file: `NodeInspector.tsx` — land as one PR or coordinate carefully.
@@ -541,29 +559,31 @@ A-14, plus the implemented portions of B-5/C-7.
 `src/components/connection/LoginPolicyToast.tsx`,
 `electron/ipc/clusterHandlers.ts`, `src/lib/delimitedText.ts`.
 
-**Remaining planned new files:** `src/components/connection/ConnectionLogDrawer.tsx`,
+**Implemented/current branch B additions:** `src/components/connection/ConnectionLogDrawer.tsx`,
 `src/stores/clusterInfoStore.ts`, `src/components/pipeline/ToolHoverCard.tsx`,
 `src/lib/resolveUpstreamSchema.ts`, `src/components/jobs/FailureDiagnostic.tsx`,
-`src/components/pipeline/TemplateGallery.tsx`,
+`src/components/pipeline/TemplateGallery.tsx`.
+
+**Remaining planned new files:**
 `src/components/data-preview/SavedViewsMenu.tsx`, `src/lib/resourceLearning.ts`,
 `src/components/pipeline/CanvasGroup.tsx`
 
 **Heavily modified / current branch:**
 - `src/components/pipeline/NodeInspector.tsx` — implemented axis split
   auto-detection, range/list editing, PLINK split guidance, delimiter-aware
-  column schema loading; planned advanced section, hover card, tooltip, column
-  refresh, merge mode toggle remain.
+  column schema loading, advanced sections, param tooltips, column refresh,
+  merge mode toggle, and local upload controls.
 - `electron/pipeline/ScriptGenerator.ts` — implemented cleaner numeric arrays,
   path-template fan-out, PLINK `--pfile`/`--bfile` prefix handling, PLINK list
-  params, `--glm hide-covar`, and dynamic shell expression quoting; planned
-  `convergeMode` branch remains.
+  params, `--glm hide-covar`, dynamic shell expression quoting, and branch
+  merge output-path handling.
 - `electron/pipeline/axisPlanner.ts` — implemented split `pathTemplate`
-  propagation; planned `branchFanIn` plan mode remains.
-- `electron/ssh/SshManager.ts` — implemented channel-open retry; planned reuse
-  + debug events remain.
+  propagation and `branchFanIn` plan mode.
+- `electron/ssh/SshManager.ts` — implemented channel-open retry, session reuse,
+  and SSH debug events.
 - `electron/ssh/SftpPool.ts` — implemented conservative SFTP channel limits.
-- `electron/pipeline/PipelineRunner.ts` — implemented `$HOME` cache; planned
-  multi-dep afterok for branch merge remains.
+- `electron/pipeline/PipelineRunner.ts` — implemented `$HOME` cache and
+  multi-dependency branch merge submission.
 - `src/components/pipeline/ScriptPreviewModal.tsx` — implemented selectable
   script text and robust copy fallback.
 - `src/lib/schemaResolver.ts`, `src/components/data-preview/DelimiterDetector.ts`,
@@ -571,25 +591,12 @@ A-14, plus the implemented portions of B-5/C-7.
   — implemented shared delimiter parsing and genetics file inference.
 
 **Remaining planned heavy modifications:**
-- `src/types/pipeline.ts` — `MergeNodeData.convergeMode`, `FileNodeData.source`
-- `src/types/toolRegistry.ts` — `ToolParam.advanced`, `description`, `docUrl`
-- `src/lib/toolRegistry.ts` — advanced tags, descriptions, docUrls
-- `electron/pipeline/axisPlanner.ts` — `branchFanIn` plan mode
-- `electron/pipeline/ScriptGenerator.ts` — `convergeMode` branch
-- `electron/pipeline/PipelineRunner.ts` — multi-dep afterok for branch merge
-- `src/lib/pipelineValidator.ts` — new codes
-- `src/components/pipeline/NodeInspector.tsx` — advanced section, hover card, tooltip, column refresh, merge mode toggle
 - `src/components/data-preview/{DataPreview,DataTable,DelimiterDetector}.tsx`
 - `src/stores/dataPreviewStore.ts`
 - `src/components/jobs/{JobsPanel,NodeRunList,LogViewer,RunSelector}.tsx`
 - `src/components/pipeline/PipelineCanvas.tsx` — drag-drop upload target, axed edge types, visual groups
-- `src/components/pipeline/FileNode.tsx` — local file source/drop state
-- `electron/ssh/SshManager.ts` — reuse + debug events
-- `src/stores/connectionStore.ts` — `loginPolicy` field
-- `src/stores/fileSchemaStore.ts` — mtime key
 - `src/stores/uiStore.ts` — `advancedExpanded`, saved preview view controls, group collapse state as needed
 - `src/stores/resourceEstimateStore.ts` — learned `sacct` summaries
-- `electron/preload/index.ts` + `.d.ts` + `electron/ipc/registerAll.ts` — new channels
 
 ## Verification plan (end-to-end)
 

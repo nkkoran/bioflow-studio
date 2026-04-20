@@ -4,6 +4,8 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import type { PipelineSnapshot } from '@/types/pipeline'
+import { TemplateGallery } from '@/components/pipeline/TemplateGallery'
+import type { PipelineTemplate } from '@/lib/pipelineTemplates'
 
 interface PipelineRow {
   id: string
@@ -23,7 +25,7 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const markSaved = usePipelineStore((s) => s.markSaved)
   const [open, setOpen] = useState(false)
-  const [showTemplates, setShowTemplates] = useState(false)
+  const [templateGalleryOpen, setTemplateGalleryOpen] = useState(false)
   const [rows, setRows] = useState<PipelineRow[]>([])
 
   const refresh = async () => {
@@ -48,10 +50,9 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
     reset()
   }
 
-  const startFromTemplate = (templateId: string) => {
-    const template = PIPELINE_TEMPLATES.find((item) => item.id === templateId)
-    if (!template) return
+  const startFromTemplate = (template: PipelineTemplate) => {
     setOpen(false)
+    setTemplateGalleryOpen(false)
     if (dirty && !confirm('Discard unsaved changes and start from this template?')) return
     loadSnapshot(instantiateTemplate(template))
   }
@@ -122,29 +123,21 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
             <button onClick={makeNew} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">
               <FilePlus2 size={12} /> New
             </button>
-            <button onClick={() => setShowTemplates((value) => !value)} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">
-              <FilePlus2 size={12} /> Start from template
+            <button onClick={() => { setOpen(false); setTemplateGalleryOpen(true) }} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">
+              <FilePlus2 size={12} /> Start from template...
             </button>
-            {showTemplates && (
-              <div className="border-y border-border bg-bg-primary py-1">
-                {PIPELINE_TEMPLATES.map((template) => (
-                  <button
-                    key={template.id}
-                    onClick={() => startFromTemplate(template.id)}
-                    className="block w-full px-6 py-1.5 text-left hover:bg-bg-hover"
-                  >
-                    <span className="block truncate text-xs text-text-primary">{template.name}</span>
-                    <span className="block truncate text-[10px] text-text-muted">{template.description}</span>
-                  </button>
-                ))}
-              </div>
-            )}
             <button onClick={() => void rename()} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">
               <Pencil size={12} /> Rename...
             </button>
           </div>
         </>
       )}
+      <TemplateGallery
+        open={templateGalleryOpen}
+        templates={PIPELINE_TEMPLATES}
+        onClose={() => setTemplateGalleryOpen(false)}
+        onSelect={startFromTemplate}
+      />
     </div>
   )
 }

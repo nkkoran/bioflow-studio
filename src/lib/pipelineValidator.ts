@@ -148,6 +148,14 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           }
         }
       } else {
+        if (d.source === 'local') {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'LOCAL_FILE_NOT_UPLOADED',
+            message: `Input file "${d.label}" is still local and must be uploaded before running.`,
+            suggestion: 'Open the file node inspector and use "Upload to cluster".',
+          })
+        }
         if (d.isInput && !d.path.trim()) {
           issues.push({
             severity: 'error', nodeId: node.id,
@@ -191,6 +199,14 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
         }
         // Type compatibility — defensive; canvas usually blocks this.
         if (edges) {
+          if (edges.length > 1 && !port.multi) {
+            issues.push({
+              severity: 'error', nodeId: node.id, portId: port.id,
+              code: 'MULTI_INPUT_NO_CONVERGE',
+              message: `Input "${port.label}" has multiple upstream files but is not a merge input.`,
+              suggestion: 'Connect those branches to a Merge node first, or use a multi-input tool port.',
+            })
+          }
           for (const e of edges) {
             const srcNode = nodeById.get(e.source)
             if (!srcNode) continue
@@ -324,6 +340,45 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           message: `Transform "${d.label}" has no input connected.`,
           suggestion: 'Connect a tabular file or upstream transform to its input.',
         })
+      }
+      if (edges && edges.length > 0) {
+        const fileTypes = edges
+          .map((edge) => {
+            const source = nodeById.get(edge.source)
+            return source ? sourcePortType(source, edge.sourceHandle ?? 'output') : null
+          })
+          .filter(Boolean) as string[]
+        const uniqueTypes = new Set(fileTypes.filter((type) => type !== 'any'))
+        const mode = d.convergeMode ?? 'axed-fan-in'
+        if (mode === 'axed-fan-in') {
+          const axes = new Set(edges.map((edge) => axisForNode(snapshot, edge.source)).filter(Boolean))
+          if (axes.size > 1 || axes.has('__mixed__')) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'AXIS_COLLISION',
+              message: `Merge "${d.label}" receives branches with different split axes.`,
+              suggestion: 'Use Parallel branches mode for independent branches, or align the split axis first.',
+            })
+          }
+        } else {
+          if (uniqueTypes.size > 1) {
+            issues.push({
+              severity: 'warning', nodeId: node.id,
+              code: 'BRANCH_MERGE_SCHEMA_MISMATCH',
+              message: `Parallel merge "${d.label}" receives different file types: ${[...uniqueTypes].join(', ')}.`,
+              suggestion: 'Choose a merge strategy that can safely combine these outputs.',
+            })
+          }
+          const strategy = typeof d.strategy === 'string' ? d.strategy as MergeNodeData['strategy'] : 'auto'
+          if (!mergeStrategyCompatible(strategy, fileTypes[0] ?? 'any')) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'PARALLEL_STRATEGY_INCOMPATIBLE',
+              message: `Strategy "${d.strategy}" is not compatible with ${fileTypes[0] ?? 'unknown'} branch outputs.`,
+              suggestion: 'Use Auto or a strategy that matches the incoming output type.',
+            })
+          }
+        }
       }
       if (!hasOutgoing.has(`${node.id}:output`)) {
         issues.push({
@@ -523,6 +578,14 @@ function sourcePortType(
     return (node.data as TransformNodeData).fileType
   }
   return null
+}
+
+function mergeStrategyCompatible(strategy: MergeNodeData['strategy'], fileType: string): boolean {
+  if (strategy === 'auto' || strategy === 'cat') return true
+  if (strategy === 'tsv-concat-header') return fileType === 'tsv' || fileType === 'csv' || fileType === 'txt'
+  if (strategy === 'bcftools-concat') return fileType === 'vcf' || fileType === 'bcf'
+  if (strategy === 'plink-pmerge-list') return fileType === 'plink' || fileType === 'pgen'
+  return true
 }
 
 /** Filter a validation result down to issues attached to one node. */

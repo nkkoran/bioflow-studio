@@ -1,7 +1,7 @@
 import { Client } from 'ssh2'
 import type { ClientChannel, ConnectConfig } from 'ssh2'
 import { readFileSync, existsSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { resolve as resolvePath } from 'path'
 import { BrowserWindow, ipcMain } from 'electron'
@@ -209,6 +209,7 @@ export class SshManager {
   private connections = new Map<string, ManagedConnection>()
   private loginPolicies = new Map<string, LoginPolicy>()
   private loginPolicyPromises = new Map<string, Promise<LoginPolicy>>()
+  private connectionKeys = new Map<string, string>()
 
   private constructor() { }
 
@@ -222,6 +223,14 @@ export class SshManager {
   connect(config: ConnectionConfig): Promise<ConnectionResult> {
     return new Promise((resolve, reject) => {
       const cleanConfig = normalizeConnectionConfig(config)
+      const dedupeKey = connectionDedupeKey(cleanConfig)
+      const reusable = this.findReusableConnection(dedupeKey)
+      if (reusable) {
+        this.emitDebug(reusable.id, 'connect', `Reused existing SSH session for ${cleanConfig.username}@${cleanConfig.host}`)
+        resolve({ id: reusable.id, host: cleanConfig.host, username: cleanConfig.username, reused: true })
+        return
+      }
+
       let connectOptions: ConnectConfig
       try {
         connectOptions = buildConnectOptions(cleanConfig)
@@ -233,6 +242,7 @@ export class SshManager {
       const client = new Client()
       const id = randomUUID()
       let resolved = false
+      this.emitDebug(id, 'connect', `Connecting to ${cleanConfig.host}:${cleanConfig.port} as ${cleanConfig.username} with ${cleanConfig.authMethod}`)
 
       /**
        * Handle keyboard-interactive auth.
@@ -247,6 +257,7 @@ export class SshManager {
        */
       client.on('keyboard-interactive', (_name, instructions, _lang, prompts, finish) => {
         console.log(`[SSH] keyboard-interactive: instructions="${instructions}", prompts=${JSON.stringify(prompts.map(p => p.prompt))}`)
+        this.emitDebug(id, 'auth', `Keyboard-interactive auth requested ${prompts.length} prompt(s)`)
 
         // Process all prompts, potentially async
         const processPrompts = async () => {
@@ -257,10 +268,12 @@ export class SshManager {
 
             // If it's asking for a password and we have one, auto-respond
             if (promptText.includes('password') && cleanConfig.password) {
+              this.emitDebug(id, 'prompt', 'Auto-responded to "password" prompt with the stored password')
               responses.push(cleanConfig.password)
             }
             // For MFA/verification/OTP prompts, or any unknown prompt, ask the user
             else {
+              this.emitDebug(id, 'prompt', `Prompted user for: ${prompt.prompt || instructions || 'verification code'}`)
               const userInput = await promptUser(
                 'Authentication Required',
                 prompt.prompt || instructions || 'Enter verification code:',
@@ -292,6 +305,8 @@ export class SshManager {
           connectedAt: Date.now(),
           reconnecting: false,
         })
+        this.connectionKeys.set(id, dedupeKey)
+        this.emitDebug(id, 'connect', 'SSH session ready')
         this.sendStatusChange(id, true)
         void this.getLoginPolicy(id).catch((err) => {
           console.warn(`[SSH] login policy probe failed for ${id}:`, err instanceof Error ? err.message : err)
@@ -301,6 +316,7 @@ export class SshManager {
 
       client.on('error', (err) => {
         console.error(`[SSH] Error:`, err.message, (err as any).level)
+        this.emitDebug(id, 'error', err.message)
         if (!resolved) {
           resolved = true
           const enhanced = new Error(
@@ -318,6 +334,7 @@ export class SshManager {
 
       client.on('close', () => {
         console.log(`[SSH] Connection closed (resolved=${resolved})`)
+        this.emitDebug(id, 'connect', 'SSH connection closed')
         if (!resolved) {
           resolved = true
           reject(new Error('Connection closed before ready'))
@@ -332,11 +349,13 @@ export class SshManager {
 
       client.on('handshake', (negotiated) => {
         console.log(`[SSH] Handshake: kex=${negotiated.kex}, hostKey=${negotiated.serverHostKey}, cipher=${negotiated.cs.cipher}`)
+        this.emitDebug(id, 'connect', `Handshake negotiated ${negotiated.kex} / ${negotiated.serverHostKey}`)
       })
 
       // Show server banner (HPC clusters often show MFA enrollment messages)
       client.on('banner', (message) => {
         console.log(`[SSH] Server banner:\n${message}`)
+        this.emitDebug(id, 'banner', message.trim() || 'Server banner received')
         // Forward banner to renderer so user can see it
         const win = BrowserWindow.getAllWindows()[0]
         if (win) {
@@ -355,6 +374,7 @@ export class SshManager {
     conn.reconnecting = true
     conn.client.end()
     this.connections.delete(id)
+    this.connectionKeys.delete(id)
     this.loginPolicies.delete(id)
     this.loginPolicyPromises.delete(id)
     this.sendStatusChange(id, false)
@@ -602,13 +622,16 @@ export class SshManager {
 
         // For reconnect, use same keyboard-interactive handler
         newClient.on('keyboard-interactive', (_name, instructions, _lang, prompts, finish) => {
+          this.emitDebug(id, 'auth', `Re-authentication requested ${prompts.length} prompt(s)`)
           const processPrompts = async () => {
             const responses: string[] = []
             for (const prompt of prompts) {
               const promptText = prompt.prompt.toLowerCase()
               if (promptText.includes('password') && config.password) {
+                this.emitDebug(id, 'prompt', 'Auto-responded to "password" prompt with the stored password')
                 responses.push(config.password)
               } else {
+                this.emitDebug(id, 'prompt', `Prompted user for: ${prompt.prompt || instructions || 'verification code'}`)
                 const userInput = await promptUser(
                   'Re-authentication Required',
                   prompt.prompt || instructions || 'Enter verification code:',
@@ -631,10 +654,12 @@ export class SshManager {
           existing.client = newClient
           existing.connectedAt = Date.now()
           existing.reconnecting = false
+          this.emitDebug(id, 'connect', 'SSH session reconnected')
           this.sendStatusChange(id, true)
         })
 
-        newClient.on('error', () => {
+        newClient.on('error', (err) => {
+          this.emitDebug(id, 'error', err.message)
           tryReconnect(attempt + 1)
         })
 
@@ -664,4 +689,39 @@ export class SshManager {
       })
     }
   }
+
+  private findReusableConnection(dedupeKey: string): { id: string; conn: ManagedConnection } | null {
+    for (const [id, conn] of this.connections) {
+      if (conn.reconnecting) continue
+      if (this.connectionKeys.get(id) === dedupeKey) return { id, conn }
+    }
+    return null
+  }
+
+  private emitDebug(connectionId: string, stage: 'connect' | 'auth' | 'prompt' | 'banner' | 'error', detail: string): void {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return
+    win.webContents.send('ssh:debug', {
+      connectionId,
+      stage,
+      detail,
+      at: Date.now(),
+    })
+  }
+}
+
+function connectionDedupeKey(config: ConnectionConfig): string {
+  return [
+    config.host,
+    config.port,
+    config.username,
+    authMethodId(config),
+  ].join(':')
+}
+
+function authMethodId(config: ConnectionConfig): string {
+  if (config.authMethod === 'agent') return 'agent'
+  if (config.authMethod === 'password') return 'password'
+  const raw = config.privateKeyPath ? expandPath(config.privateKeyPath) : ''
+  return `key:${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
 }

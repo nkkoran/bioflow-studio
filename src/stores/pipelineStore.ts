@@ -217,6 +217,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       data: {
         label: data?.label ?? 'File',
         path: data?.path ?? '',
+        source: data?.source ?? 'remote',
         fileType: data?.fileType ?? 'any',
         isInput: data?.isInput ?? true,
       },
@@ -239,6 +240,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       data: {
         label: data?.label ?? 'Merge',
         strategy: data?.strategy ?? 'auto',
+        convergeMode: data?.convergeMode ?? 'axed-fan-in',
         slurmOverride: data?.slurmOverride,
         status: 'idle',
       },

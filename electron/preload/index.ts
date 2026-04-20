@@ -18,6 +18,7 @@ export interface ConnectionResult {
   id: string
   host: string
   username: string
+  reused?: boolean
 }
 
 export interface ConnectionStatus {
@@ -67,6 +68,13 @@ export interface SlurmQueueEntry {
   reason: string
 }
 
+export interface SshDebugEvent {
+  connectionId: string
+  stage: 'connect' | 'auth' | 'prompt' | 'banner' | 'error'
+  detail: string
+  at: number
+}
+
 const api = {
   ssh: {
     connect: (config: ConnectionConfig): Promise<ConnectionResult> =>
@@ -104,6 +112,11 @@ const api = {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('ssh:banner', handler)
       return () => ipcRenderer.removeListener('ssh:banner', handler)
+    },
+    onDebug: (callback: (data: SshDebugEvent) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('ssh:debug', handler)
+      return () => ipcRenderer.removeListener('ssh:debug', handler)
     },
   },
   sftp: {
@@ -233,6 +246,8 @@ const api = {
   cluster: {
     loginPolicy: (connectionId: string): Promise<LoginPolicy> =>
       ipcRenderer.invoke('cluster:loginPolicy', connectionId),
+    listAccounts: (connectionId: string): Promise<{ accounts: string[]; source: 'sacctmgr' | 'sshare' | 'groups'; cachedAt: number }> =>
+      ipcRenderer.invoke('cluster:listAccounts', connectionId),
   },
   fs: {
     resolveSplit: (

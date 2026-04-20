@@ -262,6 +262,7 @@ export class PipelineRunner {
           mergeData: effective,
           resolvedInputs: inputVal,
           upstreamFileType: plan.upstreamFileType ?? 'any',
+          outputPath: collectOutputPaths(plan.outputs)[0],
           outputDir,
           logDir,
           connectionDefaults,
@@ -639,6 +640,7 @@ export class PipelineRunner {
         mergeData: effective,
         resolvedInputs: inputVal,
         upstreamFileType: plan.upstreamFileType ?? 'any',
+        outputPath: collectOutputPaths(plan.outputs)[0],
         outputDir,
         logDir,
         connectionDefaults,
@@ -858,6 +860,7 @@ export class PipelineRunner {
         mergeData: effective,
         resolvedInputs: inputVal,
         upstreamFileType: plan.upstreamFileType ?? 'any',
+        outputPath: collectOutputPaths(plan.outputs)[0],
         outputDir, logDir, connectionDefaults,
       })
       script = gen.script
@@ -892,9 +895,10 @@ export class PipelineRunner {
     }
 
     const parts: string[] = ['sbatch']
-    if (plan.dependsOnArrayNodeIds.length > 0) {
+    const dependencyNodeIds = [...new Set([...(plan.dependsOnArrayNodeIds ?? []), ...(plan.dependsOnNodeIds ?? [])])]
+    if (dependencyNodeIds.length > 0) {
       const depIds: string[] = []
-      for (const upId of plan.dependsOnArrayNodeIds) {
+      for (const upId of dependencyNodeIds) {
         const up = run.nodes[upId]
         if (up?.jobId) depIds.push(up.jobId)
       }

@@ -25,7 +25,7 @@ interface DataPreviewStore {
   visibleColumns: Record<string, string[]>
   filters: Record<string, TransformFilterRule[]>
   sort: Record<string, { column: string; dir: 'asc' | 'desc' } | undefined>
-  schemas: Record<string, { columns: string[]; delimiter: string; fetchedAt: number }>
+  schemas: Record<string, { columns: string[]; delimiter: string; fetchedAt: number; modified?: number }>
 
   openFile: (filePath: string, fileName: string, mode?: PreviewMode) => void
   closeTab: (id: string) => void
@@ -34,7 +34,7 @@ interface DataPreviewStore {
   setVisibleColumns: (filePath: string, columns: string[]) => void
   setFilters: (filePath: string, filters: TransformFilterRule[]) => void
   setSort: (filePath: string, sort: { column: string; dir: 'asc' | 'desc' } | undefined) => void
-  setSchema: (filePath: string, schema: { columns: string[]; delimiter: string }) => void
+  setSchema: (filePath: string, schema: { columns: string[]; delimiter: string; modified?: number }) => void
   clearTabs: () => void
 }
 

@@ -14,6 +14,7 @@ export interface ConnectionResult {
   id: string
   host: string
   username: string
+  reused?: boolean
 }
 
 export interface LoginPolicy {
@@ -37,3 +38,16 @@ export interface ExecResult {
 }
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+
+export interface SshDebugEvent {
+  connectionId: string
+  stage: 'connect' | 'auth' | 'prompt' | 'banner' | 'error'
+  detail: string
+  at: number
+}
+
+export interface ClusterAccountsResult {
+  accounts: string[]
+  source: 'sacctmgr' | 'sshare' | 'groups'
+  cachedAt: number
+}

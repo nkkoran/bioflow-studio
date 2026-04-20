@@ -374,7 +374,7 @@ function inferKeyedPathTemplate(paths: string[], keys: string[]): string | null 
     const candidates = keyedTemplateCandidates(paths[i], keys[i])
     if (candidates.size === 0) return null
     possible = possible
-      ? new Set([...possible].filter((candidate) => candidates.has(candidate)))
+      ? new Set((Array.from(possible) as string[]).filter((candidate) => candidates.has(candidate)))
       : candidates
     if (possible.size === 0) return null
   }
@@ -625,6 +625,7 @@ export interface MergeScriptOpts {
   mergeData: MergeNodeData
   resolvedInputs: AxedValue     // merge has a single 'input' port
   upstreamFileType: FileType
+  outputPath?: string
   outputDir: string
   logDir: string
   connectionDefaults?: ConnectionDefaults
@@ -765,7 +766,7 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
     : strategy === 'plink-pmerge-list' ? ''
     : strategy === 'tsv-concat-header' ? '.tsv'
     : '.txt'
-  const outPath = `${outputDir}/${slug}.output${outExt}`
+  const outPath = opts.outputPath ?? `${outputDir}/${slug}.output${outExt}`
 
   const lines: string[] = []
   lines.push('#!/bin/bash')

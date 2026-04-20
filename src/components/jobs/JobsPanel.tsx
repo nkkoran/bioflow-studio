@@ -12,6 +12,7 @@ import { NodeRunList } from './NodeRunList'
 import { LogViewer } from './LogViewer'
 import { JobSummary } from './JobSummary'
 import { QueueDetails } from './QueueDetails'
+import { FailureDiagnostic } from './FailureDiagnostic'
 import type { RunState } from '@/types/pipeline'
 import { useFileStore } from '@/stores/fileStore'
 import { useConnectionStore } from '@/stores/connectionStore'
@@ -24,6 +25,7 @@ export function JobsPanel() {
   const rerunNode = useRunStore((s) => s.rerunNode)
   const refreshRuns = useRunStore((s) => s.refreshRuns)
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
+  const diagnostics = useRunStore((s) => s.diagnostics)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const pipelineId = usePipelineStore((s) => s.pipelineId)
   const navigate = useFileStore((s) => s.navigate)
@@ -164,6 +166,13 @@ export function JobsPanel() {
                 <JobSummary runId={activeRun.runId} connectionId={activeRun.connectionId} ns={ns} />
               ) : null
             })()}
+            {selectedNodeId && activeRun.nodes[selectedNodeId]?.status === 'failed' && activeRun.pipelineId === pipelineId && (
+              <FailureDiagnostic
+                nodeId={selectedNodeId}
+                diagnostic={diagnostics[selectedNodeId]}
+                onRerun={() => void rerunNode(activeRun.runId, selectedNodeId, exportSnapshot())}
+              />
+            )}
             {activeRun.connectionId ? (
               <LogViewer run={activeRun} connectionId={activeRun.connectionId} />
             ) : (

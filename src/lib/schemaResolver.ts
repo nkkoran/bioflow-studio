@@ -16,7 +16,7 @@ export interface ColumnSchema {
   sourcePath?: string
 }
 
-export type SchemaCache = Record<string, { columns: string[]; delimiter: string; fetchedAt: number }>
+export type SchemaCache = Record<string, { columns: string[]; delimiter: string; fetchedAt: number; modified?: number }>
 
 export function delimiterForPath(path: string): string {
   return preferredDelimiterForPath(path)

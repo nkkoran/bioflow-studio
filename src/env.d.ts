@@ -28,6 +28,7 @@ interface Window {
       onPrompt: (callback: (data: { promptId: string; title: string; message: string; isPassword: boolean }) => void) => () => void
       respondToPrompt: (promptId: string, value: string | null) => void
       onBanner: (callback: (data: { connectionId: string; message: string }) => void) => () => void
+      onDebug: (callback: (data: import('./types/ssh').SshDebugEvent) => void) => () => void
     }
     sftp: {
       ls: (id: string, remotePath: string) => Promise<import('./types/files').RemoteFileEntry[]>
@@ -98,6 +99,7 @@ interface Window {
     }
     cluster: {
       loginPolicy: (connectionId: string) => Promise<import('./types/ssh').LoginPolicy>
+      listAccounts: (connectionId: string) => Promise<import('./types/ssh').ClusterAccountsResult>
     }
     fs: {
       resolveSplit: (

@@ -12,7 +12,6 @@ export function DataPreview() {
   const { tabs, activeTabId, setActiveTab, closeTab, setTabData } = useDataPreviewStore()
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [ignoredSizeGuard, setIgnoredSizeGuard] = useState<Record<string, boolean>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
 
   useEffect(() => {
@@ -25,16 +24,15 @@ export function DataPreview() {
         ;(async () => {
           try {
             const stat = await statFile(filePath)
-            if (stat.size > MAX_PREVIEW_BYTES && !ignoredSizeGuard[tabId]) {
-              setErrors((prev) => ({
-                ...prev,
-                [tabId]: `This file is ${(stat.size / 1_000_000).toFixed(1)} MB. Preview is paused to avoid loading a very large file.`,
-              }))
-              setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
-              return
-            }
-
             if (tab.mode === 'image' || tab.mode === 'pdf') {
+              if (stat.size > MAX_PREVIEW_BYTES) {
+                setErrors((prev) => ({
+                  ...prev,
+                  [tabId]: `This ${tab.mode.toUpperCase()} is ${(stat.size / 1_000_000).toFixed(1)} MB and is too large to embed.`,
+                }))
+                setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
+                return
+              }
               const base64 = await readFileBase64(filePath, MAX_PREVIEW_BYTES)
               const mime = tab.mode === 'pdf' ? 'application/pdf' : mimeForImage(filePath)
               setMediaUrls((prev) => ({ ...prev, [tabId]: `data:${mime};base64,${base64}` }))
@@ -47,6 +45,7 @@ export function DataPreview() {
             }
 
             const content = await headPreviewFile(filePath, 500)
+            const truncated = stat.size > MAX_PREVIEW_BYTES
             if (content.length === 0) {
               setErrors((prev) => ({ ...prev, [tabId]: 'File is empty.' }))
               setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
@@ -66,8 +65,14 @@ export function DataPreview() {
             }
             if (tab.mode === 'text' || tab.mode === 'binary') {
               setErrors((prev) => {
-                const { [tabId]: _, ...rest } = prev
-                return rest
+                if (!truncated) {
+                  const { [tabId]: _, ...rest } = prev
+                  return rest
+                }
+                return {
+                  ...prev,
+                  [tabId]: `Showing the first 500 rows from a ${(stat.size / 1_000_000).toFixed(1)} MB file.`,
+                }
               })
               setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: content })
               return
@@ -88,8 +93,14 @@ export function DataPreview() {
               return
             }
             setErrors((prev) => {
-              const { [tabId]: _, ...rest } = prev
-              return rest
+              if (!truncated) {
+                const { [tabId]: _, ...rest } = prev
+                return rest
+              }
+              return {
+                ...prev,
+                [tabId]: `Showing the first 500 rows from a ${(stat.size / 1_000_000).toFixed(1)} MB file.`,
+              }
             })
             setTabData(tabId, { headers, rows, delimiter, rawText: content })
           } catch (err: any) {
@@ -102,7 +113,7 @@ export function DataPreview() {
         })()
       }
     }
-  }, [ignoredSizeGuard, tabs, setTabData])
+  }, [tabs, setTabData])
 
   if (tabs.length === 0) {
     return (
@@ -152,17 +163,6 @@ export function DataPreview() {
           </button>
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
-          )}
-          {errors[activeTab.id]?.includes('Preview is paused') && (
-            <button
-              className="rounded border border-border px-2 py-0.5 text-[11px] text-text-primary hover:bg-bg-hover"
-              onClick={() => {
-                setIgnoredSizeGuard((prev) => ({ ...prev, [activeTab.id]: true }))
-                useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, activeTab.mode)
-              }}
-            >
-              Open raw text mode
-            </button>
           )}
         </div>
       )}
