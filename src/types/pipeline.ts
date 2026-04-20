@@ -209,6 +209,7 @@ export interface MergeNodeData {
 
 export type TransformFilterOp =
   | 'contains'
+  | 'regex'
   | 'equals'
   | 'notEquals'
   | 'gt'

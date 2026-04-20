@@ -702,7 +702,7 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   }
   lines.push('')
   lines.push(`python3 - <<'PY' "$IN" "$OUT"`)
-  lines.push('import csv, json, sys')
+  lines.push('import csv, json, re, sys')
   lines.push('in_path, out_path = sys.argv[1], sys.argv[2]')
   lines.push(`config = json.loads(${JSON.stringify(JSON.stringify({
     selectedColumns: transformData.selectedColumns ?? [],
@@ -718,6 +718,9 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   lines.push('    value = str(rule.get("value", ""))')
   lines.push('    op = rule.get("op")')
   lines.push('    if op == "contains": return value.lower() in raw.lower()')
+  lines.push('    if op == "regex":')
+  lines.push('        try: return re.search(value, raw, re.IGNORECASE) is not None')
+  lines.push('        except re.error: return False')
   lines.push('    if op == "equals": return raw == value')
   lines.push('    if op == "notEquals": return raw != value')
   lines.push('    if op == "notEmpty": return raw.strip() != ""')

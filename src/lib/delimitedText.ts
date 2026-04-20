@@ -89,7 +89,7 @@ export function parseHeaderLine(text: string, delimiter?: Delimiter): { columns:
   const lines = dataLines(text)
   if (lines.length === 0) return { columns: [], delimiter: delimiter ?? '\t' }
 
-  const detected = detectDelimiter(text, delimiter)
+  const detected = delimiter ?? detectDelimiter(text)
   const headerLine = lines[0].startsWith('#') ? lines[0].slice(1) : lines[0]
   return {
     columns: splitDelimitedLine(headerLine, detected).filter(Boolean),
@@ -101,7 +101,7 @@ export function parseTabularData(text: string, delimiter?: Delimiter): { headers
   const lines = dataLines(text)
   if (lines.length === 0) return { headers: [], rows: [], delimiter: delimiter ?? '\t' }
 
-  const detected = detectDelimiter(text, delimiter)
+  const detected = delimiter ?? detectDelimiter(text)
   const headerLine = lines[0].startsWith('#') ? lines[0].slice(1) : lines[0]
   const headers = splitDelimitedLine(headerLine, detected).filter(Boolean)
   const rows = lines.slice(1).map((line) => {

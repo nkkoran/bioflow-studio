@@ -63,10 +63,18 @@ export function NodeRunList({ run }: Props) {
     <div className="py-1">
       {rows.map((ns) => {
         const NodeIcon = iconFor(ns.nodeId)
+        const label = labelFor(ns.nodeId)
         return (
         <button
           key={ns.nodeId}
           onClick={() => setSelectedNode(ns.nodeId)}
+          title={[
+            label,
+            ns.jobId ? `job ${ns.jobId}` : null,
+            ns.isArray ? `array size ${ns.arraySize ?? '?'}` : null,
+            ns.outputDir ? `outputs ${ns.outputDir}` : null,
+            ns.error ? `error ${ns.error}` : null,
+          ].filter(Boolean).join('\n')}
           className={`w-full text-left px-3 py-2 flex items-center gap-2 text-xs border-l-2 transition-colors ${
             selectedNodeId === ns.nodeId
               ? 'bg-bg-hover border-accent'
@@ -76,7 +84,7 @@ export function NodeRunList({ run }: Props) {
           <StatusIcon status={ns.status} />
           <NodeIcon size={13} className="shrink-0 text-text-muted" />
           <div className="flex-1 min-w-0">
-            <div className="text-text-primary truncate font-medium">{labelFor(ns.nodeId)}</div>
+            <div className="text-text-primary truncate font-medium">{label}</div>
             <div className="text-[10px] text-text-muted truncate">
               {ns.jobId ? `job ${ns.jobId}${ns.isArray ? ` [${ns.arraySize}]` : ''}` : '—'}
               {ns.exitCode !== undefined && ns.exitCode !== 0 && (

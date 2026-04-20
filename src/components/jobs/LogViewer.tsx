@@ -59,6 +59,8 @@ export function LogViewer({ run, connectionId }: Props) {
   const logLines = useRunStore((s) =>
     ns ? (s.logs[ns.nodeId]?.[stream] ?? EMPTY_LINES) : EMPTY_LINES,
   ) as readonly string[]
+  const stdoutLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stdout?.length ?? 0) : 0)
+  const stderrLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stderr?.length ?? 0) : 0)
 
   // The concrete log file path (null when not yet known or array-with-placeholder).
   const resolvedPath = ns ? resolveLogPath(ns, stream, taskIdx) : null
@@ -169,8 +171,8 @@ export function LogViewer({ run, connectionId }: Props) {
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-light shrink-0">
-        <StreamTab label="stdout" active={stream === 'stdout'} onClick={() => setStream('stdout')} />
-        <StreamTab label="stderr" active={stream === 'stderr'} onClick={() => setStream('stderr')} />
+        <StreamTab label="stdout" count={stdoutLineCount} active={stream === 'stdout'} onClick={() => setStream('stdout')} />
+        <StreamTab label="stderr" count={stderrLineCount} active={stream === 'stderr'} onClick={() => setStream('stderr')} />
 
         {isArray && (
           <>
@@ -189,7 +191,11 @@ export function LogViewer({ run, connectionId }: Props) {
 
         <div className="flex-1" />
 
-        <span className="text-[10px] text-text-muted font-mono truncate max-w-[60%]" title={resolvedPath ?? ''}>
+        <span className="rounded bg-bg-hover px-1.5 py-0.5 text-[10px] text-text-muted">
+          {logLines.length} line{logLines.length === 1 ? '' : 's'}
+        </span>
+
+        <span className="text-[10px] text-text-muted font-mono truncate max-w-[55%]" title={resolvedPath ?? ''}>
           {resolvedPath}
         </span>
 
@@ -235,17 +241,18 @@ export function LogViewer({ run, connectionId }: Props) {
   )
 }
 
-function StreamTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function StreamTab({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className={`px-2 py-0.5 text-[10px] font-mono rounded ${
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono rounded ${
         active
           ? 'bg-bg-hover text-text-primary'
           : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
       }`}
     >
       {label}
+      <span className="rounded bg-bg-primary px-1 text-[9px] text-text-muted">{count}</span>
     </button>
   )
 }

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { TransformFilterRule } from '@/types/pipeline'
 
 export type PreviewMode = 'tabular' | 'text' | 'binary' | 'image' | 'pdf'
+export type DelimiterOverride = 'auto' | '\t' | ',' | ' ' | ';' | '|'
 
 interface DataPreviewData {
   headers: string[]
@@ -17,6 +18,7 @@ interface DataPreviewTab {
   mode: PreviewMode
   data: DataPreviewData | null
   loading: boolean
+  savedView?: boolean
 }
 
 interface DataPreviewStore {
@@ -25,6 +27,8 @@ interface DataPreviewStore {
   visibleColumns: Record<string, string[]>
   filters: Record<string, TransformFilterRule[]>
   sort: Record<string, { column: string; dir: 'asc' | 'desc' } | undefined>
+  delimiterOverride: Record<string, DelimiterOverride>
+  scrollOffset: Record<string, number>
   schemas: Record<string, { columns: string[]; delimiter: string; fetchedAt: number; modified?: number }>
 
   openFile: (filePath: string, fileName: string, mode?: PreviewMode) => void
@@ -34,6 +38,8 @@ interface DataPreviewStore {
   setVisibleColumns: (filePath: string, columns: string[]) => void
   setFilters: (filePath: string, filters: TransformFilterRule[]) => void
   setSort: (filePath: string, sort: { column: string; dir: 'asc' | 'desc' } | undefined) => void
+  setDelimiterOverride: (filePath: string, delimiter: DelimiterOverride) => void
+  setScrollOffset: (filePath: string, offset: number) => void
   setSchema: (filePath: string, schema: { columns: string[]; delimiter: string; modified?: number }) => void
   clearTabs: () => void
 }
@@ -46,6 +52,8 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
   visibleColumns: {},
   filters: {},
   sort: {},
+  delimiterOverride: {},
+  scrollOffset: {},
   schemas: {},
 
   openFile: (filePath, fileName, mode = 'tabular') => {
@@ -64,9 +72,13 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
       }
 
       const id = `preview-${nextPreviewId++}`
+      const { [filePath]: _filters, ...filters } = state.filters
+      const { [filePath]: _sort, ...sort } = state.sort
       return {
         tabs: [...state.tabs, { id, filePath, fileName, mode, data: null, loading: true }],
         activeTabId: id,
+        filters,
+        sort,
       }
     })
   },
@@ -130,6 +142,21 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
       sort: { ...state.sort, [filePath]: sort },
     })),
 
+  setDelimiterOverride: (filePath, delimiter) =>
+    set((state) => ({
+      delimiterOverride: { ...state.delimiterOverride, [filePath]: delimiter },
+      tabs: state.tabs.map((tab) =>
+        tab.filePath === filePath && tab.mode === 'tabular'
+          ? { ...tab, data: null, loading: true }
+          : tab,
+      ),
+    })),
+
+  setScrollOffset: (filePath, offset) =>
+    set((state) => ({
+      scrollOffset: { ...state.scrollOffset, [filePath]: offset },
+    })),
+
   setSchema: (filePath, schema) =>
     set((state) => ({
       schemas: {
@@ -147,5 +174,6 @@ export const useDataPreviewStore = create<DataPreviewStore>((set) => ({
     visibleColumns: {},
     filters: {},
     sort: {},
+    scrollOffset: {},
   }),
 }))

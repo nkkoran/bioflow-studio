@@ -3,17 +3,17 @@
  * and per-node logs. No live log streaming yet: we read log files via SFTP on
  * refresh (with a 5s auto-refresh for running jobs).
  */
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRunStore } from '@/stores/runStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { Button } from '@/components/ui/Button'
-import { FolderOpen, RefreshCw, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FolderOpen, RefreshCw, X } from 'lucide-react'
 import { NodeRunList } from './NodeRunList'
 import { LogViewer } from './LogViewer'
 import { JobSummary } from './JobSummary'
 import { QueueDetails } from './QueueDetails'
 import { FailureDiagnostic } from './FailureDiagnostic'
-import type { RunState } from '@/types/pipeline'
+import type { NodeRunState, RunState } from '@/types/pipeline'
 import { useFileStore } from '@/stores/fileStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 
@@ -28,8 +28,10 @@ export function JobsPanel() {
   const diagnostics = useRunStore((s) => s.diagnostics)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const pipelineId = usePipelineStore((s) => s.pipelineId)
+  const pipelineNodes = usePipelineStore((s) => s.nodes)
   const navigate = useFileStore((s) => s.navigate)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
+  const [nodesCollapsed, setNodesCollapsed] = useState(false)
 
   // Sort runs most-recent-first for the selector
   const sortedRuns = useMemo(
@@ -146,18 +148,42 @@ export function JobsPanel() {
       {/* Body: node list (left) + log viewer (right) */}
       {activeRun ? (
         <div className="flex-1 flex min-h-0">
-          <div className="w-[42%] min-w-[260px] max-w-[460px] border-r border-border-light flex flex-col min-h-0">
-            <RunHistoryList runs={sortedRuns} activeRunId={activeRun.runId} onSelect={setActiveRun} />
-            <div className="border-t border-border-light px-3 py-1.5 text-[10px] uppercase tracking-wide text-text-muted shrink-0">
-              Nodes
+          {!nodesCollapsed ? (
+            <div className="w-[34%] min-w-[260px] max-w-[420px] border-r border-border-light flex flex-col min-h-0">
+              <RunHistoryList runs={sortedRuns} activeRunId={activeRun.runId} onSelect={setActiveRun} />
+              <div className="border-t border-border-light px-3 py-1.5 shrink-0 flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wide text-text-muted">Steps</span>
+                <span className="text-[10px] text-text-muted">{Object.keys(activeRun.nodes).length}</span>
+                <button
+                  onClick={() => setNodesCollapsed(true)}
+                  className="ml-auto flex h-6 w-6 items-center justify-center rounded border border-border text-text-muted hover:bg-bg-hover hover:text-text-primary"
+                  title="Collapse step list"
+                >
+                  <ChevronLeft size={13} />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto min-h-0">
+                <NodeRunList run={activeRun} />
+              </div>
             </div>
-            <div className="flex-1 overflow-y-auto min-h-0">
-              <NodeRunList run={activeRun} />
-            </div>
-          </div>
+          ) : (
+            <button
+              onClick={() => setNodesCollapsed(false)}
+              className="w-8 shrink-0 border-r border-border-light bg-bg-secondary/40 text-text-muted hover:bg-bg-hover hover:text-text-primary flex items-center justify-center"
+              title="Show step list"
+            >
+              <ChevronRight size={14} />
+            </button>
+          )}
           <div className="flex-1 min-w-0 flex flex-col">
             <RunDetails run={activeRun} />
             <QueueDetails run={activeRun} />
+            {selectedNodeId && activeRun.nodes[selectedNodeId] && (
+              <SelectedNodeSummary
+                ns={activeRun.nodes[selectedNodeId]}
+                label={labelForNode(pipelineNodes, selectedNodeId)}
+              />
+            )}
             {(() => {
               const ns = selectedNodeId ? activeRun.nodes[selectedNodeId] : null
               const isTerminal =
@@ -217,13 +243,35 @@ function RunHistoryList({
             <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusChipColor(run.status)}`}>
               {run.status}
             </span>
-            <span className="text-xs text-text-primary truncate">{run.workDir.split('/').pop() ?? run.runId.slice(0, 8)}</span>
+            <span className="text-xs text-text-primary truncate">
+              {run.pipelineName?.trim() || run.workDir.split('/').pop() || run.runId.slice(0, 8)}
+            </span>
           </div>
           <div className="mt-0.5 text-[10px] text-text-muted truncate">
-            {formatAbsoluteTime(run.createdAt)} · {Object.keys(run.nodes).length} node{Object.keys(run.nodes).length === 1 ? '' : 's'}
+            {formatRelativeTime(run.createdAt)} · {formatAbsoluteTime(run.createdAt)} · {Object.keys(run.nodes).length} step{Object.keys(run.nodes).length === 1 ? '' : 's'}
           </div>
         </button>
       ))}
+    </div>
+  )
+}
+
+function SelectedNodeSummary({ ns, label }: { ns: NodeRunState; label: string }) {
+  return (
+    <div className="border-b border-border-light bg-bg-primary px-3 py-2 shrink-0">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="font-medium text-text-primary truncate">{label}</span>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] ${statusChipColor(ns.status ?? 'idle')}`}>
+          {ns.status ?? 'idle'}
+        </span>
+        {ns.isArray && <span className="text-[10px] text-accent">array {ns.arraySize ?? '?'}</span>}
+        <span className="ml-auto text-[10px] text-text-muted font-mono">{formatDuration(ns)}</span>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-text-muted">
+        {ns.jobId && <span>job <span className="font-mono text-text-secondary">{ns.jobId}</span></span>}
+        {ns.exitCode !== undefined && <span>exit <span className="font-mono text-text-secondary">{ns.exitCode}</span></span>}
+        {ns.outputDir && <span className="truncate">outputs <span className="font-mono text-text-secondary">{ns.outputDir}</span></span>}
+      </div>
     </div>
   )
 }
@@ -250,12 +298,9 @@ function RunDetails({ run }: { run: RunState }) {
 }
 
 function formatRunLabel(run: { runId: string; createdAt: number; workDir: string; status: string; pipelineName?: string }): string {
-  const d = new Date(run.createdAt)
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
   const folder = run.workDir.split('/').pop() ?? run.runId.slice(0, 8)
   const name = run.pipelineName?.trim()
-  return name ? `${name}  •  ${date} ${time}` : `${date} ${time}  •  ${folder}`
+  return `${name || folder}  •  ${formatRelativeTime(run.createdAt)}  •  ${run.status}`
 }
 
 function pad(n: number): string {
@@ -265,6 +310,36 @@ function pad(n: number): string {
 function formatAbsoluteTime(ts: number): string {
   const d = new Date(ts)
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function formatRelativeTime(ts: number): string {
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (sec < 60) return `${sec}s ago`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  return `${d}d ago`
+}
+
+function labelForNode(nodes: Array<{ id: string; type?: string; data: Record<string, unknown> }>, nodeId: string): string {
+  const node = nodes.find((candidate) => candidate.id === nodeId)
+  const label = typeof node?.data.label === 'string' ? node.data.label.trim() : ''
+  return label || nodeId
+}
+
+function formatDuration(ns: NodeRunState): string {
+  const start = ns.startedAt ?? ns.submittedAt
+  if (!start) return ''
+  const end = ns.finishedAt ?? Date.now()
+  const sec = Math.round((end - start) / 1000)
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  if (m < 60) return `${m}m ${s}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
 }
 
 function statusChipColor(status: string): string {

@@ -2606,6 +2606,7 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
 
 const TRANSFORM_FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
   { value: 'contains', label: 'contains', needsValue: true },
+  { value: 'regex', label: 'matches regex', needsValue: true },
   { value: 'equals', label: 'equals', needsValue: true },
   { value: 'notEquals', label: 'does not equal', needsValue: true },
   { value: 'gt', label: '>', needsValue: true },

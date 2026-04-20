@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import type { DelimiterOverride } from '@/stores/dataPreviewStore'
 import { headPreviewFile, readFileBase64, statFile } from '@/stores/fileStore'
 import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
 import { Tabs } from '@/components/ui/Tabs'
@@ -9,7 +10,16 @@ import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDe
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
 
 export function DataPreview() {
-  const { tabs, activeTabId, setActiveTab, closeTab, setTabData } = useDataPreviewStore()
+  const {
+    tabs,
+    activeTabId,
+    filters,
+    delimiterOverride,
+    setActiveTab,
+    closeTab,
+    setTabData,
+    setDelimiterOverride,
+  } = useDataPreviewStore()
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
@@ -81,7 +91,8 @@ export function DataPreview() {
             let headers: string[] = []
             let rows: string[][] = []
             try {
-              delimiter = detectDelimiter(content)
+              const override = useDataPreviewStore.getState().delimiterOverride[filePath] ?? 'auto'
+              delimiter = override === 'auto' ? detectDelimiter(content) : override
               ;({ headers, rows } = parseTabularData(content, delimiter))
             } catch (err) {
               console.warn('[DataPreview] tabular parse failed; falling back to raw text:', err)
@@ -132,6 +143,7 @@ export function DataPreview() {
         tabs={tabs.map((t) => ({
           id: t.id,
           label: t.fileName,
+          badge: (filters[t.filePath]?.length ?? 0) > 0,
           closable: true,
         }))}
         activeId={activeTabId ?? tabs[0].id}
@@ -161,6 +173,24 @@ export function DataPreview() {
           >
             Table
           </button>
+          {activeTab.mode === 'tabular' && (
+            <label className="ml-1 flex items-center gap-1 text-[11px] text-text-muted">
+              Delimiter
+              <select
+                value={delimiterOverride[activeTab.filePath] ?? 'auto'}
+                onChange={(e) => setDelimiterOverride(activeTab.filePath, e.target.value as DelimiterOverride)}
+                className="h-6 rounded border border-border bg-bg-primary px-1.5 text-[11px] text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                title="Override the delimiter used to parse this file"
+              >
+                <option value="auto">Auto</option>
+                <option value={'\t'}>Tab</option>
+                <option value=",">Comma</option>
+                <option value=" ">Space</option>
+                <option value=";">Semicolon</option>
+                <option value="|">Pipe</option>
+              </select>
+            </label>
+          )}
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
           )}

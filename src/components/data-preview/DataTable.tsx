@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import {
   useReactTable,
   getCoreRowModel,
@@ -30,6 +30,16 @@ export function DataTable({ filePath, headers, rows }: DataTableProps) {
   const setFilters = useDataPreviewStore((s) => s.setFilters)
   const sort = useDataPreviewStore((s) => s.sort[filePath])
   const setSort = useDataPreviewStore((s) => s.setSort)
+  const scrollOffset = useDataPreviewStore((s) => s.scrollOffset[filePath] ?? 0)
+  const setScrollOffset = useDataPreviewStore((s) => s.setScrollOffset)
+
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+    el.scrollTop = scrollOffset
+  // Restore when switching files; live scroll updates should not yank the view.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filePath, rows.length])
 
   const visible = visibleColumns ?? headers
   const visibleIndexes = useMemo(
@@ -121,7 +131,7 @@ export function DataTable({ filePath, headers, rows }: DataTableProps) {
             <div className="text-xs text-text-secondary">Filter by a specific column instead of searching every visible cell.</div>
           </div>
           <button
-            onClick={() => setFilters(filePath, [...filters, newFilter(headers[0] ?? '')])}
+            onClick={() => setFilters(filePath, [...filters, newFilter(headers[0] ?? '', headers, rows)])}
             className="h-7 px-2 rounded-md border border-accent/40 bg-accent/10 text-[11px] text-accent hover:bg-accent/15"
           >
             Add filter
@@ -130,10 +140,22 @@ export function DataTable({ filePath, headers, rows }: DataTableProps) {
 
         {filters.length > 0 ? (
           <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] text-text-muted">
+                {filters.length} active filter{filters.length === 1 ? '' : 's'}
+              </span>
+              <button
+                onClick={() => setFilters(filePath, [])}
+                className="text-[10px] text-text-muted hover:text-error"
+              >
+                Clear all filters
+              </button>
+            </div>
             {filters.map((rule) => (
               <FilterRuleRow
                 key={rule.id}
                 headers={headers}
+                rows={rows}
                 rule={rule}
                 onChange={(next) => setFilters(filePath, filters.map((r) => r.id === rule.id ? next : r))}
                 onRemove={() => setFilters(filePath, filters.filter((r) => r.id !== rule.id))}
@@ -184,7 +206,11 @@ export function DataTable({ filePath, headers, rows }: DataTableProps) {
           </div>
         </div>
       </div>
-      <div ref={parentRef} className="flex-1 overflow-auto">
+      <div
+        ref={parentRef}
+        className="flex-1 overflow-auto"
+        onScroll={(e) => setScrollOffset(filePath, e.currentTarget.scrollTop)}
+      >
         <table className="w-full border-collapse text-left">
           <thead className="sticky top-0 z-10 bg-bg-tertiary">
             {table.getHeaderGroups().map((headerGroup) => (
@@ -262,6 +288,7 @@ export function DataTable({ filePath, headers, rows }: DataTableProps) {
 
 const FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
   { value: 'contains', label: 'contains', needsValue: true },
+  { value: 'regex', label: 'matches regex', needsValue: true },
   { value: 'equals', label: 'equals', needsValue: true },
   { value: 'notEquals', label: 'does not equal', needsValue: true },
   { value: 'gt', label: '>', needsValue: true },
@@ -271,32 +298,45 @@ const FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: b
   { value: 'notEmpty', label: 'is not empty', needsValue: false },
 ]
 
-function newFilter(column: string): TransformFilterRule {
+function newFilter(column: string, headers: string[], rows: string[][]): TransformFilterRule {
   return {
     id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     column,
-    op: 'contains',
+    op: inferDefaultFilterOp(column, headers, rows),
     value: '',
   }
 }
 
 function FilterRuleRow({
   headers,
+  rows,
   rule,
   onChange,
   onRemove,
 }: {
   headers: string[]
+  rows: string[][]
   rule: TransformFilterRule
   onChange: (rule: TransformFilterRule) => void
   onRemove: () => void
 }) {
   const op = FILTER_OPS.find((candidate) => candidate.value === rule.op) ?? FILTER_OPS[0]
+  const active = rule.column && (op.needsValue === false || String(rule.value ?? '').trim() !== '')
   return (
-    <div className="flex items-center gap-1">
+    <div className={`flex items-center gap-1 rounded-md border px-1 py-1 ${
+      active ? 'border-accent/40 bg-accent/10' : 'border-border bg-bg-primary/40'
+    }`}>
       <select
         value={rule.column}
-        onChange={(e) => onChange({ ...rule, column: e.target.value })}
+        onChange={(e) => {
+          const column = e.target.value
+          const opShouldFollowColumn = rule.op === 'contains' || rule.op === 'equals'
+          onChange({
+            ...rule,
+            column,
+            op: opShouldFollowColumn ? inferDefaultFilterOp(column, headers, rows) : rule.op,
+          })
+        }}
         className="h-7 min-w-0 flex-[1.2] rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary outline-none focus:ring-1 focus:ring-accent"
       >
         {headers.map((header) => <option key={header} value={header}>{header}</option>)}
@@ -338,6 +378,12 @@ export function rowMatchesRule(row: string[], headers: string[], rule: Transform
   switch (rule.op) {
     case 'contains':
       return raw.toLowerCase().includes(value.toLowerCase())
+    case 'regex':
+      try {
+        return new RegExp(value, 'i').test(raw)
+      } catch {
+        return false
+      }
     case 'equals':
       return raw === value
     case 'notEquals':
@@ -359,4 +405,16 @@ export function rowMatchesRule(row: string[], headers: string[], rule: Transform
     default:
       return true
   }
+}
+
+function inferDefaultFilterOp(column: string, headers: string[], rows: string[][]): TransformFilterOp {
+  const idx = headers.indexOf(column)
+  if (idx < 0) return 'contains'
+  const sample = rows
+    .map((row) => row[idx])
+    .filter((value) => value !== undefined && value !== '' && value !== 'NA' && value !== '.')
+    .slice(0, 40)
+  if (sample.length === 0) return 'contains'
+  const numeric = sample.filter((value) => !Number.isNaN(Number(value)))
+  return numeric.length / sample.length >= 0.8 ? 'equals' : 'contains'
 }

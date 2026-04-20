@@ -5,6 +5,7 @@ interface Tab {
   id: string
   label: string
   icon?: React.ReactNode
+  badge?: boolean
   closable?: boolean
 }
 
@@ -36,10 +37,13 @@ export function Tabs({ tabs, activeId, onSelect, onClose, rightContent }: TabsPr
             >
               {tab.icon}
               <span className="truncate">{tab.label}</span>
+              {tab.badge && (
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" title="This preview has active filters" />
+              )}
               {tab.closable && onClose && (
                 <span
                   className={classNames(
-                    'ml-1 rounded p-0.5 transition-colors',
+                    'ml-1 flex h-5 w-5 items-center justify-center rounded transition-colors',
                     'opacity-0 group-hover:opacity-100',
                     'hover:bg-bg-hover text-text-muted hover:text-text-primary',
                   )}
