@@ -10,6 +10,7 @@ import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
 import { BottomPanel } from './BottomPanel'
 import { MfaPrompt } from '@/components/connection/MfaPrompt'
+import { LoginPolicyToast } from '@/components/connection/LoginPolicyToast'
 
 const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 480
@@ -149,6 +150,7 @@ export function AppLayout() {
     <div className="flex flex-col h-screen w-screen bg-bg-primary text-text-primary overflow-hidden">
       <TopBar />
       <MfaPrompt />
+      <LoginPolicyToast />
 
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}

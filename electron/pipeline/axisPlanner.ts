@@ -20,7 +20,7 @@ import { topoSort } from './topoSort'
 export type AxedValue =
   | { kind: 'single'; path: string }
   | { kind: 'multi'; paths: string[] }
-  | { kind: 'array'; axis: string; keys: string[]; paths: string[] }
+  | { kind: 'array'; axis: string; keys: string[]; paths: string[]; pathTemplate?: string }
 
 export type NodeMode = 'single' | 'array' | 'fanIn' | 'skip'
 
@@ -115,6 +115,24 @@ function outputPathFromTemplate(template: string, key: string | null): string {
   const dotIdx = template.lastIndexOf('.')
   const insertIdx = dotIdx > slashIdx ? dotIdx : template.length
   return `${template.slice(0, insertIdx)}.${key}${template.slice(insertIdx)}`
+}
+
+function splitPathTemplate(split: NonNullable<FileNodeData['split']>): string | undefined {
+  const pattern = split.pattern
+  if (!pattern) return undefined
+  if (pattern.kind === 'brace') {
+    return pattern.template.replace(/\{[^{}]*\}/, '${KEY}')
+  }
+  if (pattern.kind === 'glob') {
+    return pattern.template.includes('*') ? pattern.template.replace('*', '${KEY}') : undefined
+  }
+  if (pattern.kind === 'crossFolder') {
+    if (!pattern.parentDir.trim() || !pattern.childGlob.trim() || !pattern.file.trim()) return undefined
+    const child = pattern.childGlob.replace('*', '${KEY}').replace(/^\/+|\/+$/g, '')
+    const file = pattern.file.replace(/^\/+/, '')
+    return `${pattern.parentDir.replace(/\/+$/, '')}/${child}/${file}`
+  }
+  return undefined
 }
 
 function connectedOutputSink(
@@ -215,6 +233,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           axis: data.split.axis,
           keys: data.split.items.map((i) => i.key),
           paths: data.split.items.map((i) => i.path),
+          pathTemplate: splitPathTemplate(data.split),
         }
       } else if (data.split && data.split.items.length === 0) {
         throw new AxisPlanError('EMPTY_SPLIT', nodeId, `File node "${data.label}" has split with zero items`)

@@ -10,10 +10,17 @@ interface Props {
 
 export function ScriptPreviewModal({ scripts, onClose }: Props) {
   const [selectedId, setSelectedId] = useState(scripts[0]?.nodeId ?? '')
+  const [copied, setCopied] = useState(false)
   const selected = useMemo(
     () => scripts.find((script) => script.nodeId === selectedId) ?? scripts[0],
     [scripts, selectedId],
   )
+  const copySelected = async () => {
+    if (!selected) return
+    await copyText(selected.script)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1200)
+  }
 
   return (
     <div
@@ -66,10 +73,10 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
                       variant="ghost"
                       size="sm"
                       icon={<Copy size={11} />}
-                      onClick={() => void navigator.clipboard.writeText(selected.script)}
+                      onClick={() => void copySelected()}
                       className="h-6 px-2 text-[10px]"
                     >
-                      Copy
+                      {copied ? 'Copied' : 'Copy'}
                     </Button>
                   </div>
                   {selected.outputPaths.length > 0 && (
@@ -78,7 +85,7 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
                     </div>
                   )}
                 </div>
-                <pre className="flex-1 m-0 overflow-auto p-3 text-[11px] leading-relaxed font-mono bg-bg-primary text-text-primary whitespace-pre">
+                <pre className="flex-1 m-0 overflow-auto p-3 text-[11px] leading-relaxed font-mono bg-bg-primary text-text-primary whitespace-pre select-text cursor-text">
                   {selected.script}
                 </pre>
               </>
@@ -92,4 +99,23 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
       </div>
     </div>
   )
+}
+
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return
+  } catch {
+    // Electron's clipboard permission can be finicky under some dev contexts.
+    // The temporary textarea path also works when navigator.clipboard is denied.
+  }
+  const el = document.createElement('textarea')
+  el.value = text
+  el.setAttribute('readonly', 'true')
+  el.style.position = 'fixed'
+  el.style.left = '-9999px'
+  document.body.appendChild(el)
+  el.select()
+  document.execCommand('copy')
+  document.body.removeChild(el)
 }

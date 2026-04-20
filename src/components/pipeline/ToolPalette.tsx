@@ -7,11 +7,12 @@
  * MIME type carrying the tool id.
  */
 import { useState, useMemo } from 'react'
-import { ChevronRight, Search, FileText, StickyNote, GitMerge, SlidersHorizontal, Boxes } from 'lucide-react'
+import { ChevronRight, Search } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { classNames } from '@/lib/utils'
 import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
 import { TOOL_BUNDLES } from '@/lib/toolBundles'
+import { iconForBundle, iconForCategory, iconForNodeType } from '@/lib/toolIcons'
 import type { ToolDef } from '@/types/pipeline'
 import type { ToolBundle } from '@/lib/toolBundles'
 
@@ -23,6 +24,7 @@ interface PaletteItemProps {
 }
 
 function PaletteItem({ tool }: PaletteItemProps) {
+  const Icon = iconForCategory(tool.category)
   const onDragStart = (event: React.DragEvent) => {
     event.dataTransfer.setData(DRAG_MIME, tool.id)
     event.dataTransfer.effectAllowed = 'copy'
@@ -39,13 +41,17 @@ function PaletteItem({ tool }: PaletteItemProps) {
       )}
       title={tool.description}
     >
-      <div className="font-medium text-text-primary truncate">{tool.name}</div>
+      <div className="flex items-center gap-1.5 font-medium text-text-primary">
+        <Icon size={11} className="shrink-0 text-text-muted" />
+        <span className="truncate">{tool.name}</span>
+      </div>
       <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
     </div>
   )
 }
 
 function BundleItem({ bundle }: { bundle: ToolBundle }) {
+  const Icon = iconForBundle()
   const onDragStart = (event: React.DragEvent) => {
     event.dataTransfer.setData(BUNDLE_DRAG_MIME, bundle.id)
     event.dataTransfer.effectAllowed = 'copy'
@@ -62,7 +68,10 @@ function BundleItem({ bundle }: { bundle: ToolBundle }) {
       )}
       title={bundle.description}
     >
-      <div className="font-medium text-text-primary truncate">{bundle.label}</div>
+      <div className="flex items-center gap-1.5 font-medium text-text-primary">
+        <Icon size={11} className="shrink-0 text-text-muted" />
+        <span className="truncate">{bundle.label}</span>
+      </div>
       <div className="text-[10px] text-text-muted truncate">{bundle.description}</div>
     </div>
   )
@@ -99,6 +108,11 @@ function SpecialItem({ type, label, icon }: SpecialItemProps) {
 export function ToolPalette() {
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const FileIcon = iconForNodeType('file')
+  const TransformIcon = iconForNodeType('transform')
+  const MergeIcon = iconForNodeType('merge')
+  const NoteIcon = iconForNodeType('note')
+  const BundleIcon = iconForBundle()
 
   const groups = useMemo(() => {
     if (!search.trim()) return getToolsByCategory()
@@ -152,11 +166,11 @@ export function ToolPalette() {
 
       {/* Special items */}
       <div className="p-2 flex flex-col gap-0.5 border-b border-border">
-        <SpecialItem type="file-input" label="Input File" icon={<FileText size={12} className="text-amber-400" />} />
-        <SpecialItem type="file-output" label="Output File" icon={<FileText size={12} className="text-amber-400" />} />
-        <SpecialItem type="transform" label="Transform" icon={<SlidersHorizontal size={12} className="text-teal-400" />} />
-        <SpecialItem type="merge" label="Merge (fan-in)" icon={<GitMerge size={12} className="text-indigo-400" />} />
-        <SpecialItem type="note" label="Note" icon={<StickyNote size={12} className="text-amber-400" />} />
+        <SpecialItem type="file-input" label="Input File" icon={<FileIcon size={12} className="text-amber-400" />} />
+        <SpecialItem type="file-output" label="Output File" icon={<FileIcon size={12} className="text-amber-400" />} />
+        <SpecialItem type="transform" label="Transform" icon={<TransformIcon size={12} className="text-teal-400" />} />
+        <SpecialItem type="merge" label="Merge (fan-in)" icon={<MergeIcon size={12} className="text-indigo-400" />} />
+        <SpecialItem type="note" label="Note" icon={<NoteIcon size={12} className="text-amber-400" />} />
       </div>
 
       {/* Tools grouped by category */}
@@ -164,7 +178,7 @@ export function ToolPalette() {
         {bundles.length > 0 && (
           <div className="mb-1">
             <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
-              <Boxes size={10} />
+              <BundleIcon size={10} />
               Bundles
               <span className="ml-auto text-text-muted">{bundles.length}</span>
             </div>
@@ -180,6 +194,7 @@ export function ToolPalette() {
         )}
         {groups.map(({ category, tools }) => {
           const isCollapsed = collapsed.has(category)
+          const CategoryIcon = iconForCategory(category)
           return (
             <div key={category} className="mb-1">
               <button
@@ -190,6 +205,7 @@ export function ToolPalette() {
                   size={10}
                   className={classNames('transition-transform', isCollapsed ? '' : 'rotate-90')}
                 />
+                <CategoryIcon size={10} />
                 {CATEGORY_LABELS[category] ?? category}
                 <span className="ml-auto text-text-muted">{tools.length}</span>
               </button>

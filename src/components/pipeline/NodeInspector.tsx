@@ -20,13 +20,13 @@ import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { getTool } from '@/lib/toolRegistry'
+import { iconForTool } from '@/lib/toolIcons'
 import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
 import { ANNOVAR_FEATURES, VEP_FEATURES, annovarDbNames, annovarParamsForFeatures } from '@/lib/annotationCatalog'
 import {
   connectedInputPath,
   connectedInputSchema,
-  delimiterForPath,
-  parseHeaderLine,
+  parseHeader,
 } from '@/lib/schemaResolver'
 import type {
   FileNodeData,
@@ -43,7 +43,18 @@ import type {
   TransformFilterRule,
   TransformNodeData,
 } from '@/types/pipeline'
-import { classNames } from '@/lib/utils'
+import type { RemoteFileEntry } from '@/types/files'
+import { classNames, pathBasename, pathDirname } from '@/lib/utils'
+
+type SplitDetectMode = 'auto' | 'files' | 'folders'
+
+interface DetectedSplit {
+  pattern: SplitPattern
+  items: FileNodeSplit['items']
+  missing: string[]
+  summary: string
+  quality: number
+}
 
 function connectedInputPaths(
   snapshot: PipelineSnapshot,
@@ -688,11 +699,10 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         const path = connectedInputPath(snapshot, nodeId, param.columnSourcePortId ?? 'input')
         if (!path || schemas[path]) continue
         try {
-          const delimiter = delimiterForPath(path)
-          const text = await window.api.sftp.head(activeConnectionId!, path, 1)
+          const text = await window.api.sftp.head(activeConnectionId!, path, 30)
           if (cancelled) return
-          const columns = parseHeaderLine(text, delimiter)
-          if (columns.length > 0) setSchema(path, { columns, delimiter })
+          const schema = parseHeader(text, path)
+          if (schema.columns.length > 0) setSchema(path, { columns: schema.columns, delimiter: schema.delimiter })
         } catch {
           // Missing schema is non-blocking; users can still type values.
         }
@@ -749,6 +759,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
+  const ToolIcon = iconForTool(data.toolId)
   const slurm = { ...tool.slurm, ...data.slurmOverride }
   const executionMode = data.executionMode ?? 'sbatch'
   const inputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
@@ -788,7 +799,10 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <div className="text-[10px] text-text-muted mt-2 flex flex-col gap-0.5">
-          <div>Tool: <span className="font-mono text-text-secondary">{tool.id}</span></div>
+          <div className="flex items-center gap-1.5">
+            <ToolIcon size={11} className="text-text-muted" />
+            <span>Tool: <span className="font-mono text-text-secondary">{tool.id}</span></span>
+          </div>
           <div>Command: <span className="font-mono text-text-secondary">{tool.command}</span></div>
           {tool.module && <div>Module: <span className="font-mono text-text-secondary">{tool.module}</span></div>}
         </div>
@@ -928,11 +942,15 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
       {axedInputPorts.length > 0 && (
         <div>
           <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
-            Loop / Array
+            Split input behavior
           </h4>
+          <div className="mb-2 rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] leading-5 text-text-muted">
+            This tool receives at least one split input. BioFlow can submit one Slurm array task per accepted item,
+            passing that item's path into the selected input port.
+          </div>
           <div className="flex flex-col gap-1">
             <label className="text-text-secondary text-xs font-medium">
-              Array over input
+              Input that controls the array
             </label>
             <select
               value={data.arrayOver === null ? '__none__' : (data.arrayOver ?? '__auto__')}
@@ -944,21 +962,21 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               }}
               className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
             >
-              <option value="__auto__">Auto (pick the only axed input)</option>
-              <option value="__none__">No array (single job)</option>
+              <option value="__auto__">Auto: use the only split input</option>
+              <option value="__none__">Single job: do not fan out</option>
               {axedInputPorts.map((p) => {
                 const port = tool.inputs.find((ip) => ip.id === p.portId)
                 return (
                   <option key={p.portId} value={p.portId}>
-                    {port?.label ?? p.portId} — axis "{p.axis}"
+                    {port?.label ?? p.portId}: one task per "{p.axis}" item
                   </option>
                 )
               })}
             </select>
             <p className="text-[10px] text-text-muted mt-1">
               {axedInputPorts.length === 1
-                ? 'Auto-fans out over the single axed input.'
-                : 'Multiple axed inputs detected — pick one to fan out over.'}
+                ? 'Auto will run this node once per accepted item from that split input.'
+                : 'Multiple split inputs are connected. Pick the one whose keys define the array tasks.'}
             </p>
           </div>
         </div>
@@ -1094,10 +1112,6 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
 
 function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
-  const addFileNode = usePipelineStore((s) => s.addFileNode)
-  const onConnect = usePipelineStore((s) => s.onConnect)
-  const nodes = usePipelineStore((s) => s.nodes)
-  const edges = usePipelineStore((s) => s.edges)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const settings = useSettingsStore((s) => s.settings)
 
@@ -1111,6 +1125,11 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     loading: false,
     error: null,
   })
+  const [splitFolder, setSplitFolder] = useState(() => data.path ? pathDirname(data.path) : '')
+  const [splitDetectMode, setSplitDetectMode] = useState<SplitDetectMode>('auto')
+  const [detectingSplit, setDetectingSplit] = useState(false)
+  const [detectMessage, setDetectMessage] = useState<string | null>(null)
+  const [rangeDraft, setRangeDraft] = useState('')
   const [refreshNonce, setRefreshNonce] = useState(0)
 
   const setSplit = useCallback(
@@ -1153,6 +1172,56 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     setSplit({ ...split, pattern: next })
   }, [split, setSplit])
 
+  const acceptedRange = useMemo(() => split ? rangeTextFromItems(split.items) : '', [split])
+
+  useEffect(() => {
+    setRangeDraft(acceptedRange)
+  }, [acceptedRange])
+
+  useEffect(() => {
+    if (!data.path || splitFolder) return
+    setSplitFolder(pathDirname(data.path))
+  }, [data.path, splitFolder])
+
+  const detectSplit = useCallback(async () => {
+    if (!split) return
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
+      setDetectMessage('Connect to a remote host before detecting split files.')
+      return
+    }
+    if (!splitFolder.trim()) {
+      setDetectMessage('Pick the folder containing the split files or split folders first.')
+      return
+    }
+    setDetectingSplit(true)
+    setDetectMessage(null)
+    try {
+      const detected = await detectSplitInFolder({
+        connectionId: activeConnectionId,
+        folder: splitFolder.trim(),
+        mode: splitDetectMode,
+        axis: split.axis || 'item',
+        fileType: data.fileType,
+        seedPath: data.path,
+      })
+      updateNodeData(nodeId, {
+        split: { ...split, items: detected.items, pattern: detected.pattern },
+        fileType: inferSplitFileType(detected.items, data.fileType),
+      })
+      setPreview({
+        items: detected.items,
+        missing: new Set(detected.missing),
+        loading: false,
+        error: null,
+      })
+      setDetectMessage(detected.summary)
+    } catch (err: any) {
+      setDetectMessage(err?.message ?? String(err))
+    } finally {
+      setDetectingSplit(false)
+    }
+  }, [activeConnectionId, data.fileType, data.path, nodeId, split, splitDetectMode, splitFolder, updateNodeData])
+
   useEffect(() => {
     if (!split) return
     let cancelled = false
@@ -1192,30 +1261,18 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     setSplit({ ...split, items: preview.items, pattern })
   }, [split, setSplit, preview.items, pattern])
 
-  const addPlinkFileSet = useCallback(() => {
+  const applyRange = useCallback(() => {
     if (!split) return
-    const siblingExts: Array<'pvar' | 'psam'> = ['pvar', 'psam']
-    const outgoing = edges.filter((edge) => edge.source === nodeId)
-    for (const ext of siblingExts) {
-      const nextSplit: FileNodeSplit = {
-        ...split,
-        items: split.items.map((item) => ({ ...item, path: replacePlinkExt(item.path, ext) })),
-      }
-      const fileId = addFileNode(
-        { x: (nodes.find((node) => node.id === nodeId)?.position.x ?? 0) - 180, y: (nodes.find((node) => node.id === nodeId)?.position.y ?? 0) + (ext === 'pvar' ? 80 : 160) },
-        { isInput: true, label: `${data.label}.${ext}`, path: replacePlinkExt(data.path, ext), fileType: ext === 'psam' ? 'tsv' : 'pgen', split: nextSplit },
-      )
-      for (const edge of outgoing) {
-        const target = nodes.find((node) => node.id === edge.target)
-        if (!target || target.type !== 'tool') continue
-        const tool = getTool((target.data as ToolNodeData).toolId)
-        const port = tool?.inputs.find((candidate) => candidate.id.toLowerCase().includes(ext) || candidate.label.toLowerCase().includes(ext))
-        if (port) {
-          onConnect({ source: fileId, sourceHandle: 'output', target: target.id, targetHandle: port.id })
-        }
-      }
+    const keys = parseRangeKeys(rangeDraft)
+    if (keys.length === 0) {
+      setDetectMessage('Enter keys like 1-22, 1..22, or 1,2,3.')
+      return
     }
-  }, [addFileNode, data.label, data.path, edges, nodeId, nodes, onConnect, split])
+    const existing = new Map(split.items.map((item) => [item.key, item]))
+    const nextItems = keys.map((key) => existing.get(key) ?? { key, path: pathForSplitKey(pattern, key) })
+    setSplit({ ...split, items: nextItems })
+    setDetectMessage(`Using ${nextItems.length} ${split.axis || 'items'}: ${rangeTextFromItems(nextItems)}.`)
+  }, [pattern, rangeDraft, setSplit, split])
 
   const uploadLocalFile = useCallback(async () => {
     if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !data.path.trim()) return
@@ -1341,9 +1398,14 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       {/* Split by axis (enables per-axis SLURM arrays downstream) */}
       <div className="border-t border-border pt-3 mt-1">
         <div className="flex items-center justify-between mb-2">
-          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
-            Split by axis
-          </h4>
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+              Split into per-item files
+            </h4>
+            <p className="mt-0.5 text-[10px] text-text-muted">
+              Use this when one logical input is really many files, such as one genotype file per chromosome.
+            </p>
+          </div>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
@@ -1363,47 +1425,107 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
 
         {split && (
           <div className="flex flex-col gap-2">
+            <div className="rounded border border-accent/25 bg-accent/10 px-2 py-1.5 text-[11px] leading-5 text-text-secondary">
+              BioFlow creates one job per item. The <span className="font-medium text-text-primary">key</span> becomes the array label
+              and the <span className="font-medium text-text-primary">path</span> is the file used for that job.
+              Example: key <span className="font-mono text-text-primary">1</span> uses chromosome 1's path, key <span className="font-mono text-text-primary">2</span> uses chromosome 2's path.
+            </div>
             <Input
-              label="Axis name"
+              label="Axis name shown on edges"
               value={split.axis}
               placeholder="chrom"
               onChange={(e) => setSplit({ ...split, axis: e.target.value })}
             />
-            <div className="grid grid-cols-4 rounded border border-border bg-bg-primary p-0.5">
+            <div className="rounded border border-border bg-bg-primary p-2">
+              <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+                Detect from folder
+              </div>
+              <FolderPickerField
+                label="Data folder"
+                value={splitFolder}
+                placeholder="/scratch/project/genotypes"
+                requesterLabel={`${data.label} split folder`}
+                onChange={setSplitFolder}
+              />
+              <div className="mt-2 grid grid-cols-3 rounded border border-border bg-bg-tertiary p-0.5">
+                {([
+                  ['auto', 'Auto'],
+                  ['files', 'Files here'],
+                  ['folders', 'Folders here'],
+                ] as Array<[SplitDetectMode, string]>).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setSplitDetectMode(mode)}
+                    className={classNames(
+                      'rounded px-1.5 py-1 text-[10px]',
+                      splitDetectMode === mode ? 'bg-accent/15 text-text-primary' : 'text-text-muted hover:text-text-primary',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="h-7 px-2 text-[11px]"
+                  disabled={detectingSplit || !splitFolder.trim()}
+                  onClick={() => void detectSplit()}
+                >
+                  {detectingSplit ? 'Detecting...' : 'Detect split'}
+                </Button>
+                {detectMessage && (
+                  <span className={classNames(
+                    'min-w-0 flex-1 truncate text-[10px]',
+                    detectMessage.toLowerCase().includes('could not') || detectMessage.toLowerCase().includes('connect')
+                      ? 'text-error'
+                      : 'text-text-muted',
+                  )}>
+                    {detectMessage}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="text-[10px] uppercase tracking-wide text-text-muted">
+              Manual recipe
+            </div>
+            <div className="grid grid-cols-2 rounded border border-border bg-bg-primary p-0.5">
               {(['manual', 'brace', 'glob', 'crossFolder'] as SplitPattern['kind'][]).map((kind) => (
                 <button
                   key={kind}
-                  onClick={() => setPattern(defaultPattern(kind, pattern))}
+                  onClick={() => setPattern(defaultPattern(kind, pattern, data.path))}
                   className={classNames(
                     'rounded px-1.5 py-1 text-[10px]',
                     pattern.kind === kind ? 'bg-accent/15 text-text-primary' : 'text-text-muted hover:text-text-primary',
                   )}
                 >
-                  {kind === 'crossFolder' ? 'Cross-folder' : kind === 'brace' ? 'Brace range' : kind[0].toUpperCase() + kind.slice(1)}
+                  {splitPatternLabel(kind)}
                 </button>
               ))}
             </div>
+            <SplitPatternExplainer pattern={pattern} axis={split.axis} />
 
             {pattern.kind === 'brace' && (
-              <Input
-                label="Brace template"
-                value={pattern.template}
-                placeholder="/scratch/chr{1..22}/geno.pgen"
-                onChange={(e) => setPattern({ kind: 'brace', template: e.target.value })}
+              <BraceFormulaEditor
+                pattern={pattern}
+                axis={split.axis}
+                onChange={setPattern}
               />
             )}
             {pattern.kind === 'glob' && (
-              <div className="grid grid-cols-[1fr_88px] gap-2">
+              <div className="grid grid-cols-1 gap-2">
                 <Input
-                  label="Glob template"
+                  label="Path glob"
                   value={pattern.template}
-                  placeholder="/scratch/chr*/geno.pgen"
+                  placeholder="/scratch/project/chr*/geno.pgen"
                   onChange={(e) => setPattern({ ...pattern, template: e.target.value })}
                 />
                 <Input
-                  label="Capture"
+                  label="Name for the first * match"
                   value={pattern.capture}
-                  placeholder="chrom"
+                  placeholder={split.axis || 'chrom'}
                   onChange={(e) => setPattern({ ...pattern, capture: e.target.value })}
                 />
               </div>
@@ -1411,31 +1533,68 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             {pattern.kind === 'crossFolder' && (
               <div className="grid grid-cols-1 gap-2">
                 <Input
-                  label="Parent directory"
+                  label="Parent directory containing the item folders"
                   value={pattern.parentDir}
-                  placeholder="/scratch/chroms"
+                  placeholder="/scratch/project/genotypes"
                   onChange={(e) => setPattern({ ...pattern, parentDir: e.target.value })}
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <Input
-                    label="Child folders"
+                    label="Item folders"
                     value={pattern.childGlob}
                     placeholder="chr*"
                     onChange={(e) => setPattern({ ...pattern, childGlob: e.target.value })}
                   />
                   <Input
-                    label="File"
+                    label="File inside each folder"
                     value={pattern.file}
                     placeholder="geno.pgen"
                     onChange={(e) => setPattern({ ...pattern, file: e.target.value })}
                   />
                 </div>
+                <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[10px] leading-4 text-text-muted">
+                  BioFlow lists the parent directory, keeps child folders matching <span className="font-mono text-text-secondary">{pattern.childGlob || 'chr*'}</span>,
+                  then appends <span className="font-mono text-text-secondary">{pattern.file || 'geno.pgen'}</span> inside each one.
+                  {pattern.parentDir && pattern.childGlob && pattern.file && (
+                    <div className="mt-1 font-mono text-text-secondary">
+                      {pattern.parentDir.replace(/\/+$/, '')}/{pattern.childGlob}/{pattern.file.replace(/^\/+/, '')}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
+            <div className="rounded border border-border bg-bg-primary p-2">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <label className="text-[10px] uppercase tracking-wide text-text-muted">
+                  Keys used for array jobs
+                </label>
+                {acceptedRange && (
+                  <span className="truncate text-[10px] font-mono text-text-secondary" title={acceptedRange}>
+                    {acceptedRange}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-end gap-2">
+                <Input
+                  label={`${split.axis || 'item'} range/list`}
+                  value={rangeDraft}
+                  placeholder="1-22 or 1,2,3,X,Y"
+                  onChange={(e) => setRangeDraft(e.target.value)}
+                  className="flex-1"
+                />
+                <Button variant="secondary" size="sm" className="h-8 px-2 text-[11px]" onClick={applyRange}>
+                  Apply
+                </Button>
+              </div>
+              <p className="mt-1 text-[10px] text-text-muted">
+                Change this after auto-detect to add or remove array items without rebuilding the full path recipe.
+              </p>
+            </div>
+
             <div className="flex items-center justify-between mt-1">
               <label className="text-text-secondary text-xs font-medium">
-                Items ({split.items.length})
+                Accepted items ({split.items.length})
               </label>
               <button
                 onClick={addRow}
@@ -1446,20 +1605,22 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             </div>
             <div className="flex flex-col gap-1 max-h-56 overflow-y-auto">
               {split.items.map((row, i) => (
-                <div key={i} className="flex gap-1 items-center">
+                <div key={i} className="grid grid-cols-[56px_1fr_22px] gap-1 items-center">
                   <input
                     type="text"
                     value={row.key}
                     onChange={(e) => updateRow(i, { key: e.target.value })}
-                    className="h-7 w-14 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
-                    placeholder="key"
+                    className="h-7 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
+                    placeholder="1"
+                    title="Item key: this becomes the Slurm array item label."
                   />
                   <input
                     type="text"
                     value={row.path}
                     onChange={(e) => updateRow(i, { path: e.target.value })}
                     className="h-7 flex-1 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
-                    placeholder="/path/chrN.pgen"
+                    placeholder="/path/to/item/file"
+                    title="File path used for this split item."
                   />
                   <button
                     onClick={() => removeRow(i)}
@@ -1472,13 +1633,20 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               ))}
               {split.items.length === 0 && (
                 <div className="text-[11px] text-text-muted italic px-1">
-                  No items — add rows or resolve a glob.
+                  No accepted items yet. Fill a recipe above, check the preview, then click Accept preview.
                 </div>
               )}
             </div>
             <div className="rounded border border-border bg-bg-primary">
               <div className="flex items-center justify-between border-b border-border px-2 py-1">
-                <span className="text-[10px] uppercase tracking-wide text-text-muted">Preview</span>
+                <div>
+                  <span className="text-[10px] uppercase tracking-wide text-text-muted">Preview before accepting</span>
+                  {!preview.loading && !preview.error && preview.items.length > 0 && (
+                    <span className="ml-2 text-[10px] text-text-muted">
+                      {preview.items.length} found, {preview.missing.size} missing
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-1">
                   <Button
                     variant="ghost"
@@ -1496,7 +1664,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                     disabled={preview.loading || preview.items.length === 0}
                     onClick={acceptPreview}
                   >
-                    Accept
+                    Accept preview
                   </Button>
                 </div>
               </div>
@@ -1504,10 +1672,19 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 {preview.loading && <div className="px-2 py-2 text-[11px] text-text-muted">Checking files...</div>}
                 {preview.error && <div className="px-2 py-2 text-[11px] text-error">{preview.error}</div>}
                 {!preview.loading && !preview.error && preview.items.length === 0 && (
-                  <div className="px-2 py-2 text-[11px] text-text-muted">Enter a pattern above to see which files would be used.</div>
+                  <div className="px-2 py-2 text-[11px] text-text-muted">
+                    Enter a recipe above to see the exact key → path pairs that will be used.
+                  </div>
                 )}
                 {!preview.loading && !preview.error && preview.items.length > 0 && (
                   <table className="w-full text-[10px]">
+                    <thead className="sticky top-0 bg-bg-tertiary text-text-muted">
+                      <tr>
+                        <th className="w-12 px-2 py-1 text-left font-medium">Key</th>
+                        <th className="px-2 py-1 text-left font-medium">Resolved path</th>
+                        <th className="w-14 px-2 py-1 text-right font-medium">Check</th>
+                      </tr>
+                    </thead>
                     <tbody>
                       {preview.items.map((item) => {
                         const missing = preview.missing.has(item.key)
@@ -1524,13 +1701,18 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 )}
               </div>
             </div>
-            {data.fileType === 'pgen' && split.items.length > 0 && (
-              <Button variant="secondary" size="sm" className="h-7 text-[11px]" onClick={addPlinkFileSet}>
-                PLINK2 file-set
-              </Button>
+            {isPlinkLikeSplit(split) && (
+              <div className="rounded border border-accent/25 bg-accent/10 p-2">
+                <div className="text-[11px] font-medium text-text-primary">PLINK2 prefix files detected</div>
+                <p className="mt-1 text-[10px] leading-4 text-text-muted">
+                  BioFlow checks the selected <span className="font-mono">.pgen</span> files exist, then runs PLINK2 with
+                  the fileset prefix, like <span className="font-mono">--pfile /path/chr1/output</span>.
+                  The matching <span className="font-mono">.pvar</span> and <span className="font-mono">.psam</span> stay implicit.
+                </p>
+              </div>
             )}
             <p className="text-[10px] text-text-muted">
-              Downstream tools will auto-fan-out over axis "{split.axis || '?'}".
+              Downstream compatible tools will auto-run once per accepted item. Edges from this file show "{split.axis || '?'}×{split.items.length}" after items are accepted.
             </p>
           </div>
         )}
@@ -1549,23 +1731,506 @@ function splitOutputPath(data: FileNodeData): { folder: string; filename: string
   return { folder: path.slice(0, idx), filename: path.slice(idx + 1) }
 }
 
+function splitPatternLabel(kind: SplitPattern['kind']): string {
+  switch (kind) {
+    case 'manual': return 'Type rows'
+    case 'brace': return 'Number/list range'
+    case 'glob': return 'Match files'
+    case 'crossFolder': return 'Match folders'
+  }
+}
+
+function SplitPatternExplainer({ pattern, axis }: { pattern: SplitPattern; axis: string }) {
+  const axisLabel = axis.trim() || 'chrom'
+  const rows = splitPatternHelp(pattern, axisLabel)
+  return (
+    <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[10px] leading-4 text-text-muted">
+      <div className="font-medium text-text-secondary">{rows.title}</div>
+      <div>{rows.body}</div>
+      <div className="mt-1 grid grid-cols-[42px_1fr] gap-x-2 gap-y-0.5 font-mono">
+        {rows.examples.map((example) => (
+          <div key={`${example.key}:${example.path}`} className="contents">
+            <span className="text-text-secondary">{example.key}</span>
+            <span className="truncate" title={example.path}>{example.path}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function BraceFormulaEditor({
+  pattern,
+  axis,
+  onChange,
+}: {
+  pattern: Extract<SplitPattern, { kind: 'brace' }>
+  axis: string
+  onChange: (pattern: SplitPattern) => void
+}) {
+  const formula = parseBraceFormula(pattern.template)
+  const setFormula = (patch: Partial<typeof formula>) => {
+    const next = { ...formula, ...patch }
+    onChange({ kind: 'brace', template: `${joinFormulaPrefix(next.folder, next.prefix)}{${next.range}}${next.suffix}` })
+  }
+  const axisName = axis.trim() || 'variable'
+  return (
+    <div className="rounded border border-border bg-bg-primary p-2">
+      <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+        Path formula
+      </div>
+      <div className="grid grid-cols-1 gap-2">
+        <Input
+          label="Folder/path"
+          value={formula.folder}
+          placeholder="/scratch/project/genotypes"
+          onChange={(e) => setFormula({ folder: e.target.value })}
+        />
+        <Input
+          label="Filename or folder prefix before the changing value"
+          value={formula.prefix}
+          placeholder="chr"
+          onChange={(e) => setFormula({ prefix: e.target.value })}
+        />
+        <div className="grid grid-cols-[1fr_96px_1fr] gap-2">
+          <Input
+            label={`${axisName} values`}
+            value={formula.range}
+            placeholder="1..22"
+            onChange={(e) => setFormula({ range: e.target.value })}
+          />
+          <div className="flex flex-col gap-1">
+            <label className="text-text-secondary text-xs font-medium">Variable</label>
+            <div className="flex h-8 items-center justify-center rounded-md border border-border bg-bg-tertiary px-2 text-xs font-mono text-accent">
+              {axisName}
+            </div>
+          </div>
+          <Input
+            label="Suffix after the changing value"
+            value={formula.suffix}
+            placeholder="/geno.pgen"
+            onChange={(e) => setFormula({ suffix: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="mt-2 rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[10px] text-text-muted">
+        Formula:{' '}
+        <span className="font-mono text-text-secondary">
+          {joinFormulaPrefix(formula.folder, formula.prefix) || '<path-and-prefix>'}
+          {'{'}
+          {formula.range || '1..22'}
+          {'}'}
+          {formula.suffix || '<suffix>'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function splitPatternHelp(
+  pattern: SplitPattern,
+  axis: string,
+): { title: string; body: string; examples: Array<{ key: string; path: string }> } {
+  if (pattern.kind === 'manual') {
+    return {
+      title: 'Type rows manually',
+      body: `Use this when there are only a few ${axis} files or when names are irregular. Each row is one array task.`,
+      examples: [
+        { key: '1', path: '/scratch/project/chr1/genotypes.pgen' },
+        { key: '2', path: '/scratch/project/chr2/genotypes.pgen' },
+      ],
+    }
+  }
+  if (pattern.kind === 'brace') {
+    return {
+      title: 'Expand a number range or list inside braces',
+      body: 'The path template is expanded first, then BioFlow checks whether each resulting file exists.',
+      examples: [
+        { key: '1', path: '/scratch/project/chr1/genotypes.pgen' },
+        { key: '2', path: '/scratch/project/chr2/genotypes.pgen' },
+      ],
+    }
+  }
+  if (pattern.kind === 'glob') {
+    return {
+      title: 'Match files in one folder',
+      body: 'The first * becomes the item key. Use this when files differ by filename or by one folder segment.',
+      examples: [
+        { key: '1', path: '/scratch/project/genotypes.chr1.pgen' },
+        { key: '2', path: '/scratch/project/genotypes.chr2.pgen' },
+      ],
+    }
+  }
+  return {
+    title: 'Match folders, then append the same file name inside each folder',
+    body: 'Use this when every item lives in its own folder and the file has the same relative name in each folder.',
+    examples: [
+      { key: '1', path: '/scratch/project/genotypes/chr1/genotypes.pgen' },
+      { key: '2', path: '/scratch/project/genotypes/chr2/genotypes.pgen' },
+    ],
+  }
+}
+
+function parseBraceFormula(template: string): { folder: string; prefix: string; range: string; suffix: string } {
+  const match = template.match(/^(.*)\{([^{}]+)\}(.*)$/)
+  const rawPrefix = match ? match[1] : template
+  const slash = rawPrefix.lastIndexOf('/')
+  const folder = slash >= 0 ? rawPrefix.slice(0, slash) : ''
+  const prefix = slash >= 0 ? rawPrefix.slice(slash + 1) : rawPrefix
+  return { folder, prefix, range: match ? match[2] : '1..22', suffix: match ? match[3] : '' }
+}
+
+function joinFormulaPrefix(folder: string, prefix: string): string {
+  if (!folder.trim()) return prefix
+  if (!prefix.trim()) return folder.replace(/\/+$/, '')
+  return `${folder.replace(/\/+$/, '')}/${prefix}`
+}
+
 function joinOutputPath(folder: string, filename: string): string {
   if (!folder.trim()) return filename.trim()
   if (!filename.trim()) return folder.trim()
   return `${folder.replace(/\/+$/, '')}/${filename.trim()}`
 }
 
-function defaultPattern(kind: SplitPattern['kind'], current: SplitPattern): SplitPattern {
+function defaultPattern(kind: SplitPattern['kind'], current: SplitPattern, seedPath = ''): SplitPattern {
   if (kind === current.kind) return current
   if (kind === 'manual') return { kind: 'manual' }
-  if (kind === 'brace') return { kind: 'brace', template: current.kind === 'glob' ? current.template : '' }
-  if (kind === 'glob') return { kind: 'glob', template: current.kind === 'brace' ? current.template : '', capture: 'key' }
-  return { kind: 'crossFolder', parentDir: '', childGlob: 'chr*', file: '' }
+  if (kind === 'brace') return { kind: 'brace', template: current.kind === 'glob' ? current.template : seedPath }
+  if (kind === 'glob') return { kind: 'glob', template: current.kind === 'brace' ? current.template : seedPath, capture: 'key' }
+  const seeded = crossFolderSeed(seedPath)
+  return { kind: 'crossFolder', parentDir: seeded.parentDir, childGlob: seeded.childGlob, file: seeded.file }
 }
 
-function replacePlinkExt(path: string, ext: 'pvar' | 'psam'): string {
-  if (!path) return ''
-  return path.replace(/\.(pgen|pvar|psam)$/i, `.${ext}`)
+function crossFolderSeed(path: string): { parentDir: string; childGlob: string; file: string } {
+  const parts = path.split('/').filter(Boolean)
+  if (parts.length < 3) return { parentDir: '', childGlob: 'chr*', file: '' }
+  const file = parts[parts.length - 1]
+  const child = parts[parts.length - 2]
+  const parent = `/${parts.slice(0, -2).join('/')}`
+  return {
+    parentDir: parent,
+    childGlob: child.replace(/\d+$/, '*') || 'chr*',
+    file,
+  }
+}
+
+async function detectSplitInFolder({
+  connectionId,
+  folder,
+  mode,
+  axis,
+  fileType,
+  seedPath,
+}: {
+  connectionId: string
+  folder: string
+  mode: SplitDetectMode
+  axis: string
+  fileType: FileNodeData['fileType']
+  seedPath: string
+}): Promise<DetectedSplit> {
+  const entries = await window.api.sftp.ls(connectionId, folder)
+  const candidates: DetectedSplit[] = []
+  if (mode === 'auto' || mode === 'files') {
+    const files = detectFilesInFolder(folder, entries, fileType, axis)
+    if (files) candidates.push(files)
+  }
+  if (mode === 'auto' || mode === 'folders') {
+    const folders = await detectFoldersInFolder(connectionId, folder, entries, fileType, seedPath, axis)
+    if (folders) candidates.push(folders)
+  }
+  if (candidates.length === 0) {
+    throw new Error('Could not infer a split pattern in that folder. Use the manual recipe below.')
+  }
+  return candidates.sort((a, b) => b.quality - a.quality || b.items.length - a.items.length)[0]
+}
+
+function detectFilesInFolder(
+  folder: string,
+  entries: RemoteFileEntry[],
+  fileType: FileNodeData['fileType'],
+  axis = 'item',
+): DetectedSplit | null {
+  const files = preferredFiles(entries.filter((entry) => !entry.isDirectory), fileType)
+  const group = bestVariableGroup(files.map((entry) => ({ name: entry.name, path: entry.path })))
+  if (!group || group.items.length < 2) return null
+  const range = rangeTextFromItems(group.items)
+  return {
+    pattern: { kind: 'glob', template: `${folder.replace(/\/+$/, '')}/${group.prefix}*${group.suffix}`, capture: 'key' },
+    items: group.items,
+    missing: [],
+    summary: `Detected ${group.items.length} split files (${axis} ${range}).`,
+    quality: 60 + group.items.length + averageFileScore(group.items.map((item) => item.path), fileType),
+  }
+}
+
+async function detectFoldersInFolder(
+  connectionId: string,
+  folder: string,
+  entries: RemoteFileEntry[],
+  fileType: FileNodeData['fileType'],
+  seedPath: string,
+  axis = 'item',
+): Promise<DetectedSplit | null> {
+  const folders = entries.filter((entry) => entry.isDirectory)
+  const group = bestVariableGroup(folders.map((entry) => ({ name: entry.name, path: entry.path })))
+  if (!group || group.items.length < 2) return null
+
+  const folderEntries = folders
+    .filter((entry) => group.items.some((item) => item.path === entry.path))
+    .slice(0, 100)
+  const listings = await Promise.all(folderEntries.map(async (entry) => {
+    try {
+      return { folder: entry, entries: await window.api.sftp.ls(connectionId, entry.path) }
+    } catch {
+      return { folder: entry, entries: [] as RemoteFileEntry[] }
+    }
+  }))
+  const fileName = chooseCommonNestedFile(listings.map((listing) => listing.entries), fileType, pathBasename(seedPath))
+  if (!fileName) {
+    const fallbackItems = detectOneNestedFilePerFolder(listings, fileType)
+    if (fallbackItems.length < 2) return null
+    return {
+      pattern: { kind: 'manual' },
+      items: fallbackItems,
+      missing: [],
+      summary: `Detected ${fallbackItems.length} item folders (${axis} ${rangeTextFromItems(fallbackItems)}). The accepted rows are editable below.`,
+      quality: 45 + fallbackItems.length + averageFileScore(fallbackItems.map((item) => item.path), fileType),
+    }
+  }
+
+  const items = folderEntries.map((entry) => ({
+    key: captureKeyFromName(entry.name),
+    path: `${entry.path.replace(/\/+$/, '')}/${fileName}`,
+  }))
+  return {
+    pattern: {
+      kind: 'crossFolder',
+      parentDir: folder,
+      childGlob: `${group.prefix}*${group.suffix}`,
+      file: fileName,
+    },
+    items: sortSplitRows(items),
+    missing: [],
+    summary: `Detected ${items.length} item folders (${axis} ${rangeTextFromItems(items)}); each contains ${fileName}.`,
+    quality: 80 + items.length + dataFileScore(fileName, fileType, pathBasename(seedPath)),
+  }
+}
+
+function detectOneNestedFilePerFolder(
+  listings: Array<{ folder: RemoteFileEntry; entries: RemoteFileEntry[] }>,
+  fileType: FileNodeData['fileType'],
+): FileNodeSplit['items'] {
+  const items: FileNodeSplit['items'] = []
+  for (const listing of listings) {
+    const key = captureKeyFromName(listing.folder.name)
+    const files = preferredFiles(listing.entries.filter((entry) => !entry.isDirectory), fileType)
+    if (files.length === 0) continue
+    const picked =
+      files.find((file) => file.name.includes(key)) ??
+      files.find((file) => captureKeyFromName(file.name) === key) ??
+      files[0]
+    items.push({ key, path: picked.path })
+  }
+  return sortSplitRows(items)
+}
+
+function preferredFiles(files: RemoteFileEntry[], fileType: FileNodeData['fileType']): RemoteFileEntry[] {
+  const ranked = files
+    .map((file) => ({ file, score: dataFileScore(file.name, fileType) }))
+    .sort((a, b) => b.score - a.score || a.file.name.localeCompare(b.file.name))
+  const nonLog = ranked.filter((entry) => !isLogLikeFile(entry.file.name))
+  const matching = nonLog.filter((entry) => fileMatchesType(entry.file.name, fileType))
+  if (matching.length > 0) return matching.map((entry) => entry.file)
+  if (nonLog.length > 0) return nonLog.map((entry) => entry.file)
+  return ranked.map((entry) => entry.file)
+}
+
+function fileMatchesType(name: string, fileType: FileNodeData['fileType']): boolean {
+  if (fileType === 'any') return true
+  const lower = name.toLowerCase()
+  const extensions: Partial<Record<FileNodeData['fileType'], string[]>> = {
+    vcf: ['.vcf', '.vcf.gz'],
+    bcf: ['.bcf'],
+    fastq: ['.fastq', '.fastq.gz', '.fq', '.fq.gz'],
+    fasta: ['.fasta', '.fa', '.fna'],
+    bam: ['.bam'],
+    sam: ['.sam'],
+    cram: ['.cram'],
+    bed: ['.bed'],
+    gff: ['.gff', '.gff3'],
+    gtf: ['.gtf'],
+    plink: ['.bed', '.pgen'],
+    pgen: ['.pgen'],
+    bgen: ['.bgen'],
+    tsv: ['.tsv', '.tsv.gz', '.pheno', '.phen', '.covar', '.sample', '.psam', '.eigenvec', '.profile'],
+    csv: ['.csv'],
+    txt: ['.txt'],
+    json: ['.json'],
+    yaml: ['.yaml', '.yml'],
+  }
+  return (extensions[fileType] ?? []).some((ext) => lower.endsWith(ext))
+}
+
+function isLogLikeFile(name: string): boolean {
+  return /\.(log|out|err|stderr|stdout)$/i.test(name)
+}
+
+function dataFileScore(name: string, fileType: FileNodeData['fileType'], seedName = ''): number {
+  const lower = name.toLowerCase()
+  let score = seedName && name === seedName ? 30 : 0
+  if (isLogLikeFile(name)) score -= 500
+
+  if (lower.endsWith('.pgen')) score += fileType === 'pgen' || fileType === 'plink' || fileType === 'any' ? 120 : 60
+  else if (lower.endsWith('.bed')) score += fileType === 'bed' || fileType === 'plink' || fileType === 'any' ? 105 : 45
+  else if (lower.endsWith('.bgen')) score += fileType === 'bgen' || fileType === 'any' ? 100 : 45
+  else if (/\.(pvar|psam|bim|fam)$/i.test(lower)) score += fileType === 'plink' || fileType === 'pgen' || fileType === 'any' ? 55 : 20
+  else if (/\.(vcf\.gz|vcf|bcf)$/i.test(lower)) score += fileType === 'vcf' || fileType === 'bcf' || fileType === 'any' ? 95 : 35
+  else if (/\.(tsv|txt|csv|phen|pheno|covar|sample)$/i.test(lower)) score += fileType === 'tsv' || fileType === 'csv' || fileType === 'txt' || fileType === 'any' ? 75 : 25
+  else score += 10
+
+  if (fileMatchesType(name, fileType)) score += 30
+  return score
+}
+
+function averageFileScore(paths: string[], fileType: FileNodeData['fileType']): number {
+  if (paths.length === 0) return 0
+  return paths.reduce((sum, path) => sum + dataFileScore(pathBasename(path), fileType), 0) / paths.length
+}
+
+function bestVariableGroup(values: Array<{ name: string; path: string }>): { prefix: string; suffix: string; items: FileNodeSplit['items'] } | null {
+  const groups = new Map<string, { prefix: string; suffix: string; items: FileNodeSplit['items'] }>()
+  for (const value of values) {
+    const match = value.name.match(/^(.*?)(\d+)(.*)$/)
+    if (!match) continue
+    const [, prefix, key, suffix] = match
+    const id = `${prefix}\u0000${suffix}`
+    const group = groups.get(id) ?? { prefix, suffix, items: [] }
+    group.items.push({ key: normalizeSplitKey(key), path: value.path })
+    groups.set(id, group)
+  }
+  if (groups.size === 0) return null
+  const best = [...groups.values()].sort((a, b) => b.items.length - a.items.length)[0]
+  return { ...best, items: sortSplitRows(best.items) }
+}
+
+function chooseCommonNestedFile(
+  listings: RemoteFileEntry[][],
+  fileType: FileNodeData['fileType'],
+  seedName: string,
+): string | null {
+  const counts = new Map<string, number>()
+  for (const entries of listings) {
+    const names = new Set(entries.filter((entry) => !entry.isDirectory).map((entry) => entry.name))
+    for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  if (counts.size === 0) return null
+  const minCount = Math.min(2, listings.length)
+  const candidates = [...counts.entries()].filter(([, count]) => count >= minCount)
+  const nonLogCandidates = candidates.filter(([name]) => !isLogLikeFile(name))
+  const pool = nonLogCandidates.length > 0 ? nonLogCandidates : candidates
+  const matching = pool.filter(([name]) => fileMatchesType(name, fileType))
+  const ranked = (matching.length > 0 ? matching : pool)
+    .sort(([nameA, countA], [nameB, countB]) => {
+      const scoreA = dataFileScore(nameA, fileType, seedName)
+      const scoreB = dataFileScore(nameB, fileType, seedName)
+      return scoreB - scoreA || countB - countA || nameA.localeCompare(nameB)
+    })
+  if (ranked[0]) return ranked[0][0]
+  return candidates.sort(([nameA, countA], [nameB, countB]) =>
+    dataFileScore(nameB, fileType, seedName) - dataFileScore(nameA, fileType, seedName) ||
+    countB - countA ||
+    nameA.localeCompare(nameB),
+  )[0]?.[0] ?? null
+}
+
+function captureKeyFromName(name: string): string {
+  const numeric = name.match(/(\d+)/)
+  return numeric ? normalizeSplitKey(numeric[1]) : name
+}
+
+function normalizeSplitKey(key: string): string {
+  const numeric = Number(key)
+  return Number.isFinite(numeric) ? String(numeric) : key
+}
+
+function sortSplitRows(items: FileNodeSplit['items']): FileNodeSplit['items'] {
+  return [...items].sort((a, b) => {
+    const na = Number(a.key)
+    const nb = Number(b.key)
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
+    return a.key.localeCompare(b.key)
+  })
+}
+
+function rangeTextFromItems(items: FileNodeSplit['items']): string {
+  return rangeTextFromKeys(items.map((item) => item.key))
+}
+
+function rangeTextFromKeys(keys: string[]): string {
+  const numeric = keys
+    .filter((key) => /^\d+$/.test(key))
+    .map(Number)
+    .sort((a, b) => a - b)
+  const other = keys.filter((key) => !/^\d+$/.test(key)).sort((a, b) => a.localeCompare(b))
+  const parts: string[] = []
+  for (let i = 0; i < numeric.length; i++) {
+    const start = numeric[i]
+    let end = start
+    while (i + 1 < numeric.length && numeric[i + 1] === end + 1) {
+      end = numeric[i + 1]
+      i++
+    }
+    parts.push(start === end ? String(start) : `${start}-${end}`)
+  }
+  return [...parts, ...other].join(', ')
+}
+
+function parseRangeKeys(text: string): string[] {
+  const keys: string[] = []
+  for (const token of text.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean)) {
+    const range = token.match(/^(\d+)\s*(?:-|\.\.)\s*(\d+)$/)
+    if (range) {
+      const start = Number(range[1])
+      const end = Number(range[2])
+      const step = start <= end ? 1 : -1
+      for (let value = start; step > 0 ? value <= end : value >= end; value += step) {
+        keys.push(String(value))
+      }
+    } else {
+      keys.push(token)
+    }
+  }
+  return [...new Set(keys)]
+}
+
+function pathForSplitKey(pattern: SplitPattern, key: string): string {
+  if (pattern.kind === 'brace') return pattern.template.replace(/\{[^{}]*\}/, key)
+  if (pattern.kind === 'glob') return pattern.template.replace('*', key)
+  if (pattern.kind === 'crossFolder') {
+    const parent = pattern.parentDir.replace(/\/+$/, '')
+    const child = pattern.childGlob.replace('*', key).replace(/^\/+|\/+$/g, '')
+    const file = pattern.file.replace(/^\/+/, '')
+    return `${parent}/${child}/${file}`
+  }
+  return ''
+}
+
+function inferSplitFileType(items: FileNodeSplit['items'], current: FileNodeData['fileType']): FileNodeData['fileType'] {
+  if (items.length === 0) return current
+  const paths = items.map((item) => item.path.toLowerCase())
+  if (paths.every((path) => path.endsWith('.pgen'))) return 'pgen'
+  if (current !== 'any') return current
+  if (paths.every((path) => path.endsWith('.bgen'))) return 'bgen'
+  if (paths.every((path) => path.endsWith('.vcf') || path.endsWith('.vcf.gz'))) return 'vcf'
+  if (paths.every((path) => path.endsWith('.bcf'))) return 'bcf'
+  if (paths.every((path) => path.endsWith('.tsv') || path.endsWith('.txt'))) return 'tsv'
+  if (paths.every((path) => path.endsWith('.csv'))) return 'csv'
+  return current
+}
+
+function isPlinkLikeSplit(split: FileNodeSplit): boolean {
+  return split.items.some((item) => /\.pgen$/i.test(item.path))
 }
 
 const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] = [
@@ -1742,11 +2407,10 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
     let cancelled = false
     async function loadSchema() {
       try {
-        const delimiter = delimiterForPath(inputPath!)
-        const text = await window.api.sftp.head(activeConnectionId!, inputPath!, 1)
+        const text = await window.api.sftp.head(activeConnectionId!, inputPath!, 30)
         if (cancelled) return
-        const parsed = parseHeaderLine(text, delimiter)
-        if (parsed.length > 0) setSchema(inputPath!, { columns: parsed, delimiter })
+        const parsed = parseHeader(text, inputPath!)
+        if (parsed.columns.length > 0) setSchema(inputPath!, { columns: parsed.columns, delimiter: parsed.delimiter })
       } catch {
         // A transform remains editable without schema; command generation will still run.
       }

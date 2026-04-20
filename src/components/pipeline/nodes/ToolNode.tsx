@@ -14,6 +14,7 @@ import type { ToolNodeData } from '@/types/pipeline'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { computeNodeOutputPreview } from '@/lib/outputPathPreview'
+import { iconForTool } from '@/lib/toolIcons'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 
 interface StatusBadgeProps {
@@ -52,6 +53,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 function ToolNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as ToolNodeData
   const tool = getTool(nodeData.toolId)
+  const ToolIcon = iconForTool(nodeData.toolId)
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
   const groups = usePipelineStore((s) => s.groups)
@@ -105,6 +107,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="text-[10px] uppercase tracking-wide text-text-muted flex items-center gap-1">
+            <ToolIcon size={10} className="shrink-0" />
             <span>{tool.category}</span>
             {nodeData.executionMode === 'login' && (
               <span className="rounded bg-yellow-500/15 px-1 py-px text-[9px] text-yellow-300 normal-case tracking-normal">

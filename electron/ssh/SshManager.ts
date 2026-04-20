@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { resolve as resolvePath } from 'path'
 import { BrowserWindow, ipcMain } from 'electron'
 
-import type { ConnectionConfig, ConnectionResult, ConnectionStatus, ExecResult } from './types'
+import type { ConnectionConfig, ConnectionResult, ConnectionStatus, ExecResult, LoginPolicy } from './types'
 
 interface ManagedConnection {
   client: Client
@@ -77,6 +77,8 @@ const ALGORITHMS: ConnectConfig['algorithms'] = {
     'hmac-sha1',
   ],
 }
+
+const CHANNEL_OPEN_RETRY_DELAYS_MS = [150, 400, 900]
 
 /**
  * Build ssh2 ConnectConfig from our ConnectionConfig.
@@ -169,9 +171,44 @@ function promptUser(title: string, message: string, isPassword: boolean = false)
   })
 }
 
+function parseLoginPolicyFields(stdout: string): { host: string; cpu: string; mem: string } {
+  const fields = { host: '', cpu: '', mem: '' }
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith('__HOST__')) fields.host = line.slice('__HOST__'.length).trim()
+    if (line.startsWith('__CPU__')) fields.cpu = line.slice('__CPU__'.length).trim()
+    if (line.startsWith('__MEM__')) fields.mem = line.slice('__MEM__'.length).trim()
+  }
+  return fields
+}
+
+function parseUlimitNumber(value: string): number | null {
+  const normalized = value.trim().toLowerCase()
+  if (!normalized || normalized === 'unlimited') return null
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+}
+
+function parseUlimitKbAsMb(value: string): number | null {
+  const kb = parseUlimitNumber(value)
+  if (kb === null) return null
+  return Math.ceil(kb / 1024)
+}
+
+function isChannelOpenFailure(err: unknown): boolean {
+  const candidate = err as { reason?: unknown; message?: unknown } | null
+  const message = typeof candidate?.message === 'string' ? candidate.message : ''
+  return candidate?.reason === 2 || /channel open failure|open failed/i.test(message)
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export class SshManager {
   private static instance: SshManager
   private connections = new Map<string, ManagedConnection>()
+  private loginPolicies = new Map<string, LoginPolicy>()
+  private loginPolicyPromises = new Map<string, Promise<LoginPolicy>>()
 
   private constructor() { }
 
@@ -256,6 +293,9 @@ export class SshManager {
           reconnecting: false,
         })
         this.sendStatusChange(id, true)
+        void this.getLoginPolicy(id).catch((err) => {
+          console.warn(`[SSH] login policy probe failed for ${id}:`, err instanceof Error ? err.message : err)
+        })
         resolve({ id, host: cleanConfig.host, username: cleanConfig.username })
       })
 
@@ -315,6 +355,8 @@ export class SshManager {
     conn.reconnecting = true
     conn.client.end()
     this.connections.delete(id)
+    this.loginPolicies.delete(id)
+    this.loginPolicyPromises.delete(id)
     this.sendStatusChange(id, false)
   }
 
@@ -332,6 +374,37 @@ export class SshManager {
   getClient(id: string): Client | null {
     const conn = this.connections.get(id)
     return conn ? conn.client : null
+  }
+
+  getLoginPolicy(id: string): Promise<LoginPolicy> {
+    const cached = this.loginPolicies.get(id)
+    if (cached) return Promise.resolve(cached)
+
+    const pending = this.loginPolicyPromises.get(id)
+    if (pending) return pending
+
+    const promise = this.probeLoginPolicy(id)
+      .then((policy) => {
+        this.loginPolicies.set(id, policy)
+        this.loginPolicyPromises.delete(id)
+        return policy
+      })
+      .catch((err) => {
+        this.loginPolicyPromises.delete(id)
+        const conn = this.connections.get(id)
+        const fallback: LoginPolicy = {
+          hostname: conn?.config.host ?? '',
+          cpuTimeLimitSeconds: null,
+          memLimitMB: null,
+          source: 'unknown',
+        }
+        console.warn(`[SSH] login policy probe failed for ${id}:`, err instanceof Error ? err.message : err)
+        this.loginPolicies.set(id, fallback)
+        return fallback
+      })
+
+    this.loginPolicyPromises.set(id, promise)
+    return promise
   }
 
   /**
@@ -357,7 +430,21 @@ export class SshManager {
     return out
   }
 
-  exec(id: string, command: string): Promise<ExecResult> {
+  async exec(id: string, command: string): Promise<ExecResult> {
+    for (let attempt = 0; attempt <= CHANNEL_OPEN_RETRY_DELAYS_MS.length; attempt++) {
+      try {
+        return await this.execOnce(id, command)
+      } catch (err) {
+        if (!isChannelOpenFailure(err) || attempt >= CHANNEL_OPEN_RETRY_DELAYS_MS.length) {
+          throw err
+        }
+        await delay(CHANNEL_OPEN_RETRY_DELAYS_MS[attempt])
+      }
+    }
+    throw new Error('SSH exec failed')
+  }
+
+  private execOnce(id: string, command: string): Promise<ExecResult> {
     return new Promise((resolve, reject) => {
       const conn = this.connections.get(id)
       if (!conn) {
@@ -387,6 +474,29 @@ export class SshManager {
         })
       })
     })
+  }
+
+  private async probeLoginPolicy(id: string): Promise<LoginPolicy> {
+    const result = await this.exec(
+      id,
+      'printf "__HOST__%s\\n" "$(hostname 2>/dev/null)"; printf "__CPU__%s\\n" "$(ulimit -t 2>/dev/null || true)"; printf "__MEM__%s\\n" "$(ulimit -v 2>/dev/null || true)"',
+    )
+    if (result.exitCode !== 0) {
+      return {
+        hostname: this.connections.get(id)?.config.host ?? '',
+        cpuTimeLimitSeconds: null,
+        memLimitMB: null,
+        source: 'unknown',
+      }
+    }
+
+    const fields = parseLoginPolicyFields(result.stdout)
+    return {
+      hostname: fields.host || this.connections.get(id)?.config.host || '',
+      cpuTimeLimitSeconds: parseUlimitNumber(fields.cpu),
+      memLimitMB: parseUlimitKbAsMb(fields.mem),
+      source: 'ulimit',
+    }
   }
 
   /**

@@ -77,6 +77,7 @@ export class PipelineRunner {
   private reattachedJobs = new Set<string>()
   private loginCancels = new Map<string, () => void>()
   private cancelledLoginNodes = new Set<string>()
+  private homeCache = new Map<string, string>()
 
   private constructor() {
     this.loadPersistedRuns()
@@ -297,14 +298,19 @@ export class PipelineRunner {
     return scripts
   }
 
-  /** Resolve `$HOME` on the remote host. Cached per-connection is overkill for
-   * the V1 runtime; one exec per run start is cheap. */
+  /** Resolve `$HOME` on the remote host. SFTP paths need this expanded, while
+   * dry script preview only needs it for planning; cache it so preview does not
+   * open a new SSH channel every time. */
   private async resolveHome(connectionId: string): Promise<string> {
+    const cached = this.homeCache.get(connectionId)
+    if (cached) return cached
     const { stdout, exitCode, stderr } = await this.ssh.exec(connectionId, 'printf %s "$HOME"')
     if (exitCode !== 0 || !stdout.trim()) {
       throw new Error(`Could not resolve remote $HOME: ${(stderr || stdout).trim()}`)
     }
-    return stdout.trim().replace(/\/+$/, '')
+    const home = stdout.trim().replace(/\/+$/, '')
+    this.homeCache.set(connectionId, home)
+    return home
   }
 
   async cancel(runId: string): Promise<void> {

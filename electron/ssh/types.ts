@@ -16,6 +16,13 @@ export interface ConnectionResult {
   username: string
 }
 
+export interface LoginPolicy {
+  hostname: string
+  cpuTimeLimitSeconds: number | null
+  memLimitMB: number | null
+  source: 'ulimit' | 'unknown'
+}
+
 export interface ConnectionStatus {
   connected: boolean
   host: string

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { ConnectionConfig, ConnectionState } from '@/types'
+import type { ConnectionConfig, ConnectionState, LoginPolicy } from '@/types'
 
 export const LOCAL_CONNECTION_ID = '__local__'
 
@@ -24,12 +24,14 @@ interface ConnectionEntry {
 interface ConnectionStore {
   connections: Record<string, ConnectionEntry>
   activeConnectionId: string | null
+  loginPolicy: Record<string, LoginPolicy>
 
   connect: (config: ConnectionConfig) => Promise<void>
   connectLocal: (directory?: string) => Promise<void>
   disconnect: (id: string) => Promise<void>
   setActiveConnection: (id: string | null) => void
   updateStatus: (id: string, status: ConnectionState) => void
+  loadLoginPolicy: (id: string, options?: { force?: boolean }) => Promise<LoginPolicy | null>
   isLocalConnection: () => boolean
   /**
    * Re-populate the store from live connections held in the main process.
@@ -43,6 +45,7 @@ interface ConnectionStore {
 export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   connections: {},
   activeConnectionId: null,
+  loginPolicy: {},
 
   connect: async (config) => {
     const cleanConfig = normalizeConnectionConfig(config)
@@ -76,6 +79,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           return { connections: { ...rest, [result.id]: state.connections[result.id] } }
         })
       }
+      void get().loadLoginPolicy(result.id).catch((err) => {
+        console.warn('[connectionStore] login policy load failed:', err)
+      })
     } catch (err) {
       set((state) => ({
         connections: {
@@ -123,8 +129,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     } finally {
       set((state) => {
         const { [id]: _, ...rest } = state.connections
+        const { [id]: _policy, ...loginPolicy } = state.loginPolicy
         return {
           connections: rest,
+          loginPolicy,
           activeConnectionId:
             state.activeConnectionId === id ? null : state.activeConnectionId,
         }
@@ -149,6 +157,21 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         },
       }
     }),
+
+  loadLoginPolicy: async (id, options) => {
+    const entry = get().connections[id]
+    if (!entry || entry.isLocal) return null
+    if (!window.api.cluster?.loginPolicy) return null
+    if (!options?.force && get().loginPolicy[id]) return get().loginPolicy[id]
+    const policy = await window.api.cluster.loginPolicy(id)
+    set((state) => ({
+      loginPolicy: {
+        ...state.loginPolicy,
+        [id]: policy,
+      },
+    }))
+    return policy
+  },
 
   isLocalConnection: () => {
     return get().activeConnectionId === LOCAL_CONNECTION_ID
@@ -184,6 +207,13 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         }
         return { connections: next, activeConnectionId: activeId }
       })
+      for (const entry of live) {
+        if (entry.connected) {
+          void get().loadLoginPolicy(entry.id).catch((err) => {
+            console.warn('[connectionStore] login policy hydrate failed:', err)
+          })
+        }
+      }
     } catch (err) {
       console.error('[connectionStore] hydrateFromMain failed:', err)
     }
@@ -194,7 +224,13 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 if (typeof window !== 'undefined' && window.api?.ssh?.onStatusChange) {
   window.api.ssh.onStatusChange(
     (_event: any, data: { connectionId: string; status: string }) => {
-      useConnectionStore.getState().updateStatus(data.connectionId, data.status as ConnectionState)
+      const store = useConnectionStore.getState()
+      store.updateStatus(data.connectionId, data.status as ConnectionState)
+      if (data.status === 'connected') {
+        void store.loadLoginPolicy(data.connectionId, { force: true }).catch((err) => {
+          console.warn('[connectionStore] login policy status refresh failed:', err)
+        })
+      }
     }
   )
 }

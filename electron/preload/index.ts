@@ -27,6 +27,13 @@ export interface ConnectionStatus {
   uptime: number
 }
 
+export interface LoginPolicy {
+  hostname: string
+  cpuTimeLimitSeconds: number | null
+  memLimitMB: number | null
+  source: 'ulimit' | 'unknown'
+}
+
 export interface ExecResult {
   stdout: string
   stderr: string
@@ -222,6 +229,10 @@ const api = {
   slurm: {
     queue: (connectionId: string): Promise<SlurmQueueEntry[]> =>
       ipcRenderer.invoke('slurm:queue', connectionId),
+  },
+  cluster: {
+    loginPolicy: (connectionId: string): Promise<LoginPolicy> =>
+      ipcRenderer.invoke('cluster:loginPolicy', connectionId),
   },
   fs: {
     resolveSplit: (

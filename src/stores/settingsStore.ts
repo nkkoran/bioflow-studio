@@ -25,6 +25,7 @@ export interface AppSettings {
   notifyOnRunFinish: boolean
   notifyOnRunFail: boolean
   notifySoundEnabled: boolean
+  clusterLoginPolicyWarnSeconds: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -50,6 +51,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notifyOnRunFinish: true,
   notifyOnRunFail: true,
   notifySoundEnabled: false,
+  clusterLoginPolicyWarnSeconds: 600,
 }
 
 interface SettingsState {
@@ -92,6 +94,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       notifyOnRunFinish: await readSetting('settings:notifyOnRunFinish', DEFAULT_SETTINGS.notifyOnRunFinish),
       notifyOnRunFail: await readSetting('settings:notifyOnRunFail', DEFAULT_SETTINGS.notifyOnRunFail),
       notifySoundEnabled: await readSetting('settings:notifySoundEnabled', DEFAULT_SETTINGS.notifySoundEnabled),
+      clusterLoginPolicyWarnSeconds: await readSetting('settings:cluster:loginPolicyWarnSeconds', DEFAULT_SETTINGS.clusterLoginPolicyWarnSeconds),
     }
     set({ settings, loaded: true })
   },
@@ -121,6 +124,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:notifyOnRunFinish': next.notifyOnRunFinish = Boolean(value); break
       case 'settings:notifyOnRunFail': next.notifyOnRunFail = Boolean(value); break
       case 'settings:notifySoundEnabled': next.notifySoundEnabled = Boolean(value); break
+      case 'settings:cluster:loginPolicyWarnSeconds': {
+        const parsed = Number(value)
+        next.clusterLoginPolicyWarnSeconds = Number.isFinite(parsed)
+          ? Math.max(0, parsed)
+          : DEFAULT_SETTINGS.clusterLoginPolicyWarnSeconds
+        break
+      }
     }
     set({ settings: next, loaded: true })
   },

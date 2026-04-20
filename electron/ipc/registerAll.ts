@@ -7,6 +7,7 @@ import { registerLocalFileHandlers } from './localFileHandlers'
 import { registerPipelineHandlers } from './pipelineHandlers'
 import { registerSlurmHandlers } from './slurmHandlers'
 import { registerFsHandlers } from './fsHandlers'
+import { registerClusterHandlers } from './clusterHandlers'
 
 export function registerAllHandlers(): void {
   registerSshHandlers()
@@ -18,4 +19,5 @@ export function registerAllHandlers(): void {
   registerPipelineHandlers()
   registerSlurmHandlers()
   registerFsHandlers()
+  registerClusterHandlers()
 }

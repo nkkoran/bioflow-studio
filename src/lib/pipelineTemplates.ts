@@ -77,7 +77,7 @@ export const PIPELINE_TEMPLATES: PipelineTemplate[] = [
           data: {
             toolId: 'plink2.assoc',
             label: 'PLINK2 Association',
-            paramValues: { glm: 'linear', maf: 0.01, geno: 0.05, hwe: 1e-6 },
+            paramValues: { glm: 'hide-covar', maf: 0.01, geno: 0.05, hwe: 1e-6 },
             status: 'idle',
           },
         },

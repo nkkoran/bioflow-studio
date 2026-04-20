@@ -17,11 +17,7 @@ import {
   MiniMap,
   ReactFlowProvider,
   useReactFlow,
-  BaseEdge,
-  EdgeLabelRenderer,
-  getBezierPath,
   type Connection,
-  type EdgeProps,
   type EdgeTypes,
   type NodeTypes,
   type OnSelectionChangeParams,
@@ -33,6 +29,7 @@ import { FileNode } from './nodes/FileNode'
 import { NoteNode } from './nodes/NoteNode'
 import { MergeNode } from './nodes/MergeNode'
 import { TransformNode } from './nodes/TransformNode'
+import { AxedEdge } from './edges/AxedEdge'
 import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { BUNDLE_DRAG_MIME, DRAG_MIME } from './ToolPalette'
@@ -40,8 +37,9 @@ import { usePipelineStore, type BioflowNode } from '@/stores/pipelineStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
 import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
+import { edgeAxisChips } from '@/lib/axisPlannerPure'
 import { pathBasename } from '@/lib/utils'
-import type { FileNodeData, FileType, ToolNodeData } from '@/types/pipeline'
+import type { FileType } from '@/types/pipeline'
 import type { NodeGroup } from '@/types/pipeline'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
@@ -55,7 +53,7 @@ const nodeTypes: NodeTypes = {
 }
 
 const edgeTypes: EdgeTypes = {
-  axis: AxisEdge,
+  axed: AxedEdge,
 }
 
 const proOptions = { hideAttribution: true }
@@ -88,11 +86,35 @@ function CanvasInner() {
 
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
-  const displayEdges = useMemo(() => edges.map((edge) => ({
-    ...edge,
-    type: 'axis',
-    data: { axis: edgeAxisLabel(edge.source, nodes) },
-  })), [edges, nodes])
+  const displayEdges = useMemo(() => {
+    const snapshot = {
+      version: 1 as const,
+      id: 'canvas',
+      name: 'Canvas',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      nodes: nodes.map((node) => ({
+        id: node.id,
+        type: node.type ?? 'tool',
+        position: node.position,
+        data: node.data as any,
+      })),
+      edges: edges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        sourceHandle: edge.sourceHandle ?? undefined,
+        target: edge.target,
+        targetHandle: edge.targetHandle ?? undefined,
+      })),
+      groups,
+    }
+    const chips = edgeAxisChips(snapshot)
+    return edges.map((edge) => ({
+      ...edge,
+      type: 'axed',
+      data: { ...(edge.data ?? {}), axisChip: chips[edge.id], label: chips[edge.id]?.label ?? '' },
+    }))
+  }, [edges, nodes, groups])
 
   /** Accept drop events from the tool palette */
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -409,34 +431,6 @@ function CanvasInner() {
       )}
     </div>
   )
-}
-
-function AxisEdge(props: EdgeProps) {
-  const [edgePath, labelX, labelY] = getBezierPath(props)
-  const axis = typeof props.data?.axis === 'string' ? props.data.axis : ''
-  return (
-    <>
-      <BaseEdge id={props.id} path={edgePath} style={props.style} markerEnd={props.markerEnd} />
-      {axis && (
-        <EdgeLabelRenderer>
-          <div
-            className="nodrag nopan rounded border border-accent/40 bg-bg-secondary px-1.5 py-0.5 text-[9px] font-mono text-accent shadow"
-            style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
-          >
-            {axis}
-          </div>
-        </EdgeLabelRenderer>
-      )}
-    </>
-  )
-}
-
-function edgeAxisLabel(sourceId: string, nodes: BioflowNode[]): string {
-  const source = nodes.find((node) => node.id === sourceId)
-  if (!source) return ''
-  if (source.type === 'file') return (source.data as FileNodeData).split?.axis ?? ''
-  if (source.type === 'tool') return (source.data as ToolNodeData).arrayOver ? String((source.data as ToolNodeData).arrayOver) : ''
-  return ''
 }
 
 function findDropTargetTool(

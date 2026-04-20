@@ -13,7 +13,11 @@ interface CacheEntry {
   timestamp: number
 }
 
-const MAX_PER_CONNECTION = 3
+// HPC login nodes can have low SSH channel/session limits. Keep SFTP
+// conservative so ordinary exec calls (script preview, mkdir, sbatch) still
+// have room to open a channel on the same SSH connection.
+const MAX_PER_CONNECTION = 1
+const MAX_IDLE_PER_CONNECTION = 1
 const CACHE_TTL = 30_000
 
 export class SftpPool {
@@ -78,6 +82,11 @@ export class SftpPool {
     if (queue && queue.length > 0) {
       const next = queue.shift()!
       next(sftp)
+      return
+    }
+
+    if (entry.available.length >= MAX_IDLE_PER_CONNECTION) {
+      try { sftp.end() } catch { /* ignore */ }
       return
     }
 

@@ -4,6 +4,10 @@ import type {
   ToolNodeData,
   TransformNodeData,
 } from '@/types/pipeline'
+import {
+  delimiterForPath as preferredDelimiterForPath,
+  parseHeaderLine as parseDelimitedHeader,
+} from '@/lib/delimitedText'
 import { getTool } from '@/lib/toolRegistry'
 
 export interface ColumnSchema {
@@ -15,14 +19,16 @@ export interface ColumnSchema {
 export type SchemaCache = Record<string, { columns: string[]; delimiter: string; fetchedAt: number }>
 
 export function delimiterForPath(path: string): string {
-  const lower = path.toLowerCase()
-  if (lower.endsWith('.csv')) return ','
-  return '\t'
+  return preferredDelimiterForPath(path)
 }
 
-export function parseHeaderLine(text: string, delimiter: string): string[] {
-  const first = text.split(/\r?\n/).find((line) => line.trim()) ?? ''
-  return first.split(delimiter).map((column) => column.trim()).filter(Boolean)
+export function parseHeaderLine(text: string, delimiter?: string): string[] {
+  return parseDelimitedHeader(text, delimiter === ',' || delimiter === '\t' || delimiter === ' ' || delimiter === ';' || delimiter === '|' ? delimiter : undefined).columns
+}
+
+export function parseHeader(text: string, path: string): ColumnSchema {
+  const parsed = parseDelimitedHeader(text, preferredDelimiterForPath(path))
+  return { columns: parsed.columns, delimiter: parsed.delimiter, sourcePath: path }
 }
 
 export function connectedInputSchema(

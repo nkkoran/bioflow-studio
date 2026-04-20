@@ -57,6 +57,7 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   const slug = opts.nodeSlug ?? nodeId
   const isArray = axisPlan.mode === 'array'
   const arraySize = isArray ? axisPlan.keys!.length : undefined
+  const arrayRuntime = isArray ? buildArrayRuntime(axisPlan) : null
 
   const slurm = { ...(tool.slurm ?? {}), ...(nodeData.slurmOverride ?? {}) }
   const cpus = slurm.cpus ?? 1
@@ -69,7 +70,7 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   lines.push('#!/bin/bash')
   lines.push(`#SBATCH --job-name=bioflow-${slug}`)
   if (isArray) {
-    lines.push(`#SBATCH --array=0-${arraySize! - 1}`)
+    lines.push(`#SBATCH --array=${arrayRuntime!.arraySpec}`)
     lines.push(`#SBATCH --output=${logDir}/${slug}-%A_%a.out`)
     lines.push(`#SBATCH --error=${logDir}/${slug}-%A_%a.err`)
   } else {
@@ -91,19 +92,12 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   lines.push(`cd ${shellQuote(outputDir)}`)
   lines.push('')
 
-  // For array jobs: emit KEYS and INPUT_<portId> arrays, then pick current.
+  // For array jobs, prefer using the biological key directly as the Slurm
+  // task id (e.g. chromosomes 1-22) and infer path templates when possible.
+  // Fall back to a lookup table only for irregular/non-numeric keys.
   if (isArray) {
     lines.push(`# --- Array fan-out over axis "${axisPlan.axis}" ---`)
-    lines.push(`KEYS=(${axisPlan.keys!.map(shellArg).join(' ')})`)
-    // Emit the axed input port's path array
-    const axedPortId = axisPlan.arrayPortId!
-    const axedInput = axisPlan.inputs[axedPortId]
-    if (axedInput.kind !== 'array') {
-      throw new Error(`axisPlan says array but input on port ${axedPortId} is not array`)
-    }
-    lines.push(`INPUT_${axedPortId}=(${axedInput.paths.map(shellArg).join(' ')})`)
-    lines.push(`KEY="\${KEYS[$SLURM_ARRAY_TASK_ID]}"`)
-    lines.push(`i_${axedPortId}="\${INPUT_${axedPortId}[$SLURM_ARRAY_TASK_ID]}"`)
+    lines.push(...arrayRuntime!.setupLines)
     lines.push('')
   }
 
@@ -137,31 +131,25 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   // Params first (in registry order for stability)
   for (const p of tool.params) {
     const raw = nodeData.paramValues?.[p.name]
-    if (raw === undefined || raw === null || raw === '') continue
-    if (p.type === 'boolean') {
-      if (raw === true && p.flag) cmdParts.push(p.flag)
-      continue
-    }
-    if (p.flag) {
-      cmdParts.push(p.flag, shellQuote(String(raw)))
-    } else {
-      // No flag → treat the value as a positional (used e.g. by custom.shell)
-      cmdParts.push(shellQuote(String(raw)))
-    }
+    appendParamArgs(tool, p, raw, cmdParts)
   }
 
   // Inputs, in the order the tool declares them
   for (const port of tool.inputs) {
     const val = axisPlan.inputs[port.id]
     if (!val) continue
-    const flag = portFlag(port)
+    const flag = portFlag(tool, port)
     if (isArray && port.id === axisPlan.arrayPortId) {
       // One value per task, read from the pre-declared array variable
-      if (flag) cmdParts.push(flag)
-      cmdParts.push(`"$i_${port.id}"`)
+      if (isPlinkInputPort(tool, port)) {
+        const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
+        cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${port.id}`, firstPath)}`)
+      } else {
+        cmdParts.push(flag ? `${flag} "$i_${port.id}"` : `"$i_${port.id}"`)
+      }
       continue
     }
-    renderPortArgs(port, val, cmdParts)
+    renderPortArgs(tool, port, val, cmdParts)
   }
 
   // Output paths — one output flag if present.
@@ -171,7 +159,7 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   const outputSpec = buildOutputSpec(tool, axisPlan, slug, outputDir, isArray)
   if (outputSpec) cmdParts.push(...outputSpec)
 
-  lines.push(cmdParts.join(' \\\n  '))
+  lines.push(formatCommand(cmdParts))
   lines.push('')
 
   const outputs: Record<string, AxedValue> = axisPlan.outputs
@@ -314,6 +302,127 @@ function stringParam(nodeData: ToolNodeData, name: string): string {
   return value === undefined || value === null ? '' : String(value).trim()
 }
 
+interface ArrayRuntime {
+  arraySpec: string
+  setupLines: string[]
+}
+
+function buildArrayRuntime(axisPlan: AxisPlan): ArrayRuntime {
+  const keys = axisPlan.keys ?? []
+  const axedPortId = axisPlan.arrayPortId!
+  const axedInput = axisPlan.inputs[axedPortId]
+  if (!axedInput || axedInput.kind !== 'array') {
+    throw new Error(`axisPlan says array but input on port ${axedPortId} is not array`)
+  }
+
+  if (keysAreSlurmTaskIds(keys)) {
+    const template = templateMatchesPaths(axedInput.pathTemplate, axedInput.paths, keys)
+      ? axedInput.pathTemplate
+      : inferKeyedPathTemplate(axedInput.paths, keys)
+    const lines = [`KEY="$SLURM_ARRAY_TASK_ID"`]
+    if (template) {
+      lines.push(`i_${axedPortId}="${template}"`)
+    } else {
+      lines.push(`declare -A INPUT_${axedPortId}=(`)
+      for (let i = 0; i < keys.length; i++) {
+        lines.push(`  [${keys[i]}]=${shellArg(axedInput.paths[i])}`)
+      }
+      lines.push(')')
+      lines.push(`i_${axedPortId}="\${INPUT_${axedPortId}[$KEY]}"`)
+    }
+    return { arraySpec: compactNumericArraySpec(keys), setupLines: lines }
+  }
+
+  return {
+    arraySpec: `0-${keys.length - 1}`,
+    setupLines: [
+      `KEYS=(${keys.map(shellArg).join(' ')})`,
+      `INPUT_${axedPortId}=(${axedInput.paths.map(shellArg).join(' ')})`,
+      `KEY="\${KEYS[$SLURM_ARRAY_TASK_ID]}"`,
+      `i_${axedPortId}="\${INPUT_${axedPortId}[$SLURM_ARRAY_TASK_ID]}"`,
+    ],
+  }
+}
+
+function templateMatchesPaths(template: string | undefined, paths: string[], keys: string[]): template is string {
+  if (!template || !template.includes('${KEY}')) return false
+  return paths.every((path, idx) => template.replaceAll('${KEY}', keys[idx]) === path)
+}
+
+function keysAreSlurmTaskIds(keys: string[]): boolean {
+  return keys.length > 0 && keys.every((key) => /^\d+$/.test(key) && Number(key) >= 0)
+}
+
+function compactNumericArraySpec(keys: string[]): string {
+  const nums = [...new Set(keys.map(Number))].sort((a, b) => a - b)
+  const parts: string[] = []
+  for (let i = 0; i < nums.length; i++) {
+    const start = nums[i]
+    let end = start
+    while (i + 1 < nums.length && nums[i + 1] === end + 1) {
+      end = nums[i + 1]
+      i++
+    }
+    parts.push(start === end ? String(start) : `${start}-${end}`)
+  }
+  return parts.join(',')
+}
+
+function inferKeyedPathTemplate(paths: string[], keys: string[]): string | null {
+  let possible: Set<string> | null = null
+  for (let i = 0; i < paths.length; i++) {
+    const candidates = keyedTemplateCandidates(paths[i], keys[i])
+    if (candidates.size === 0) return null
+    possible = possible
+      ? new Set([...possible].filter((candidate) => candidates.has(candidate)))
+      : candidates
+    if (possible.size === 0) return null
+  }
+
+  const template = [...(possible ?? [])].sort((a, b) => templateScore(b) - templateScore(a) || a.length - b.length)[0]
+  return template ? template.replaceAll('__BIOFLOW_KEY__', '${KEY}') : null
+}
+
+function keyedTemplateCandidates(path: string, key: string): Set<string> {
+  const out = new Set<string>()
+  if (!key) return out
+  const indices: number[] = []
+  let idx = path.indexOf(key)
+  while (idx !== -1 && indices.length < 8) {
+    indices.push(idx)
+    idx = path.indexOf(key, idx + 1)
+  }
+  const subsetCount = 1 << indices.length
+  for (let mask = 1; mask < subsetCount; mask++) {
+    let next = ''
+    let cursor = 0
+    for (let i = 0; i < indices.length; i++) {
+      if ((mask & (1 << i)) === 0) continue
+      const start = indices[i]
+      if (start < cursor) continue
+      next += path.slice(cursor, start)
+      next += '__BIOFLOW_KEY__'
+      cursor = start + key.length
+    }
+    next += path.slice(cursor)
+    out.add(next)
+  }
+  return out
+}
+
+function templateScore(template: string): number {
+  const idx = template.indexOf('__BIOFLOW_KEY__')
+  if (idx < 0) return 0
+  const before = idx > 0 ? template[idx - 1] : ''
+  const after = template[idx + '__BIOFLOW_KEY__'.length] ?? ''
+  let score = 0
+  if (!/[A-Za-z0-9_]/.test(before)) score += 2
+  if (!/[A-Za-z0-9_]/.test(after)) score += 2
+  if (before === '/' || after === '/') score += 2
+  if (/chr__BIOFLOW_KEY__/i.test(template)) score += 1
+  return score
+}
+
 function resolveSingleInput(axisPlan: AxisPlan, portId: string, isArray: boolean): string {
   const val = axisPlan.inputs[portId]
   if (!val) return ''
@@ -338,6 +447,10 @@ function shellArrayValue(value: string): string {
 function shellExpr(value: string): string {
   if (value.includes('$')) return `"${value.replace(/"/g, '\\"')}"`
   return shellQuote(value)
+}
+
+function formatCommand(parts: string[]): string {
+  return parts.filter(Boolean).join(' \\\n  ')
 }
 
 /** Build the --out / -o section. Uses the first output port's path. */
@@ -367,10 +480,10 @@ function buildOutputSpec(
   if (cmdId === 'plink2' || cmdId === 'plink') {
     // plink uses --out <prefix>, no extension.
     const prefix = stripExt(path)
-    return ['--out', shellQuote(prefix)]
+    return [`--out ${shellExpr(prefix)}`]
   }
   // Default: -o <path>
-  return ['-o', shellQuote(path)]
+  return [`-o ${shellExpr(path)}`]
 }
 
 function pickPathExpr(portId: string, outputDir: string, slug: string, ft: FileType): string {
@@ -378,8 +491,78 @@ function pickPathExpr(portId: string, outputDir: string, slug: string, ft: FileT
   return `${outputDir}/${slug}.${portId}.\${KEY}${ext}`
 }
 
-function renderPortArgs(port: ToolPort, val: AxedValue, out: string[]): void {
-  const flag = portFlag(port)
+function appendParamArgs(tool: ToolDef, param: ToolDef['params'][number], raw: unknown, out: string[]): void {
+  if (raw === undefined || raw === null || raw === '') return
+  if (param.type === 'boolean') {
+    if (raw === true && param.flag) out.push(param.flag)
+    return
+  }
+
+  if (param.flag && isPlinkGlmParam(tool, param.name)) {
+    const values = normalizePlinkGlmValue(raw)
+    out.push(values.length > 0 ? `${param.flag} ${values.map(shellQuote).join(' ')}` : param.flag)
+    return
+  }
+
+  if (param.flag && isPlinkListParam(tool, param.name)) {
+    const values = splitPlinkListValue(raw)
+    if (values.length > 0) out.push(`${param.flag} ${values.map(shellQuote).join(' ')}`)
+    return
+  }
+
+  if (param.flag) {
+    out.push(`${param.flag} ${shellQuote(String(raw))}`)
+  } else {
+    // No flag → treat the value as a positional (used e.g. by custom.shell)
+    out.push(shellQuote(String(raw)))
+  }
+}
+
+function isPlinkListParam(tool: ToolDef, name: string): boolean {
+  const cmd = tool.command.toLowerCase()
+  return (cmd === 'plink2' || cmd === 'plink') && new Set([
+    'covar-name',
+    'phenoColList',
+    'covarColList',
+    'score-col-nums',
+  ]).has(name)
+}
+
+function isPlinkGlmParam(tool: ToolDef, name: string): boolean {
+  const cmd = tool.command.toLowerCase()
+  return (cmd === 'plink2' || cmd === 'plink') && name === 'glm'
+}
+
+function normalizePlinkGlmValue(raw: unknown): string[] {
+  const values = splitPlinkListValue(raw)
+  const normalized = values.filter((value) => value !== 'none')
+  if (normalized.length === 0) return []
+  if (normalized.some((value) => value === 'linear' || value === 'logistic')) {
+    return ['hide-covar']
+  }
+  return normalized
+}
+
+function splitPlinkListValue(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map(String).map((value) => value.trim()).filter(Boolean)
+  return String(raw)
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+}
+
+function renderPortArgs(tool: ToolDef, port: ToolPort, val: AxedValue, out: string[]): void {
+  if (isPlinkInputPort(tool, port)) {
+    const paths: string[] = val.kind === 'single' ? [val.path]
+      : val.kind === 'multi' ? val.paths
+      : val.paths
+    for (const path of paths) {
+      out.push(`${plinkInputFlag(path)} ${shellQuote(plinkPrefixPath(path))}`)
+    }
+    return
+  }
+
+  const flag = portFlag(tool, port)
   const paths: string[] = val.kind === 'single' ? [val.path]
     : val.kind === 'multi' ? val.paths
     : val.paths
@@ -389,30 +572,48 @@ function renderPortArgs(port: ToolPort, val: AxedValue, out: string[]): void {
   const format = port.multiFormat ?? 'repeat'
   if (paths.length === 1 || format === 'repeat') {
     for (const p of paths) {
-      if (flag) out.push(flag)
-      out.push(shellQuote(p))
+      out.push(flag ? `${flag} ${shellQuote(p)}` : shellQuote(p))
     }
     return
   }
   if (format === 'comma') {
-    if (flag) out.push(flag)
-    out.push(shellQuote(paths.join(',')))
+    out.push(flag ? `${flag} ${shellQuote(paths.join(','))}` : shellQuote(paths.join(',')))
     return
   }
   if (format === 'space') {
-    if (flag) out.push(flag)
-    for (const p of paths) out.push(shellQuote(p))
+    out.push(flag ? `${flag} ${paths.map(shellQuote).join(' ')}` : paths.map(shellQuote).join(' '))
     return
   }
 }
 
-function portFlag(port: ToolPort): string | null {
+function portFlag(tool: ToolDef, port: ToolPort): string | null {
+  if (isPlinkInputPort(tool, port)) return '--pfile'
   // Ports don't currently carry their own flag, so we derive from id.
   // Convention: 'input' → no flag (positional), 'reference' → --reference,
   // 'pheno' → --pheno, 'covar' → --covar, etc. Specific tools whose inputs
   // need different flags can be handled via a future ToolPort.flag field.
   if (port.id === 'input') return null
   return `--${port.id}`
+}
+
+function isPlinkInputPort(tool: ToolDef, port: ToolPort): boolean {
+  const cmd = tool.command.toLowerCase()
+  return (cmd === 'plink2' || cmd === 'plink') && port.id === 'input' && (port.fileType === 'plink' || port.fileType === 'pgen')
+}
+
+function plinkInputFlag(path: string): string {
+  return /\.bed$/i.test(path) ? '--bfile' : '--pfile'
+}
+
+function plinkPrefixPath(path: string): string {
+  if (/\.(pgen|pvar|psam|bed|bim|fam)$/i.test(path)) return stripExt(path)
+  return path
+}
+
+function plinkShellPrefixExpr(variableName: string, samplePath: string): string {
+  if (/\.bed$/i.test(samplePath)) return `"${'${'}${variableName}%.bed}"`
+  if (/\.(pgen|pvar|psam)$/i.test(samplePath)) return `"${'${'}${variableName}%.*}"`
+  return `"$${variableName}"`
 }
 
 // --- Merge scripts --------------------------------------------------------

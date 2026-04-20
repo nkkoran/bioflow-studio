@@ -96,6 +96,9 @@ interface Window {
         reason: string
       }>>
     }
+    cluster: {
+      loginPolicy: (connectionId: string) => Promise<import('./types/ssh').LoginPolicy>
+    }
     fs: {
       resolveSplit: (
         connectionId: string,

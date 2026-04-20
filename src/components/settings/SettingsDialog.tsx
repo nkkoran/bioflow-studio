@@ -205,8 +205,18 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
           )}
 
           {section === 'Advanced' && (
-            <div className="rounded border border-border bg-bg-primary p-3 text-xs text-text-muted">
-              Advanced runtime controls will land here as more cluster-specific knobs become necessary.
+            <div className="flex flex-col gap-3">
+              <Input
+                label="Login-node CPU warning threshold (seconds)"
+                type="number"
+                min={0}
+                step={60}
+                value={settings.clusterLoginPolicyWarnSeconds}
+                onChange={(e) => number('settings:cluster:loginPolicyWarnSeconds', Number(e.target.value))}
+              />
+              <p className="text-[11px] text-text-muted">
+                Show a warning after connect when the cluster reports a login-node CPU time limit below this value. Use 0 to suppress the warning.
+              </p>
             </div>
           )}
         </div>

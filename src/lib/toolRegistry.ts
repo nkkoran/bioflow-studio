@@ -27,7 +27,7 @@ export const TOOLS: ToolDef[] = [
       { id: 'output', label: 'Results', description: 'Association result table from PLINK2 --glm, suitable for clumping or downstream review.', fileType: 'tsv' },
     ],
     params: [
-      { name: 'glm', flag: '--glm', label: 'Model', type: 'select', options: ['linear', 'logistic', 'firth-fallback'], default: 'linear', required: true },
+      { name: 'glm', flag: '--glm', label: 'GLM output', type: 'select', options: ['hide-covar', 'firth-fallback', 'allow-no-covars', 'omit-ref', 'none'], default: 'hide-covar', required: true },
       { name: 'maf', flag: '--maf', label: 'Min MAF', type: 'number', default: 0.01, min: 0, max: 0.5, step: 0.001 },
       { name: 'geno', flag: '--geno', label: 'Max missing genotype rate', type: 'number', default: 0.05, min: 0, max: 1, step: 0.01 },
       { name: 'hwe', flag: '--hwe', label: 'HWE p-value', type: 'number', default: 1e-6, step: 1e-6 },
@@ -386,5 +386,7 @@ export function areTypesCompatible(source: string, target: string): boolean {
   // Tabular formats are loose compatible
   const tabular = new Set(['tsv', 'csv', 'txt'])
   if (tabular.has(source) && tabular.has(target)) return true
+  // PLINK2 `.pgen` is one concrete representation of a PLINK fileset.
+  if ((source === 'pgen' && target === 'plink') || (source === 'plink' && target === 'pgen')) return true
   return false
 }

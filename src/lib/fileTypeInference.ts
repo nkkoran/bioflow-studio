@@ -31,7 +31,16 @@ export function inferFileType(pathOrName: string): InferredFileType {
   // PLINK fileset markers (.bed is ambiguous with BED intervals; plink uses it
   // alongside .bim/.fam — treat .bim/.fam explicitly and leave .bed as 'bed').
   if (lower.endsWith('.bim') || lower.endsWith('.fam')) return 'plink'
-  if (lower.endsWith('.tsv')) return 'tsv'
+  if (
+    lower.endsWith('.tsv') ||
+    lower.endsWith('.pheno') ||
+    lower.endsWith('.phen') ||
+    lower.endsWith('.covar') ||
+    lower.endsWith('.sample') ||
+    lower.endsWith('.psam') ||
+    lower.endsWith('.eigenvec') ||
+    lower.endsWith('.profile')
+  ) return 'tsv'
   if (lower.endsWith('.csv')) return 'csv'
   if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'txt'
   if (lower.endsWith('.json')) return 'json'
