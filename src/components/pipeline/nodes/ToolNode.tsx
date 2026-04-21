@@ -17,6 +17,7 @@ import { computeNodeOutputPreview } from '@/lib/outputPathPreview'
 import { iconForTool } from '@/lib/toolIcons'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
+import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -58,6 +59,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
   const groups = usePipelineStore((s) => s.groups)
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const pipelineId = usePipelineStore((s) => s.pipelineId)
   const pipelineName = usePipelineStore((s) => s.pipelineName)
   const pipelineDescription = usePipelineStore((s) => s.pipelineDescription)
@@ -96,12 +98,39 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   const borderColor = CATEGORY_COLORS[tool.category] ?? 'border-border'
   const connectedInputs = new Set(edges.filter((edge) => edge.target === id).map((edge) => edge.targetHandle ?? 'input'))
   const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
+  const inputDetailsByPort = useMemo(() => {
+    const details = new Map<string, string>()
+    for (const edge of edges) {
+      if (edge.target !== id) continue
+      const portId = edge.targetHandle ?? 'input'
+      const source = nodes.find((node) => node.id === edge.source)
+      if (!source) continue
+      if (source.type === 'file') {
+        const sourceData = source.data as { path?: string; split?: { axis?: string; items?: Array<{ path: string }> } }
+        if ((sourceData.split?.items?.length ?? 0) > 0) {
+          details.set(portId, `${sourceData.split?.items?.length ?? 0} files split by ${sourceData.split?.axis ?? 'axis'}`)
+        } else if (sourceData.path) {
+          details.set(portId, sourceData.path)
+        }
+      } else {
+        details.set(portId, `${source.data.label ?? source.id}`)
+      }
+    }
+    return details
+  }, [edges, id, nodes])
+  const hasAxedInput = edges.some((edge) => {
+    if (edge.target !== id) return false
+    const source = nodes.find((node) => node.id === edge.source)
+    if (!source || source.type !== 'file') return false
+    const sourceData = source.data as { split?: { items?: unknown[] } }
+    return (sourceData.split?.items?.length ?? 0) > 0
+  })
 
   return (
     <ToolHoverCard tool={tool} connectedPorts={connectedInputs.size + connectedOutputs.size}>
       <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[260px] transition-all',
+        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[260px] max-w-[320px] transition-all',
         selected ? 'border-accent ring-2 ring-accent/30' : borderColor,
       )}
       >
@@ -125,11 +154,8 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       </div>
 
       {outputPreview && (
-        <div
-          className="border-b border-border px-3 py-1 text-[10px] font-mono text-text-muted truncate"
-          title={outputPreview}
-        >
-          {outputPreview}
+        <div className="border-b border-border px-3 py-1 text-[10px] font-mono text-text-muted truncate">
+          <MiddleEllipsis value={outputPreview} max={44} />
         </div>
       )}
 
@@ -159,7 +185,10 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
                   border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-accent)',
                 }}
               />
-              <span className={classNames('min-w-0 flex-1 truncate', connected ? 'text-text-primary' : 'text-text-secondary')}>
+              <span
+                className={classNames('min-w-0 flex-1 truncate', connected ? 'text-text-primary' : 'text-text-secondary')}
+                title={inputDetailsByPort.get(port.id)}
+              >
                 {port.label}
                 {port.required && <span className="text-error ml-0.5">*</span>}
               </span>
@@ -180,8 +209,43 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
         )}
         {tool.outputs.map((port) => {
           const connected = connectedOutputs.has(port.id)
+          const outputCount = edges.filter((edge) => edge.source === id && (edge.sourceHandle ?? 'output') === port.id).length
+          const mergeConfig = nodeData.outputMerge?.[port.id]
+          const autoMergeEnabled = mergeConfig
+            ? mergeConfig.mode === 'auto-merge'
+            : Boolean(port.autoMergeDefault)
           return (
             <div key={port.id} className="relative flex items-center justify-end h-7 gap-2">
+              {hasAxedInput && (port.autoMergeDefault || mergeConfig) && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    updateNodeData(id, {
+                      outputMerge: {
+                        ...(nodeData.outputMerge ?? {}),
+                        [port.id]: autoMergeEnabled
+                          ? { mode: 'fan-out', strategy: mergeConfig?.strategy ?? port.autoMergeDefault }
+                          : { mode: 'auto-merge', strategy: mergeConfig?.strategy ?? port.autoMergeDefault },
+                      },
+                    })
+                  }}
+                  className={`rounded px-1.5 py-0.5 text-[9px] shrink-0 ${
+                    autoMergeEnabled
+                      ? 'bg-emerald-500/15 text-emerald-200'
+                      : 'bg-bg-tertiary text-text-muted hover:text-text-primary'
+                  }`}
+                  title={autoMergeEnabled ? 'Auto-merge this array output into one downstream file' : 'Keep this output as fan-out / one file per task'}
+                >
+                  {autoMergeEnabled ? '⇢1' : `⋮${outputCount > 1 ? outputCount : ''}`}
+                </button>
+              )}
+              {outputCount > 1 && (
+                <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent shrink-0">
+                  {outputCount}x
+                </span>
+              )}
               <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[9px] text-text-muted shrink-0">
                 {port.fileType}
               </span>

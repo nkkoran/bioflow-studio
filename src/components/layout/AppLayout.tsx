@@ -1,10 +1,9 @@
-import { useCallback, useRef, useEffect } from 'react'
+import { useCallback, useRef, useEffect, useState } from 'react'
 import { useUIStore } from '@/stores/uiStore'
 import { useRunStore } from '@/stores/runStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
 import { TopBar } from './TopBar'
 import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
@@ -18,12 +17,14 @@ const BOTTOM_MIN = 120
 const BOTTOM_MAX = 600
 
 export function AppLayout() {
+  const [windowDragActive, setWindowDragActive] = useState(false)
   const sidebarWidth = useUIStore((s) => s.sidebarWidth)
   const setSidebarWidth = useUIStore((s) => s.setSidebarWidth)
   const bottomPanelHeight = useUIStore((s) => s.bottomPanelHeight)
   const setBottomPanelHeight = useUIStore((s) => s.setBottomPanelHeight)
 
   const dragging = useRef<'sidebar' | 'bottom' | null>(null)
+  const dragDepth = useRef(0)
   const startPos = useRef(0)
   const startSize = useRef(0)
 
@@ -84,7 +85,16 @@ export function AppLayout() {
     void useConnectionStore.getState().hydrateFromMain().catch((err) => {
       console.error('[AppLayout] hydrateFromMain failed:', err)
     })
-    void useSettingsStore.getState().load().catch((err) => {
+    void useSettingsStore.getState().load().then(() => {
+      const pipeline = usePipelineStore.getState()
+      const settings = useSettingsStore.getState().settings
+      if (!pipeline.dirty && pipeline.nodes.length === 0) {
+        usePipelineStore.setState({
+          arrayChainMode: settings.arrayChainMode,
+          fileLifecyclePolicy: settings.fileLifecyclePolicy,
+        })
+      }
+    }).catch((err) => {
       console.error('[AppLayout] load settings failed:', err)
     })
     void useUIStore.getState().loadAdvancedExpanded().catch((err) => {
@@ -127,6 +137,73 @@ export function AppLayout() {
     }
   }, [])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const inEditable = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return
+      event.preventDefault()
+      if (inEditable && !event.shiftKey) {
+        // Preserve the shortcut, but don't interfere with the field value.
+      }
+      window.dispatchEvent(new CustomEvent('bioflow:menu-command', {
+        detail: { command: event.shiftKey ? 'saveAs' : 'save' },
+      }))
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  useEffect(() => {
+    if (!window.api.app?.onMenuCommand) return
+    return window.api.app.onMenuCommand((data) => {
+      window.dispatchEvent(new CustomEvent('bioflow:menu-command', { detail: data }))
+    })
+  }, [])
+
+  useEffect(() => {
+    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepth.current = Math.max(1, dragDepth.current)
+      setWindowDragActive(true)
+    }
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      dragDepth.current += 1
+      setWindowDragActive(true)
+    }
+    const onDragLeave = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      dragDepth.current = Math.max(0, dragDepth.current - 1)
+      if (dragDepth.current === 0) setWindowDragActive(false)
+    }
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepth.current = 0
+      setWindowDragActive(false)
+      const paths = Array.from(event.dataTransfer?.files ?? [])
+        .map((file) => window.api.local.pathForFile(file))
+        .filter(Boolean)
+      if (paths.length === 0) return
+      window.dispatchEvent(new CustomEvent('bioflow:global-file-drop', {
+        detail: { clientX: event.clientX, clientY: event.clientY, paths },
+      }))
+    }
+    window.addEventListener('dragenter', onDragEnter)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
   const startSidebarDrag = useCallback(
     (e: React.MouseEvent) => {
       dragging.current = 'sidebar'
@@ -154,6 +231,13 @@ export function AppLayout() {
       <TopBar />
       <MfaPrompt />
       <LoginPolicyToast />
+      {windowDragActive && (
+        <div className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-accent/10 backdrop-blur-[1px]">
+          <div className="rounded-2xl border border-accent/30 bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">
+            Drop file here to add it to the pipeline
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}

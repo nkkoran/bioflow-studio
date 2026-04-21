@@ -8,13 +8,15 @@
  *
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
-import { X, Trash2, Copy, Plus, Folder, Info, RefreshCcw, ChevronDown } from 'lucide-react'
+import { X, Trash2, Copy, Plus, Info, RefreshCcw, ChevronDown } from 'lucide-react'
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
-import { DatasetGuideDialog } from '@/components/settings/DatasetGuideDialog'
+import { FlagBuilder } from '@/components/pipeline/inspector/FlagBuilder'
+import { RemotePathField } from '@/components/file-browser/RemotePathField'
+import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -33,6 +35,12 @@ import {
 } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
 import { inferFileType } from '@/lib/fileTypeInference'
+import {
+  ensureFlagBlocks,
+  flagBlocksToParamValues,
+  syncFlagBlocksFromParamValues,
+  toolUsesFlagBuilder,
+} from '@/lib/flagRegistry'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -49,8 +57,10 @@ import type {
   TransformNodeData,
 } from '@/types/pipeline'
 import type { RemoteFileEntry } from '@/types/files'
+import type { AnnovarInstallProgress, AnnovarStatusResult } from '@/types/annotation'
 import type { ClusterModuleSuggestion, LearnedResourceSummary } from '@/types/ssh'
 import { classNames, pathBasename, pathDirname } from '@/lib/utils'
+import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 
 type SplitDetectMode = 'auto' | 'files' | 'folders'
 
@@ -135,6 +145,7 @@ function ParamField({
   onChange: (v: unknown) => void
 }) {
   const label = <ParamLabel param={param} />
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   switch (param.type) {
     case 'boolean':
       return (
@@ -188,7 +199,30 @@ function ParamField({
       )
 
     case 'string':
+      return (
+        <Input
+          label={param.label + (param.required ? ' *' : '')}
+          labelNode={label}
+          type="text"
+          value={value === undefined || value === null ? '' : String(value)}
+          placeholder={param.placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )
+
     case 'file':
+      return (
+        <RemotePathField
+          label={param.label + (param.required ? ' *' : '')}
+          value={value === undefined || value === null ? '' : String(value)}
+          placeholder={param.placeholder}
+          mode="file"
+          title={`Choose file for ${param.label}`}
+          buttonLabel={activeConnectionId ? 'Browse' : 'Connect first'}
+          onChange={onChange}
+        />
+      )
+
     default:
       return (
         <Input
@@ -452,33 +486,14 @@ function FolderPickerField({
   onChange: (value: string) => void
 }) {
   return (
-    <div className="flex flex-col gap-1">
-      {label && <label className="text-text-secondary text-xs font-medium">{label}</label>}
-      <div className="flex items-end gap-1.5">
-        <Input
-          value={value}
-          placeholder={placeholder}
-          onChange={(e) => onChange(e.target.value)}
-          className="flex-1"
-        />
-        <Button
-          variant="secondary"
-          size="sm"
-          className="h-8 px-2 shrink-0"
-          title="Browse folders in the sidebar"
-          onClick={() =>
-            useUIStore.getState().startFilePick({
-              target: 'directory',
-              requesterLabel,
-              onResolve: ({ path }) => onChange(path),
-            })
-          }
-        >
-          <Folder size={12} className="mr-1" />
-          Browse
-        </Button>
-      </div>
-    </div>
+    <RemotePathField
+      label={label}
+      value={value}
+      placeholder={placeholder}
+      onChange={onChange}
+      mode="directory"
+      title={`Choose folder for ${requesterLabel}`}
+    />
   )
 }
 
@@ -632,8 +647,10 @@ function ToolInputRow({
             <div key={edge.id} className="min-w-0 text-text-secondary">
               <span className="text-success">Connected</span>
               {' to '}
-              <span className="text-text-primary">{inspectorNodeLabel(source)}</span>
-              <span className="text-text-muted"> · {detail}</span>
+              <span className="text-text-primary" title={inspectorNodeLabel(source)}>
+                <MiddleEllipsis value={inspectorNodeLabel(source)} max={28} />
+              </span>
+              <span className="text-text-muted" title={detail}> · <MiddleEllipsis value={detail} max={54} /></span>
             </div>
           )
         })}
@@ -645,10 +662,21 @@ function ToolInputRow({
 function ToolOutputRow({
   port,
   consumers,
+  nodeId,
+  data,
+  updateNodeData,
+  showMergeBehavior,
 }: {
   port: ToolPort
   consumers: PipelineSnapshot['edges']
+  nodeId: string
+  data: ToolNodeData
+  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData>) => void
+  showMergeBehavior: boolean
 }) {
+  const mergeConfig = data.outputMerge?.[port.id]
+  const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
+  const intermediate = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
   return (
     <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
       <div className="flex items-center gap-2">
@@ -662,6 +690,43 @@ function ToolOutputRow({
         {consumers.length > 0
           ? `${consumers.length} downstream connection${consumers.length === 1 ? '' : 's'}`
           : 'Not connected downstream; the file is still written when the node runs.'}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {showMergeBehavior && (
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-text-muted">Array output</span>
+            <select
+              value={autoMergeEnabled ? 'auto-merge' : 'fan-out'}
+              onChange={(e) => updateNodeData(nodeId, {
+                outputMerge: {
+                  ...(data.outputMerge ?? {}),
+                  [port.id]: {
+                    mode: e.target.value as 'fan-out' | 'auto-merge',
+                    strategy: mergeConfig?.strategy ?? port.autoMergeDefault,
+                  },
+                },
+              })}
+              className="h-7 rounded border border-border bg-bg-primary px-2 text-[11px] text-text-primary"
+            >
+              <option value="fan-out">Fan-out</option>
+              <option value="auto-merge">Auto-merge</option>
+            </select>
+          </div>
+        )}
+        <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={intermediate}
+            onChange={(e) => updateNodeData(nodeId, {
+              outputIntermediate: {
+                ...(data.outputIntermediate ?? {}),
+                [port.id]: e.target.checked,
+              },
+            })}
+            className="accent-accent"
+          />
+          Intermediate output
+        </label>
       </div>
     </div>
   )
@@ -700,6 +765,7 @@ function AnnotationConfigPanel({
   const setSetting = useSettingsStore((s) => s.setSetting)
   const [message, setMessage] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  const [annovarStatus, setAnnovarStatus] = useState<AnnovarStatusResult | null>(null)
   const isAnnovar = data.toolId === 'annovar.table_annovar'
   const isVep = data.toolId === 'vep'
   if (!isAnnovar && !isVep) return null
@@ -718,12 +784,36 @@ function AnnotationConfigPanel({
   const defaultDbPath = isAnnovar
     ? (settings.annovarDbPath || `${toolsRoot}/annovar/humandb`)
     : (settings.vepCachePath || `${toolsRoot}/vep/cache`)
-  const toolPath = String(params.toolPath ?? '') || defaultToolPath
-  const dbPath = String(params.annotationDbPath ?? '') || defaultDbPath
+  const toolPath = params.toolPath === undefined ? defaultToolPath : String(params.toolPath ?? '')
+  const dbPath = params.annotationDbPath === undefined ? defaultDbPath : String(params.annotationDbPath ?? '')
 
   const patchParams = (patch: Record<string, unknown>) => {
     updateNodeData(nodeId, { paramValues: { ...params, ...patch } })
   }
+
+  useEffect(() => {
+    if (!isAnnovar || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+    const databases = annovarDbNames(featureIds)
+    if (databases.length === 0) {
+      setAnnovarStatus(null)
+      return
+    }
+    let cancelled = false
+    void window.api.annovar.status(activeConnectionId, dbPath, build, databases).then((status) => {
+      if (!cancelled) setAnnovarStatus(status)
+    }).catch(() => {
+      if (!cancelled) setAnnovarStatus(null)
+    })
+    return () => { cancelled = true }
+  }, [activeConnectionId, build, dbPath, featureIds, isAnnovar])
+
+  useEffect(() => {
+    if (!isAnnovar) return
+    return window.api.annovar.onInstallProgress((progress) => {
+      if (progress.connectionId !== activeConnectionId) return
+      setMessage((prev) => `${progress.database}: ${progress.phase}${progress.chunk ? `\n${progress.chunk.trim()}` : prev ? `\n${prev}` : ''}`)
+    })
+  }, [activeConnectionId, isAnnovar])
 
   const toggleAnnovarFeature = (id: string) => {
     const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
@@ -797,55 +887,166 @@ function AnnotationConfigPanel({
     ].join('\n')
   }
 
+  const pendingAnnovarDatabases = annovarStatus?.databases
+    .filter((row) => row.status !== 'installed')
+    .map((row) => row.database) ?? annovarDbNames(featureIds)
+
   return (
     <div>
       <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
         Annotation setup
       </h4>
-      <div className="flex flex-col gap-2 rounded-md border border-border bg-bg-primary p-2">
-        <Input
-          label={isAnnovar ? 'ANNOVAR scripts folder' : 'VEP executable or folder'}
-          value={toolPath}
-          onChange={(event) => patchParams({ toolPath: event.target.value })}
-        />
-        <Input
-          label={isAnnovar ? 'Database folder (humandb)' : 'Cache folder'}
-          value={dbPath}
-          onChange={(event) => patchParams({ annotationDbPath: event.target.value })}
-        />
-        <div className="grid grid-cols-2 gap-2">
+      <div className="flex flex-col gap-3 rounded-md border border-border bg-bg-primary p-2">
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            {isAnnovar ? 'Scripts folder' : 'Tool path'}
+          </div>
           {isAnnovar ? (
-            <select
-              value={build}
-              onChange={(event) => patchParams({ buildver: event.target.value })}
-              className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
-            >
-              <option value="hg38">hg38</option>
-              <option value="hg19">hg19</option>
-            </select>
+            <RemotePathField
+              label="ANNOVAR scripts folder"
+              value={toolPath}
+              placeholder="~/bioflow/tools/annovar"
+              onChange={(value) => patchParams({ toolPath: value })}
+              mode="directory"
+              title="Choose ANNOVAR scripts folder"
+            />
           ) : (
-            <select
-              value={assembly}
-              onChange={(event) => patchParams({ assembly: event.target.value })}
-              className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
-            >
-              <option value="GRCh38">GRCh38</option>
-              <option value="GRCh37">GRCh37</option>
-            </select>
-          )}
-          {isVep && (
-            <Input
-              label="Forks"
-              type="number"
-              min={1}
-              value={String(params.fork ?? 4)}
-              onChange={(event) => patchParams({ fork: Number(event.target.value) })}
+            <RemotePathField
+              label="VEP executable or folder"
+              value={toolPath}
+              placeholder="vep or ~/bioflow/tools/ensembl-vep/vep"
+              onChange={(value) => patchParams({ toolPath: value })}
+              mode="file"
+              title="Choose VEP executable or folder"
             />
           )}
+          {isAnnovar && (
+            <p className="mt-1 text-[10px] text-text-muted">
+              Point this to the folder that contains <code className="font-mono">table_annovar.pl</code> and <code className="font-mono">annotate_variation.pl</code>.
+            </p>
+          )}
         </div>
-        <div>
-          <div className="text-xs font-medium text-text-secondary mb-1">Add information</div>
-          <div className="flex flex-col gap-1">
+
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            {isAnnovar ? 'Database folder' : 'Cache folder'}
+          </div>
+          <RemotePathField
+            label={isAnnovar ? 'ANNOVAR humandb folder' : 'VEP cache folder'}
+            value={dbPath}
+            placeholder={isAnnovar ? '~/bioflow/tools/annovar/humandb' : '~/bioflow/tools/vep/cache'}
+            onChange={(value) => patchParams({ annotationDbPath: value })}
+            mode="directory"
+            title={isAnnovar ? 'Choose ANNOVAR humandb folder' : 'Choose VEP cache folder'}
+          />
+          {isAnnovar && annovarStatus && (
+            <div className="mt-2 rounded border border-border/70 bg-bg-primary/70 px-2 py-2 text-[11px]">
+              <div className="mb-1 text-text-secondary">Required databases</div>
+              <div className="flex flex-wrap gap-1">
+                {annovarStatus.databases.map((row) => (
+                  <span
+                    key={`${row.buildver}:${row.database}`}
+                    className={classNames(
+                      'rounded px-1.5 py-0.5',
+                      row.status === 'installed'
+                        ? 'bg-emerald-500/15 text-emerald-200'
+                        : row.status === 'stale'
+                          ? 'bg-red-500/15 text-red-200'
+                          : 'bg-amber-500/15 text-amber-200',
+                    )}
+                    title={row.expectedPath}
+                  >
+                    {row.database} · {row.status} · {row.estimatedSizeGB.toFixed(1)} GB
+                  </span>
+                ))}
+              </div>
+              <div className="mt-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
+                  onClick={async () => {
+                    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+                    setRunning(true)
+                    setMessage('Saving the humandb path and installing missing ANNOVAR databases...')
+                    try {
+                      await setSetting('settings:annovarDbPath', dbPath)
+                      if (toolPath.trim()) await setSetting('settings:annovarScriptsPath', toolPath)
+                      if (pendingAnnovarDatabases.length === 0) {
+                        setMessage('Saved the humandb path. All selected ANNOVAR databases are already installed.')
+                        return
+                      }
+                      await window.api.annovar.install({
+                        connectionId: activeConnectionId,
+                        scriptsPath: toolPath,
+                        humandbPath: dbPath,
+                        buildver: build,
+                        databases: pendingAnnovarDatabases,
+                      })
+                      const refreshed = await window.api.annovar.status(activeConnectionId, dbPath, build, annovarDbNames(featureIds))
+                      setAnnovarStatus(refreshed)
+                      setMessage('Saved the humandb path and finished installing the missing ANNOVAR databases.')
+                    } catch (err: any) {
+                      setMessage(err?.message ?? String(err))
+                    } finally {
+                      setRunning(false)
+                    }
+                  }}
+                >
+                  Set humandb + install missing DBs ({(annovarStatus?.totalDownloadSizeGB ?? 0).toFixed(1)} GB)
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            Build
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {isAnnovar ? (
+              <div className="flex flex-col gap-1">
+                <label className="text-text-secondary text-xs font-medium">Reference build</label>
+                <select
+                  value={build}
+                  onChange={(event) => patchParams({ buildver: event.target.value })}
+                  className="h-8 rounded-md border border-border bg-bg-primary px-2 text-sm text-text-primary"
+                >
+                  <option value="hg38">hg38</option>
+                  <option value="hg19">hg19</option>
+                </select>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1">
+                <label className="text-text-secondary text-xs font-medium">Assembly</label>
+                <select
+                  value={assembly}
+                  onChange={(event) => patchParams({ assembly: event.target.value })}
+                  className="h-8 rounded-md border border-border bg-bg-primary px-2 text-sm text-text-primary"
+                >
+                  <option value="GRCh38">GRCh38</option>
+                  <option value="GRCh37">GRCh37</option>
+                </select>
+              </div>
+            )}
+            {isVep && (
+              <Input
+                label="Forks"
+                type="number"
+                min={1}
+                value={String(params.fork ?? 4)}
+                onChange={(event) => patchParams({ fork: Number(event.target.value) })}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            Annotations to add
+          </div>
+          <div className="flex flex-col gap-1.5">
             {(isAnnovar ? ANNOVAR_FEATURES : VEP_FEATURES).map((feature) => {
               const active = featureIds.includes(feature.id)
               return (
@@ -855,7 +1056,7 @@ function AnnotationConfigPanel({
                   onClick={() => isAnnovar ? toggleAnnovarFeature(feature.id) : toggleVepFeature(feature.id)}
                   className={classNames(
                     'rounded-md border px-2 py-1.5 text-left',
-                    active ? 'border-accent/50 bg-accent/10' : 'border-border bg-bg-tertiary hover:bg-bg-hover',
+                    active ? 'border-accent/50 bg-accent/10' : 'border-border bg-bg-primary hover:bg-bg-hover',
                   )}
                 >
                   <div className="text-xs font-medium text-text-primary">{active ? '✓ ' : ''}{feature.label}</div>
@@ -865,25 +1066,18 @@ function AnnotationConfigPanel({
             })}
           </div>
         </div>
-        {isAnnovar && (
-          <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-muted">
-            BioFlow will generate ANNOVAR protocol/operation lists from the selected information. You do not need to type comma-separated protocol strings.
+
+        {!isAnnovar && (
+          <div className="flex flex-wrap gap-1.5">
+            <Button variant="secondary" size="sm" disabled={running} onClick={() => void runLoginCommand(prepareToolCommand())}>
+              Install VEP
+            </Button>
+            <Button variant="secondary" size="sm" disabled={running || featureIds.length === 0} onClick={() => void runLoginCommand(databaseCommand())}>
+              Install selected databases
+            </Button>
           </div>
         )}
-        <div className="flex flex-wrap gap-1.5">
-          <Button variant="secondary" size="sm" disabled={running} onClick={() => void setSetting(isAnnovar ? 'settings:annovarScriptsPath' : 'settings:vepPath', toolPath)}>
-            Save tool path
-          </Button>
-          <Button variant="secondary" size="sm" disabled={running} onClick={() => void setSetting(isAnnovar ? 'settings:annovarDbPath' : 'settings:vepCachePath', dbPath)}>
-            Save DB path
-          </Button>
-          <Button variant="secondary" size="sm" disabled={running} onClick={() => void runLoginCommand(prepareToolCommand())}>
-            {isAnnovar ? 'Prepare scripts folder' : 'Install VEP'}
-          </Button>
-          <Button variant="secondary" size="sm" disabled={running || featureIds.length === 0} onClick={() => void runLoginCommand(databaseCommand())}>
-            Install selected databases
-          </Button>
-        </div>
+
         {message && <div className="text-[11px] text-text-muted whitespace-pre-wrap break-all">{message}</div>}
       </div>
     </div>
@@ -908,7 +1102,6 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const [learnedEstimate, setLearnedEstimate] = useState<LearnedResourceSummary | null>(null)
   const [estimating, setEstimating] = useState(false)
   const [showEstimateWhy, setShowEstimateWhy] = useState(false)
-  const [guideOpen, setGuideOpen] = useState(false)
   const [refreshingSchemaPath, setRefreshingSchemaPath] = useState<string | null>(null)
   const advancedExpanded = useUIStore((s) => s.advancedExpanded[data.toolId] ?? false)
   const setAdvancedExpanded = useUIStore((s) => s.setAdvancedExpanded)
@@ -939,11 +1132,15 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
 
   const setParam = useCallback(
     (name: string, value: unknown) => {
+      const nextParamValues = { ...data.paramValues, [name]: value }
       updateNodeData(nodeId, {
-        paramValues: { ...data.paramValues, [name]: value },
+        paramValues: nextParamValues,
+        flagBlocks: toolUsesFlagBuilder(data.toolId)
+          ? syncFlagBlocksFromParamValues(data.toolId, data.flagBlocks, nextParamValues)
+          : data.flagBlocks,
       })
     },
-    [nodeId, data.paramValues, updateNodeData],
+    [nodeId, data.flagBlocks, data.paramValues, data.toolId, updateNodeData],
   )
 
   const setSlurm = useCallback(
@@ -1058,6 +1255,11 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
+  const useFlagBuilder = settings.plinkFlagBuilderEnabled && toolUsesFlagBuilder(data.toolId)
+  const flagBlocks = toolUsesFlagBuilder(data.toolId)
+    ? ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
+    : []
+
   const ToolIcon = iconForTool(data.toolId)
   const slurm = { ...tool.slurm, ...data.slurmOverride }
   const executionMode = data.executionMode ?? 'sbatch'
@@ -1089,6 +1291,13 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
       },
     })
   }
+  const setFlagBlocks = useCallback((nextBlocks: ToolNodeData['flagBlocks']) => {
+    const safeBlocks = nextBlocks ?? []
+    updateNodeData(nodeId, {
+      flagBlocks: safeBlocks,
+      paramValues: flagBlocksToParamValues(data.toolId, safeBlocks, data.paramValues),
+    })
+  }, [data.paramValues, data.toolId, nodeId, updateNodeData])
 
   return (
     <div className="flex flex-col gap-4">
@@ -1108,18 +1317,6 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           {tool.module && <div>Module: <span className="font-mono text-text-secondary">{tool.module}</span></div>}
         </div>
         <p className="text-xs text-text-muted mt-2">{tool.description}</p>
-        {tool.requiresDatabase && (
-          <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-[11px] text-text-secondary">
-            <div className="flex items-center justify-between gap-2">
-              <span>
-                Needs {tool.requiresDatabase.name}. Set the database path before running.
-              </span>
-              <Button variant="secondary" size="sm" className="h-6 px-2 text-[11px]" onClick={() => setGuideOpen(true)}>
-                Guide
-              </Button>
-            </div>
-          </div>
-        )}
       </div>
 
       <div>
@@ -1199,6 +1396,10 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               key={port.id}
               port={port}
               consumers={outputEdgesByPort.get(port.id) ?? []}
+              nodeId={nodeId}
+              data={data}
+              updateNodeData={updateNodeData}
+              showMergeBehavior={axedInputPorts.length > 0}
             />
           ))}
           {tool.outputs.length === 0 && (
@@ -1214,94 +1415,109 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Parameters
         </h4>
-        <div className="flex flex-col gap-2">
-          {commonParams.map((p) => {
-            const schema = p.columnRef
-              ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-              : null
-            const inputPath = p.columnRef
-              ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-              : null
-            return tool.id === 'custom.shell' && p.name === 'script'
-              ? (
-                  <ShellScriptField
-                    key={p.name}
-                    value={data.paramValues[p.name]}
-                    onChange={(v) => setParam(p.name, v)}
-                  />
-                )
-              : p.columnRef
+        {useFlagBuilder ? (
+          <FlagBuilder
+            nodeId={nodeId}
+            tool={tool}
+            nodeData={{ ...data, flagBlocks }}
+            snapshot={snapshot}
+            schemas={schemas}
+            refreshingSchemaPath={refreshingSchemaPath}
+            advancedExpanded={advancedExpanded}
+            onSetAdvancedExpanded={(expanded) => setAdvancedExpanded(data.toolId, expanded)}
+            onLoadSchema={loadSchemaForPath}
+            onChange={(blocks) => setFlagBlocks(blocks)}
+          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {commonParams.map((p) => {
+              const schema = p.columnRef
+                ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                : null
+              const inputPath = p.columnRef
+                ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                : null
+              return tool.id === 'custom.shell' && p.name === 'script'
                 ? (
-                    <ColumnParamField
+                    <ShellScriptField
                       key={p.name}
-                      param={p}
                       value={data.paramValues[p.name]}
-                      columns={schema?.columns ?? []}
-                      loading={Boolean(inputPath && !schema)}
-                      refreshing={refreshingSchemaPath === inputPath}
-                      onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
                       onChange={(v) => setParam(p.name, v)}
                     />
                   )
-              : (
-                  <ParamField
-                    key={p.name}
-                    param={p}
-                    value={data.paramValues[p.name]}
-                    onChange={(v) => setParam(p.name, v)}
-                  />
-                )
-          })}
-          {advancedParams.length > 0 && (
-            <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
-                onClick={() => setAdvancedExpanded(data.toolId, !advancedExpanded)}
-              >
-                <ChevronDown size={13} className={classNames('transition-transform', advancedExpanded ? 'rotate-180' : '')} />
-                Advanced
-                <span className="ml-auto text-[10px] text-text-muted">{advancedParams.length}</span>
-              </button>
-              {advancedExpanded && (
-                <div className="flex flex-col gap-2 border-t border-border p-2">
-                  {advancedParams.map((p) => {
-                    const schema = p.columnRef
-                      ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                      : null
-                    const inputPath = p.columnRef
-                      ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                      : null
-                    return p.columnRef
-                      ? (
-                          <ColumnParamField
-                            key={p.name}
-                            param={p}
-                            value={data.paramValues[p.name]}
-                            columns={schema?.columns ?? []}
-                            loading={Boolean(inputPath && !schema)}
-                            refreshing={refreshingSchemaPath === inputPath}
-                            onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                            onChange={(v) => setParam(p.name, v)}
-                          />
-                        )
-                      : (
-                          <ParamField
-                            key={p.name}
-                            param={p}
-                            value={data.paramValues[p.name]}
-                            onChange={(v) => setParam(p.name, v)}
-                          />
-                        )
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-          {visibleParams.length === 0 && (
-            <div className="text-xs text-text-muted italic">No parameters</div>
-          )}
-        </div>
+                : p.columnRef
+                  ? (
+                      <ColumnParamField
+                        key={p.name}
+                        param={p}
+                        value={data.paramValues[p.name]}
+                        columns={schema?.columns ?? []}
+                        loading={Boolean(inputPath && !schema)}
+                        refreshing={refreshingSchemaPath === inputPath}
+                        onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                        onChange={(v) => setParam(p.name, v)}
+                      />
+                    )
+                : (
+                    <ParamField
+                      key={p.name}
+                      param={p}
+                      value={data.paramValues[p.name]}
+                      onChange={(v) => setParam(p.name, v)}
+                    />
+                  )
+            })}
+            {advancedParams.length > 0 && (
+              <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
+                  onClick={() => setAdvancedExpanded(data.toolId, !advancedExpanded)}
+                >
+                  <ChevronDown size={13} className={classNames('transition-transform', advancedExpanded ? 'rotate-180' : '')} />
+                  Advanced
+                  <span className="ml-auto text-[10px] text-text-muted">{advancedParams.length}</span>
+                </button>
+                {advancedExpanded && (
+                  <div className="flex flex-col gap-2 border-t border-border p-2">
+                    {advancedParams.map((p) => {
+                      const schema = p.columnRef
+                        ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                        : null
+                      const inputPath = p.columnRef
+                        ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                        : null
+                      return p.columnRef
+                        ? (
+                            <ColumnParamField
+                              key={p.name}
+                              param={p}
+                              value={data.paramValues[p.name]}
+                              columns={schema?.columns ?? []}
+                              loading={Boolean(inputPath && !schema)}
+                              refreshing={refreshingSchemaPath === inputPath}
+                              onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                              onChange={(v) => setParam(p.name, v)}
+                            />
+                          )
+                        : (
+                            <ParamField
+                              key={p.name}
+                              param={p}
+                              value={data.paramValues[p.name]}
+                              onChange={(v) => setParam(p.name, v)}
+                            />
+                          )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            {visibleParams.length === 0 && (
+              <div className="text-xs text-text-muted italic">No parameters</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Array over (fan-out control) */}
@@ -1481,11 +1697,6 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           </div>
         </div>
       )}
-      <DatasetGuideDialog
-        guideKey={tool.requiresDatabase?.guideKey ?? null}
-        open={guideOpen}
-        onClose={() => setGuideOpen(false)}
-      />
     </div>
   )
 }
@@ -1511,7 +1722,6 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const [detectMessage, setDetectMessage] = useState<string | null>(null)
   const [rangeDraft, setRangeDraft] = useState('')
   const [refreshNonce, setRefreshNonce] = useState(0)
-
   const setSplit = useCallback(
     (next: FileNodeSplit | undefined) => {
       updateNodeData(nodeId, { split: next })
@@ -1671,7 +1881,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const acceptDroppedLocalFile = useCallback(async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     const files = Array.from(event.dataTransfer.files ?? [])
-    const localPath = (files[0] as File & { path?: string } | undefined)?.path
+    const localPath = files[0] ? window.api.local.pathForFile(files[0]) : ''
     if (!localPath) return
     if (files.length > 1) {
       setUploadMessage('Drop one file at a time for now.')
@@ -1731,47 +1941,34 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             onDrop={(event) => {
               if ((data.source ?? 'remote') === 'local') void acceptDroppedLocalFile(event)
             }}
-          >
-            <Input
-              value={data.path}
-              placeholder={(data.source ?? 'remote') === 'local' ? '/Users/you/data/phenotype.txt' : '/project/username/data/input.vcf.gz'}
-              onChange={(e) => updateNodeData(nodeId, { path: e.target.value })}
-              className="flex-1"
-            />
-            {(data.source ?? 'remote') === 'local' ? (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="h-8 px-2 shrink-0"
-                title="Pick a local file"
-                onClick={async () => {
-                  const path = await window.api.dialog.openFile()
-                  if (path) updateNodeData(nodeId, { path, source: 'local' })
-                }}
-              >
-                <Folder size={12} className="mr-1" />
-                Browse local…
-              </Button>
-            ) : (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="h-8 px-2 shrink-0"
-                title="Pick a file from the sidebar"
-                onClick={() =>
-                  useUIStore.getState().startFilePick({
-                    requesterLabel: data.label,
-                    accept: data.fileType !== 'any' ? [data.fileType] : undefined,
-                    onResolve: ({ path, fileType }) => updateNodeData(nodeId, { path, fileType, source: 'remote' }),
-                  })
-                }
-              >
-                <Folder size={12} className="mr-1" />
-                Pick…
-              </Button>
-            )}
-          </div>
-          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
+	          >
+	            {(data.source ?? 'remote') === 'local' ? (
+	              <LocalPathField
+	                value={data.path}
+	                placeholder="/Users/you/data/phenotype.txt"
+	                onChange={(value) => updateNodeData(nodeId, { path: value })}
+	                className="flex-1"
+	                mode="file"
+	              />
+	            ) : (
+	              <RemotePathField
+	                value={data.path}
+	                placeholder="/project/username/data/input.vcf.gz"
+	                onChange={(value) => {
+	                  const inferred = inferFileType(value)
+	                  updateNodeData(nodeId, {
+	                    path: value,
+	                    fileType: data.fileType === 'plink' && inferred === 'bed' ? 'plink' : inferred,
+	                  })
+	                }}
+	                className="flex-1"
+	                title={`Choose file for ${data.label}`}
+	                mode="file"
+	                accept={data.fileType !== 'any' ? [data.fileType] : undefined}
+	              />
+	            )}
+	          </div>
+	          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
             <div className="flex items-center gap-2">
               <Button variant="secondary" size="sm" className="h-7 text-[11px]" disabled={uploading} onClick={() => void uploadLocalFile()}>
                 {uploading ? 'Uploading...' : 'Upload to cluster'}
@@ -1974,11 +2171,12 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             )}
             {pattern.kind === 'crossFolder' && (
               <div className="grid grid-cols-1 gap-2">
-                <Input
+                <FolderPickerField
                   label="Parent directory containing the item folders"
                   value={pattern.parentDir}
                   placeholder="/scratch/project/genotypes"
-                  onChange={(e) => setPattern({ ...pattern, parentDir: e.target.value })}
+                  requesterLabel="split parent directory"
+                  onChange={(value) => setPattern({ ...pattern, parentDir: value })}
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <Input
@@ -2047,7 +2245,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             </div>
             <div className="flex flex-col gap-1 max-h-56 overflow-y-auto">
               {split.items.map((row, i) => (
-                <div key={i} className="grid grid-cols-[56px_1fr_22px] gap-1 items-center">
+                <div key={i} className="grid grid-cols-[56px_1fr_22px] gap-1 items-start">
                   <input
                     type="text"
                     value={row.key}
@@ -2056,15 +2254,17 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                     placeholder="1"
                     title="Item key: this becomes the Slurm array item label."
                   />
-                  <input
-                    type="text"
+                  <RemotePathField
                     value={row.path}
-                    onChange={(e) => updateRow(i, { path: e.target.value })}
-                    className="h-7 flex-1 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
+                    onChange={(value) => updateRow(i, { path: value })}
                     placeholder="/path/to/item/file"
-                    title="File path used for this split item."
+                    title={`Choose file for split item ${row.key || i + 1}`}
+                    mode="file"
+                    buttonLabel="Browse"
+                    className="min-w-0"
                   />
                   <button
+                    type="button"
                     onClick={() => removeRow(i)}
                     className="p-1 rounded hover:bg-error/20 text-text-muted hover:text-error transition-colors"
                     title="Remove"
@@ -2240,11 +2440,12 @@ function BraceFormulaEditor({
         Path formula
       </div>
       <div className="grid grid-cols-1 gap-2">
-        <Input
+        <FolderPickerField
           label="Folder/path"
           value={formula.folder}
           placeholder="/scratch/project/genotypes"
-          onChange={(e) => setFormula({ folder: e.target.value })}
+          requesterLabel="split path formula"
+          onChange={(value) => setFormula({ folder: value })}
         />
         <Input
           label="Filename or folder prefix before the changing value"
@@ -2788,6 +2989,15 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
         <p className="text-[10px] text-text-muted mt-1">
           Absolute path or <code className="font-mono">~/…</code>. Applies to this merge only.
         </p>
+        <label className="mt-2 flex items-center gap-2 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={Boolean(data.outputIntermediate?.output)}
+            onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
+            className="accent-accent"
+          />
+          Mark merged output as intermediate
+        </label>
       </div>
 
       <div>
@@ -2866,6 +3076,7 @@ function makeTransformFilter(column: string): TransformFilterRule {
   return {
     id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     column,
+    join: 'and',
     op: 'contains',
     value: '',
   }
@@ -3104,6 +3315,15 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
           />
         </div>
+        <label className="mt-2 flex items-center gap-2 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={Boolean(data.outputIntermediate?.output)}
+            onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
+            className="accent-accent"
+          />
+          Mark filtered output as intermediate
+        </label>
       </div>
 
       <div>

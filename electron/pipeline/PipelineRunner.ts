@@ -65,6 +65,11 @@ interface RunDirs {
   outputRoot: string
 }
 
+interface ExecutionDefaults {
+  arrayChainMode: 'task-level' | 'job-level'
+  fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
+}
+
 export class PipelineRunner {
   private static instance: PipelineRunner | null = null
   static getInstance(): PipelineRunner {
@@ -78,6 +83,7 @@ export class PipelineRunner {
   private loginCancels = new Map<string, () => void>()
   private cancelledLoginNodes = new Set<string>()
   private homeCache = new Map<string, string>()
+  private afterCorrSupport = new Map<string, boolean>()
 
   private constructor() {
     this.loadPersistedRuns()
@@ -104,6 +110,9 @@ export class PipelineRunner {
       )
     }
     const analysisFolder = this.loadAnalysisFolder(connectionId)
+    const executionDefaults = this.loadExecutionDefaults()
+    const arrayChainMode = snapshot.execution?.arrayChainMode ?? executionDefaults.arrayChainMode
+    const fileLifecyclePolicy = snapshot.execution?.fileLifecyclePolicy ?? executionDefaults.fileLifecyclePolicy
 
     // Resolve $HOME to an absolute path. SFTP does not shell-expand `~`, so
     // every path we hand to SftpPool.write must be absolute; SSH exec does
@@ -149,6 +158,8 @@ export class PipelineRunner {
       pipelineId: snapshot.id,
       pipelineName: snapshot.name,
       connectionId,
+      arrayChainMode,
+      fileLifecyclePolicy,
       workDir,
       scriptsDir,
       logsDir,
@@ -561,6 +572,7 @@ export class PipelineRunner {
       }
 
       run.status = 'done'
+      await this.finalizeRunArtifacts(run, snapshot, plans)
       this.emitRunStatus(run.runId, 'done')
     } catch (err) {
       run.status = 'failed'
@@ -597,6 +609,9 @@ export class PipelineRunner {
         }
       }
       run.status = Object.values(run.nodes).some((node) => node.status === 'failed') ? 'failed' : 'done'
+      if (run.status === 'done') {
+        await this.finalizeRunArtifacts(run, snapshot, plans)
+      }
       this.emitRunStatus(run.runId, run.status)
     } catch (err) {
       run.status = 'failed'
@@ -906,15 +921,7 @@ export class PipelineRunner {
     }
 
     const parts: string[] = ['sbatch']
-    const dependencyNodeIds = [...new Set([...(plan.dependsOnArrayNodeIds ?? []), ...(plan.dependsOnNodeIds ?? [])])]
-    if (dependencyNodeIds.length > 0) {
-      const depIds: string[] = []
-      for (const upId of dependencyNodeIds) {
-        const up = run.nodes[upId]
-        if (up?.jobId) depIds.push(up.jobId)
-      }
-      if (depIds.length > 0) parts.push(`--dependency=afterok:${depIds.join(':')}`)
-    }
+    parts.push(...await this.buildDependencyArgs(run, plan))
     parts.push(shellQuote(scriptPath))
 
     const { stdout, stderr, exitCode } = await this.ssh.exec(run.connectionId, parts.join(' '))
@@ -947,7 +954,7 @@ export class PipelineRunner {
     })
     this.emitNodeStatus(run.runId, node.id, 'queued', jobId)
 
-    await new Promise<void>((resolve) => {
+    const outcome = await new Promise<any>((resolve) => {
       // Cancellers for the log tails — populated in onStart, called in onFinish.
       let cancelTailOut: (() => void) | null = null
       let cancelTailErr: (() => void) | null = null
@@ -983,24 +990,222 @@ export class PipelineRunner {
         onFinish: (outcome) => {
           cancelTailOut?.()
           cancelTailErr?.()
-          ns.finishedAt = Date.now()
-          if (outcome.kind === 'done') {
-            ns.status = 'done'
-            ns.exitCode = outcome.exitCode
-            this.emitNodeStatus(run.runId, node.id, 'done', jobId)
-          } else if (outcome.kind === 'cancelled') {
-            ns.status = 'cancelled'
-            this.emitNodeStatus(run.runId, node.id, 'cancelled', jobId)
-          } else {
-            ns.status = 'failed'
-            ns.exitCode = outcome.exitCode
-            ns.error = outcome.reason
-            this.emitNodeStatus(run.runId, node.id, 'failed', jobId, outcome.reason)
-          }
-          resolve()
+          resolve(outcome)
         },
       })
     })
+    ns.finishedAt = Date.now()
+    if (outcome.kind === 'done' && plan.implicitMerges && Object.keys(plan.implicitMerges).length > 0) {
+      try {
+        await this.runImplicitMerges(run, node, plan, connectionDefaults, nodeSlugs)
+        ns.status = 'done'
+        ns.exitCode = outcome.exitCode
+        this.emitNodeStatus(run.runId, node.id, 'done', ns.jobId)
+      } catch (err) {
+        ns.status = 'failed'
+        ns.error = err instanceof Error ? err.message : String(err)
+        this.emitNodeStatus(run.runId, node.id, 'failed', ns.jobId, ns.error)
+      }
+      return
+    }
+    if (outcome.kind === 'done') {
+      ns.status = 'done'
+      ns.exitCode = outcome.exitCode
+      this.emitNodeStatus(run.runId, node.id, 'done', jobId)
+    } else if (outcome.kind === 'cancelled') {
+      ns.status = 'cancelled'
+      this.emitNodeStatus(run.runId, node.id, 'cancelled', jobId)
+    } else {
+      ns.status = 'failed'
+      ns.exitCode = outcome.exitCode
+      ns.error = outcome.reason
+      this.emitNodeStatus(run.runId, node.id, 'failed', jobId, outcome.reason)
+    }
+  }
+
+  private async buildDependencyArgs(run: RunState, plan: AxisPlan): Promise<string[]> {
+    const args: string[] = []
+    const arrayDepIds = [...new Set((plan.dependsOnArrayNodeIds ?? []).flatMap((upId) => run.nodes[upId]?.jobId ? [run.nodes[upId].jobId!] : []))]
+    const directDepIds = [...new Set((plan.dependsOnNodeIds ?? []).flatMap((upId) => run.nodes[upId]?.jobId ? [run.nodes[upId].jobId!] : []))]
+    const taskLevel =
+      run.arrayChainMode === 'task-level' &&
+      plan.mode === 'array' &&
+      arrayDepIds.length > 0 &&
+      await this.supportsAfterCorr(run.connectionId)
+
+    if (taskLevel) {
+      args.push(`--dependency=aftercorr:${arrayDepIds.join(':')}`)
+    } else if (arrayDepIds.length > 0) {
+      directDepIds.push(...arrayDepIds)
+    }
+
+    const deduped = [...new Set(directDepIds)]
+    if (deduped.length > 0) {
+      args.push(`--dependency=afterok:${deduped.join(':')}`)
+    }
+    return args
+  }
+
+  private async supportsAfterCorr(connectionId: string): Promise<boolean> {
+    if (this.afterCorrSupport.has(connectionId)) return this.afterCorrSupport.get(connectionId) ?? false
+    try {
+      const result = await this.ssh.exec(connectionId, `bash -lc ${shellQuote('sbatch --help 2>/dev/null | grep -q aftercorr')}`)
+      const supported = result.exitCode === 0
+      this.afterCorrSupport.set(connectionId, supported)
+      return supported
+    } catch {
+      this.afterCorrSupport.set(connectionId, false)
+      return false
+    }
+  }
+
+  private async runImplicitMerges(
+    run: RunState,
+    node: PipelineSnapshot['nodes'][number],
+    plan: AxisPlan,
+    connectionDefaults: ConnectionDefaults,
+    nodeSlugs: Map<string, string>,
+  ): Promise<void> {
+    const merges = Object.entries(plan.implicitMerges ?? {})
+    if (merges.length === 0) return
+    const slug = nodeSlugs.get(node.id) ?? node.id
+    const ns = run.nodes[node.id]
+    const logDir = run.logsDir ?? `${run.workDir}/logs`
+    let dependencyJobId = ns.jobId
+
+    for (const [portId, merge] of merges) {
+      const mergeSlug = `${slug}-${portId}-auto-merge`
+      const scriptPath = `${run.scriptsDir ?? `${run.workDir}/scripts`}/${mergeSlug}.sbatch`
+      const outputDir = pathDirname(merge.outputPath) || (run.outputRoot ?? `${run.workDir}/outputs`)
+      const gen = generateMergeScript({
+        nodeId: `${node.id}.${portId}.merge`,
+        nodeSlug: mergeSlug,
+        mergeData: {
+          label: `${slug} ${portId} auto merge`,
+          strategy: merge.strategy,
+          status: 'idle',
+        },
+        resolvedInputs: merge.input,
+        upstreamFileType: merge.upstreamFileType,
+        outputPath: merge.outputPath,
+        outputDir,
+        logDir,
+        connectionDefaults,
+      })
+      await this.sftp.write(run.connectionId, scriptPath, gen.script)
+      const cmd = ['sbatch']
+      if (dependencyJobId) cmd.push(`--dependency=afterok:${dependencyJobId}`)
+      cmd.push(shellQuote(scriptPath))
+      const result = await this.ssh.exec(run.connectionId, cmd.join(' '))
+      if (result.exitCode !== 0) {
+        throw new Error((result.stderr || result.stdout || `Auto-merge submission failed for ${portId}`).trim())
+      }
+      const match = result.stdout.match(/Submitted batch job (\d+)/)
+      if (!match) {
+        throw new Error(`Could not parse auto-merge sbatch output for ${portId}: ${result.stdout.trim()}`)
+      }
+      const mergeJobId = match[1]
+      dependencyJobId = mergeJobId
+      ns.jobId = mergeJobId
+      ns.scriptPath = scriptPath
+      ns.stdoutPath = `${logDir}/${mergeSlug}-${mergeJobId}.out`
+      ns.stderrPath = `${logDir}/${mergeSlug}-${mergeJobId}.err`
+      this.emitNodeStatus(run.runId, node.id, 'running', mergeJobId)
+
+      await new Promise<void>((resolve, reject) => {
+        this.tracker.watch({
+          connectionId: run.connectionId,
+          jobId: mergeJobId,
+          isArray: false,
+          onStart: () => {
+            ns.startedAt = Date.now()
+          },
+          onFinish: (outcome) => {
+            if (outcome.kind === 'done') {
+              resolve()
+              return
+            }
+            reject(new Error(outcome.kind === 'cancelled' ? 'Auto-merge job cancelled' : outcome.reason || 'Auto-merge failed'))
+          },
+        })
+      })
+    }
+  }
+
+  private async finalizeRunArtifacts(
+    run: RunState,
+    snapshot: PipelineSnapshot,
+    plans: Map<string, AxisPlan>,
+  ): Promise<void> {
+    const manifest = this.collectIntermediatePaths(snapshot, plans)
+    const manifestPath = `${run.workDir}/intermediates.json`
+    try {
+      await this.sftp.write(run.connectionId, manifestPath, JSON.stringify({
+        generatedAt: Date.now(),
+        policy: run.fileLifecyclePolicy ?? 'keep-all',
+        paths: manifest,
+      }, null, 2))
+    } catch (err) {
+      console.error('[PipelineRunner] failed to write intermediate manifest:', err)
+    }
+
+    if ((run.fileLifecyclePolicy ?? 'keep-all') === 'keep-all') return
+    for (const path of manifest) {
+      try {
+        await this.sftp.remove(run.connectionId, path)
+      } catch {
+        // Best effort; some tools emit sidecars or already-cleaned files.
+      }
+    }
+  }
+
+  private collectIntermediatePaths(snapshot: PipelineSnapshot, plans: Map<string, AxisPlan>): string[] {
+    const seen = new Set<string>()
+    const addValuePaths = (value: AxisPlan['outputs'][string] | undefined) => {
+      if (!value) return
+      if (value.kind === 'single') seen.add(value.path)
+      else for (const path of value.paths) seen.add(path)
+    }
+
+    for (const node of snapshot.nodes) {
+      const plan = plans.get(node.id)
+      if (!plan || (node.type !== 'tool' && node.type !== 'transform' && node.type !== 'merge')) continue
+
+      if (node.type === 'tool') {
+        const data = node.data as ToolNodeData
+        const tool = getTool(data.toolId)
+        if (!tool) continue
+        for (const port of tool.outputs) {
+          const flagged = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
+          if (!flagged) continue
+          addValuePaths(plan.outputs[port.id])
+          const implicit = plan.implicitMerges?.[port.id]
+          if (implicit) {
+            for (const path of implicit.input.paths) seen.add(path)
+          }
+        }
+        continue
+      }
+
+      if (node.type === 'transform') {
+        const data = node.data as TransformNodeData
+        if (data.outputIntermediate?.output) {
+          addValuePaths(plan.outputs.output)
+          const implicit = plan.implicitMerges?.output
+          if (implicit) {
+            for (const path of implicit.input.paths) seen.add(path)
+          }
+        }
+        continue
+      }
+
+      const data = node.data as MergeNodeData
+      if (data.outputIntermediate?.output) {
+        addValuePaths(plan.outputs.output)
+      }
+    }
+
+    return [...seen]
   }
 
   private async runLoginNode(
@@ -1184,6 +1389,27 @@ export class PipelineRunner {
         logsSubfolder: 'logs',
         createSubfolders: true,
         runFolderTemplate: 'runs/{pipelineSlug}-{timestamp}',
+      }
+    }
+  }
+
+  private loadExecutionDefaults(): ExecutionDefaults {
+    try {
+      const store = getSettingsStore() as unknown as { get: (k: string) => unknown }
+      const arrayChainMode = store.get('settings:execution:arrayChainMode')
+      const fileLifecyclePolicy = store.get('settings:fileLifecyclePolicy')
+      return {
+        arrayChainMode: arrayChainMode === 'job-level' ? 'job-level' : 'task-level',
+        fileLifecyclePolicy:
+          fileLifecyclePolicy === 'keep-outputs-only' || fileLifecyclePolicy === 'delete-intermediates-on-success'
+            ? fileLifecyclePolicy
+            : 'keep-all',
+      }
+    } catch (err) {
+      console.error('[PipelineRunner] loadExecutionDefaults failed:', err)
+      return {
+        arrayChainMode: 'task-level',
+        fileLifecyclePolicy: 'keep-all',
       }
     }
   }

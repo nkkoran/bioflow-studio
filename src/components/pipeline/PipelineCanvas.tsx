@@ -91,6 +91,7 @@ function CanvasInner() {
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
   const [dropMessage, setDropMessage] = useState<string | null>(null)
+  const [dropBusy, setDropBusy] = useState(false)
   const displayEdges = useMemo(() => {
     const snapshot = {
       version: 1 as const,
@@ -114,10 +115,21 @@ function CanvasInner() {
       groups,
     }
     const chips = edgeAxisChips(snapshot)
+    const fanOutGroups = new Map<string, string[]>()
+    for (const edge of edges) {
+      const key = `${edge.source}:${edge.sourceHandle ?? 'output'}`
+      fanOutGroups.set(key, [...(fanOutGroups.get(key) ?? []), edge.id])
+    }
     return edges.map((edge) => ({
       ...edge,
       type: 'axed',
-      data: { ...(edge.data ?? {}), axisChip: chips[edge.id], label: chips[edge.id]?.label ?? '' },
+      data: {
+        ...(edge.data ?? {}),
+        axisChip: chips[edge.id],
+        label: chips[edge.id]?.label ?? '',
+        fanOutIndex: fanOutGroups.get(`${edge.source}:${edge.sourceHandle ?? 'output'}`)?.indexOf(edge.id) ?? 0,
+        fanOutTotal: fanOutGroups.get(`${edge.source}:${edge.sourceHandle ?? 'output'}`)?.length ?? 1,
+      },
     }))
   }, [edges, nodes, groups])
   const hiddenNodeIds = useMemo(() => {
@@ -150,6 +162,102 @@ function CanvasInner() {
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
   }, [])
+
+  const handleDroppedPath = useCallback(async (
+    rawPath: string,
+    position: { x: number; y: number },
+    localDrop: boolean,
+  ) => {
+    setDropBusy(true)
+    const fileType = inferFileType(rawPath) as FileType
+    const label = pathBasename(rawPath)
+    let resolvedPath = rawPath
+    let source: 'local' | 'remote' = localDrop ? 'local' : 'remote'
+    try {
+      setDropMessage(localDrop ? `Adding ${label}…` : 'Adding file…')
+      if (localDrop && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
+        const uploadNow = window.confirm(`Upload ${label} to the active cluster connection now?`)
+        if (uploadNow) {
+          setDropMessage(`Uploading ${label} to the cluster…`)
+          const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
+          const uploadDir = `${home}/${uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
+          const remotePath = `${uploadDir}/${label}`
+          await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
+          await window.api.sftp.upload(activeConnectionId, rawPath, remotePath)
+          resolvedPath = remotePath
+          source = 'remote'
+        }
+      }
+      const target = findDropTargetTool(nodes, position)
+      if (!target) {
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        setDropMessage(source === 'remote' && localDrop ? `Uploaded ${label} and added it to the canvas.` : `Added ${label} to the canvas.`)
+        return
+      }
+
+      const tool = getTool((target.data as any).toolId)
+      if (!tool || tool.inputs.length === 0) {
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        setDropMessage(`Added ${label} to the canvas.`)
+        return
+      }
+
+      const occupied = new Set<string>(
+        edges.filter((edge) => edge.target === target.id && edge.targetHandle)
+          .map((edge) => edge.targetHandle as string),
+      )
+
+      const attach = (portId: string) => {
+        const fileId = addFileNode(
+          { x: target.position.x - 220, y: target.position.y },
+          { isInput: true, label, path: resolvedPath, fileType, source },
+        )
+        onConnect({
+          source: fileId,
+          sourceHandle: 'output',
+          target: target.id,
+          targetHandle: portId,
+        })
+        setDropMessage(`Attached ${label} to ${target.data.label ?? 'the tool'}.`)
+      }
+
+      const compatible = tool.inputs.filter((candidate) => {
+        if (!areTypesCompatible(fileType, candidate.fileType)) return false
+        if (candidate.multi) return true
+        return !occupied.has(candidate.id)
+      })
+
+      if (compatible.length === 0) {
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        setDropMessage(`Added ${label} to the canvas.`)
+        return
+      }
+
+      if (compatible.length === 1) {
+        attach(compatible[0].id)
+        return
+      }
+
+      setDropMessage(`Choose which input should receive ${label}.`)
+      setPortPicker({
+        x: wrapperRef.current?.getBoundingClientRect().left ?? position.x,
+        y: wrapperRef.current?.getBoundingClientRect().top ?? position.y,
+        ports: tool.inputs,
+        droppedType: fileType,
+        occupiedPortIds: occupied,
+        onPick: (portId) => {
+          setPortPicker(null)
+          attach(portId)
+        },
+        onDismiss: () => setPortPicker(null),
+      })
+    } catch (err) {
+      setDropMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDropBusy(false)
+      window.setTimeout(() => setDropMessage(null), 3000)
+    }
+  }, [activeConnectionId, addFileNode, edges, nodes, onConnect, uploadsSubfolder])
 
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
@@ -188,89 +296,7 @@ function CanvasInner() {
       }
 
       if (filePath || droppedLocalPath) {
-        const rawPath = filePath || droppedLocalPath
-        const localDrop = Boolean(droppedLocalPath)
-        const fileType = inferFileType(rawPath) as FileType
-        const label = pathBasename(rawPath)
-        let resolvedPath = rawPath
-        let source: 'local' | 'remote' = localDrop ? 'local' : 'remote'
-        if (localDrop && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
-          const uploadNow = window.confirm(`Upload ${label} to the active cluster connection now?`)
-          if (uploadNow) {
-            try {
-              const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
-              const uploadDir = `${home}/${uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
-              const remotePath = `${uploadDir}/${label}`
-              await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
-              await window.api.sftp.upload(activeConnectionId, rawPath, remotePath)
-              resolvedPath = remotePath
-              source = 'remote'
-              setDropMessage(`Uploaded ${label} to ${remotePath}`)
-              window.setTimeout(() => setDropMessage(null), 3000)
-            } catch (err) {
-              setDropMessage(err instanceof Error ? err.message : String(err))
-              window.setTimeout(() => setDropMessage(null), 3000)
-            }
-          }
-        }
-        const target = findDropTargetTool(nodes, position)
-        if (!target) {
-          addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
-          return
-        }
-
-        const tool = getTool((target.data as any).toolId)
-        if (!tool || tool.inputs.length === 0) {
-          addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
-          return
-        }
-
-        const occupied = new Set<string>(
-          edges.filter((edge) => edge.target === target.id && edge.targetHandle)
-            .map((edge) => edge.targetHandle as string),
-        )
-
-        const attach = (portId: string) => {
-          const fileId = addFileNode(
-            { x: target.position.x - 220, y: target.position.y },
-            { isInput: true, label, path: resolvedPath, fileType, source },
-          )
-          onConnect({
-            source: fileId,
-            sourceHandle: 'output',
-            target: target.id,
-            targetHandle: portId,
-          })
-        }
-
-        const compatible = tool.inputs.filter((candidate) => {
-          if (!areTypesCompatible(fileType, candidate.fileType)) return false
-          if (candidate.multi) return true
-          return !occupied.has(candidate.id)
-        })
-
-        if (compatible.length === 0) {
-          addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
-          return
-        }
-
-        if (compatible.length === 1) {
-          attach(compatible[0].id)
-          return
-        }
-
-        setPortPicker({
-          x: event.clientX,
-          y: event.clientY,
-          ports: tool.inputs,
-          droppedType: fileType,
-          occupiedPortIds: occupied,
-          onPick: (portId) => {
-            setPortPicker(null)
-            attach(portId)
-          },
-          onDismiss: () => setPortPicker(null),
-        })
+        await handleDroppedPath(filePath || droppedLocalPath, position, Boolean(droppedLocalPath))
         return
       }
 
@@ -293,8 +319,19 @@ function CanvasInner() {
         addToolNode(payload, position)
       }
     },
-    [activeConnectionId, uploadsSubfolder, screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges, onConnect],
+    [screenToFlowPosition, handleDroppedPath, addToolNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges],
   )
+
+  useEffect(() => {
+    const onGlobalDrop = (event: Event) => {
+      const detail = (event as CustomEvent<{ clientX: number; clientY: number; paths: string[] }>).detail
+      if (!detail?.paths?.[0]) return
+      const position = screenToFlowPosition({ x: detail.clientX, y: detail.clientY })
+      void handleDroppedPath(detail.paths[0], position, true)
+    }
+    window.addEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)
+    return () => window.removeEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)
+  }, [handleDroppedPath, screenToFlowPosition])
 
   /**
    * Validate a proposed connection. Rejects connections where the source
@@ -454,7 +491,10 @@ function CanvasInner() {
       </ReactFlow>
       {dropMessage && (
         <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded border border-accent/40 bg-bg-secondary px-3 py-1 text-xs text-text-primary shadow">
-          {dropMessage}
+          <div className="flex items-center gap-2">
+            {dropBusy && <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />}
+            <span>{dropMessage}</span>
+          </div>
         </div>
       )}
       {portPicker && <PortPickerPopover state={portPicker} />}
@@ -533,7 +573,7 @@ function CanvasInner() {
 
 function readLocalDropPaths(event: React.DragEvent): string[] {
   const files = Array.from(event.dataTransfer.files ?? [])
-    .map((file) => ((file as File & { path?: string }).path ?? ''))
+    .map((file) => window.api.local.pathForFile(file))
     .filter(Boolean)
   return [...new Set(files)]
 }

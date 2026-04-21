@@ -5,11 +5,12 @@
 import { memo, useMemo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { classNames } from '@/lib/utils'
-import { FileText } from 'lucide-react'
+import { FileText, Share2 } from 'lucide-react'
 import type { FileNodeData } from '@/types/pipeline'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { computeFileOutputPreview } from '@/lib/outputPathPreview'
+import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 
 function FileNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as FileNodeData
@@ -45,11 +46,13 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
     })),
     groups,
   }, pathSettings), [id, nodes, edges, groups, pipelineId, pipelineName, pipelineDescription, pathSettings])
+  const fanOutCount = edges.filter((edge) => edge.source === id && (edge.sourceHandle ?? 'output') === 'output').length
+  const wireFileNodeToCompatibleInputs = usePipelineStore((s) => s.wireFileNodeToCompatibleInputs)
 
   return (
     <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg px-3 py-2 min-w-[180px] transition-all',
+        'bg-bg-secondary border-2 rounded-md shadow-lg px-3 py-2 min-w-[180px] max-w-[320px] transition-all',
         selected ? 'border-accent ring-2 ring-accent/30' : 'border-amber-500/40',
       )}
     >
@@ -63,42 +66,56 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
             {nodeData.label}
           </div>
           {isInput && nodeData.path && (
-            <div
-              className="text-[10px] text-text-muted font-mono truncate"
-              title={nodeData.path}
-            >
-              {nodeData.path}
+            <div className="text-[10px] text-text-muted font-mono truncate">
+              <MiddleEllipsis value={nodeData.path} max={40} />
+            </div>
+          )}
+          {isInput && fanOutCount > 1 && (
+            <div className="mt-1 text-[10px] text-accent">
+              Fan-out: {fanOutCount} downstream inputs
             </div>
           )}
           {!isInput && outputLabel && (
-            <div
-              className="text-[10px] text-text-muted font-mono truncate"
-              title={outputFolder || 'Default output folder'}
-            >
-              → {outputLabel}
+            <div className="text-[10px] text-text-muted font-mono truncate" title={outputFolder || 'Default output folder'}>
+              → <MiddleEllipsis value={outputLabel} max={34} />
             </div>
           )}
           {!isInput && outputPreview && (
-            <div className="text-[10px] text-text-muted font-mono truncate" title={outputPreview}>
-              {outputPreview}
+            <div className="text-[10px] text-text-muted font-mono truncate">
+              <MiddleEllipsis value={outputPreview} max={40} />
             </div>
           )}
         </div>
       </div>
 
       {isInput ? (
-        <Handle
-          type="source"
-          position={Position.Right}
-          id="output"
-          style={{
-            right: -8,
-            width: 10,
-            height: 10,
-            background: '#f59e0b',
-            border: '2px solid var(--color-bg-secondary)',
-          }}
-        />
+        <>
+          <button
+            type="button"
+            onClick={() => void wireFileNodeToCompatibleInputs(id)}
+            className="absolute right-3 top-2 rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary"
+            title="Wire this file to all compatible inputs on the canvas"
+          >
+            <Share2 size={12} />
+          </button>
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="output"
+            style={{
+              right: -8,
+              width: 10,
+              height: 10,
+              background: '#f59e0b',
+              border: '2px solid var(--color-bg-secondary)',
+            }}
+          />
+          {fanOutCount > 1 && (
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-medium text-amber-200">
+              {fanOutCount}x
+            </div>
+          )}
+        </>
       ) : (
         <Handle
           type="target"

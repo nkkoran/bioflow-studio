@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
 import { AnnovarSetupWizard } from './AnnovarSetupWizard'
@@ -91,6 +92,31 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 checked={settings.confirmOnLoginNodeRun}
                 onChange={(value) => toggle('settings:confirmOnLoginNodeRun', value)}
               />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-text-secondary text-xs font-medium">Array chain mode</label>
+                  <select
+                    value={settings.arrayChainMode}
+                    onChange={(e) => text('settings:execution:arrayChainMode', e.target.value)}
+                    className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    <option value="task-level">Task-level (`aftercorr` when supported)</option>
+                    <option value="job-level">Job-level (`afterok` only)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-text-secondary text-xs font-medium">File lifecycle</label>
+                  <select
+                    value={settings.fileLifecyclePolicy}
+                    onChange={(e) => text('settings:fileLifecyclePolicy', e.target.value)}
+                    className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    <option value="keep-all">Keep all files</option>
+                    <option value="keep-outputs-only">Delete marked intermediates after success</option>
+                    <option value="delete-intermediates-on-success">Aggressive intermediate cleanup after success</option>
+                  </select>
+                </div>
+              </div>
             </div>
           )}
 
@@ -141,36 +167,46 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
 
           {section === 'Tools' && (
             <div className="flex flex-col gap-3">
-              <Input
+              <RemotePathField
                 label="Tools folder"
                 value={settings.toolsRoot}
                 placeholder="~/bioflow/tools"
-                onChange={(e) => text('settings:toolsRoot', e.target.value)}
+                onChange={(value) => text('settings:toolsRoot', value)}
+                mode="directory"
+                title="Choose tools folder"
               />
               <div className="grid grid-cols-2 gap-2">
-                <Input
+                <RemotePathField
                   label="ANNOVAR scripts folder"
                   value={settings.annovarScriptsPath}
                   placeholder="~/bioflow/tools/annovar"
-                  onChange={(e) => text('settings:annovarScriptsPath', e.target.value)}
+                  onChange={(value) => text('settings:annovarScriptsPath', value)}
+                  mode="directory"
+                  title="Choose ANNOVAR scripts folder"
                 />
-                <Input
+                <RemotePathField
                   label="ANNOVAR humandb folder"
                   value={settings.annovarDbPath}
                   placeholder="~/bioflow/tools/annovar/humandb"
-                  onChange={(e) => text('settings:annovarDbPath', e.target.value)}
+                  onChange={(value) => text('settings:annovarDbPath', value)}
+                  mode="directory"
+                  title="Choose ANNOVAR humandb folder"
                 />
-                <Input
+                <RemotePathField
                   label="VEP executable or folder"
                   value={settings.vepPath}
                   placeholder="vep or ~/bioflow/tools/ensembl-vep/vep"
-                  onChange={(e) => text('settings:vepPath', e.target.value)}
+                  onChange={(value) => text('settings:vepPath', value)}
+                  mode="file"
+                  title="Choose VEP executable or folder"
                 />
-                <Input
+                <RemotePathField
                   label="VEP cache folder"
                   value={settings.vepCachePath}
                   placeholder="~/bioflow/tools/vep/cache"
-                  onChange={(e) => text('settings:vepCachePath', e.target.value)}
+                  onChange={(value) => text('settings:vepCachePath', value)}
+                  mode="directory"
+                  title="Choose VEP cache folder"
                 />
               </div>
               <p className="text-[11px] text-text-muted">
@@ -216,6 +252,14 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               />
               <p className="text-[11px] text-text-muted">
                 Show a warning after connect when the cluster reports a login-node CPU time limit below this value. Use 0 to suppress the warning.
+              </p>
+              <Checkbox
+                label="Use experimental PLINK block-builder inspector"
+                checked={settings.plinkFlagBuilderEnabled}
+                onChange={(value) => toggle('settings:experimental:plinkFlagBuilderEnabled', value)}
+              />
+              <p className="text-[11px] text-text-muted">
+                Keeps the current PLINK inspector available as a fallback while the new block-based authoring flow is still being proven out.
               </p>
             </div>
           )}

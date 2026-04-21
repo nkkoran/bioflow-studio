@@ -24,7 +24,7 @@ export const TOOLS: ToolDef[] = [
       { id: 'covar', label: 'Covariates', description: 'Optional tabular covariates such as age, sex, or PCs; choose columns in the parameters.', fileType: 'tsv' },
     ],
     outputs: [
-      { id: 'output', label: 'Results', description: 'Association result table from PLINK2 --glm, suitable for clumping or downstream review.', fileType: 'tsv' },
+      { id: 'output', label: 'Results', description: 'Association result table from PLINK2 --glm, suitable for clumping or downstream review.', fileType: 'tsv', autoMergeDefault: 'tsv-concat-header', intermediate: true },
     ],
     params: [
       { name: 'glm', flag: '--glm', label: 'GLM output', type: 'select', options: ['hide-covar', 'firth-fallback', 'allow-no-covars', 'omit-ref', 'none'], default: 'hide-covar', required: true },
@@ -63,11 +63,11 @@ export const TOOLS: ToolDef[] = [
     module: 'plink/2.00a3',
     inputs: [
       { id: 'input', label: 'Genotypes', description: 'Reference genotype file set used to estimate LD between candidate variants.', fileType: 'plink', required: true },
-      { id: 'clump', label: 'Summary stats', description: 'GWAS summary statistics table containing variant IDs and p-values for clumping.', fileType: 'tsv', required: true, arrayable: false },
+      { id: 'clump', label: 'Summary stats', description: 'GWAS summary statistics table containing variant IDs and p-values for clumping.', fileType: 'tsv', required: true },
     ],
     outputs: [
-      { id: 'clumped', label: 'Clumped variants', description: 'Clumping report listing the lead SNPs retained after LD pruning.', fileType: 'tsv' },
-      { id: 'ranges', label: 'Extract ranges', description: 'Variant/range list for the independent clumped SNPs; connect this to PLINK2 Score extract ranges.', fileType: 'bed' },
+      { id: 'clumped', label: 'Clumped variants', description: 'Clumping report listing the lead SNPs retained after LD pruning.', fileType: 'tsv', autoMergeDefault: 'tsv-concat-header', intermediate: true },
+      { id: 'ranges', label: 'Extract ranges', description: 'Variant/range list for the independent clumped SNPs; connect this to PLINK2 Score extract ranges.', fileType: 'bed', autoMergeDefault: 'cat', intermediate: true },
     ],
     params: [
       { name: 'clump-p1', flag: '--clump-p1', label: 'Primary p-value', type: 'number', default: 5e-8, step: 1e-8 },
@@ -103,6 +103,32 @@ export const TOOLS: ToolDef[] = [
       { name: 'no-mean-imputation', flag: 'no-mean-imputation', label: 'Disable mean imputation', type: 'boolean', default: false },
     ],
     slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'plink2.pca',
+    name: 'PLINK2 PCA',
+    category: 'gwas',
+    description: 'Principal component analysis for genotype covariates',
+    command: 'plink2',
+    module: 'plink/2.00a3',
+    inputs: [
+      { id: 'input', label: 'Genotypes', description: 'PLINK genotype file set used to compute principal components.', fileType: 'plink', required: true },
+    ],
+    outputs: [
+      { id: 'eigenvec', label: 'Eigenvectors', description: 'Tabular sample-by-PC matrix produced by PLINK2 --pca.', fileType: 'tsv' },
+      { id: 'eigenval', label: 'Eigenvalues', description: 'Tabular eigenvalue summary from the PCA run.', fileType: 'tsv' },
+    ],
+    params: [
+      { name: 'pca', flag: '--pca', label: 'Components', type: 'number', default: 10, min: 1 },
+      { name: 'maf', flag: '--maf', label: 'Min MAF', type: 'number', default: 0.01, min: 0, max: 0.5, step: 0.001 },
+      { name: 'mind', flag: '--mind', label: 'Max missing per sample', type: 'number', default: 0.02, min: 0, max: 1, step: 0.01 },
+      { name: 'geno', flag: '--geno', label: 'Max missing genotype rate', type: 'number', default: 0.02, min: 0, max: 1, step: 0.01 },
+      { name: 'hwe', flag: '--hwe', label: 'HWE p-value', type: 'number', default: 1e-6, step: 1e-6 },
+      { name: 'chr', flag: '--chr', label: 'Chromosome filter', type: 'string', placeholder: '1-22' },
+      { name: 'keep', flag: '--keep', label: 'Keep samples file', type: 'file', placeholder: '/project/.../keep.txt' },
+      { name: 'remove', flag: '--remove', label: 'Remove samples file', type: 'file', placeholder: '/project/.../remove.txt' },
+    ],
+    slurm: { cpus: 4, memoryGB: 16, timeHours: 2 },
   },
   {
     id: 'regenie.step1',
@@ -330,6 +356,17 @@ export const TOOLS: ToolDef[] = [
 
   // ==================== Utility ====================
   {
+    id: 'flow.filterFile',
+    name: 'Filter File',
+    category: 'utility',
+    description: 'Materialize a filtered tabular file once for downstream reuse',
+    command: 'flow.filterFile',
+    inputs: [{ id: 'input', label: 'Tabular input', description: 'Tabular file to filter and project into a reusable artifact.', fileType: 'tsv', required: true }],
+    outputs: [{ id: 'output', label: 'Filtered file', description: 'Filtered tabular file for downstream nodes.', fileType: 'tsv', intermediate: true }],
+    params: [],
+    slurm: { cpus: 1, memoryGB: 4, timeHours: 1 },
+  },
+  {
     id: 'custom.shell',
     name: 'Custom Shell',
     category: 'custom',
@@ -349,6 +386,7 @@ const TOOL_DOCS: Record<string, string> = {
   'plink2.qc': 'https://www.cog-genomics.org/plink/2.0/filter',
   'plink2.clump': 'https://www.cog-genomics.org/plink/2.0/postproc',
   'plink2.score': 'https://www.cog-genomics.org/plink/2.0/score',
+  'plink2.pca': 'https://www.cog-genomics.org/plink/2.0/strat',
   'regenie.step1': 'https://rgcgithub.github.io/regenie/options/',
   'regenie.step2': 'https://rgcgithub.github.io/regenie/options/',
   'bcftools.view': 'https://samtools.github.io/bcftools/bcftools.html#view',
@@ -377,6 +415,7 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   center: 'Center genotype dosages before scoring.',
   'variance-standardize': 'Variance-standardize genotypes before scoring.',
   'no-mean-imputation': 'Disable PLINK2 mean imputation for missing dosages.',
+  pca: 'Number of principal components to calculate.',
   step: 'REGENIE step number.',
   bt: 'Use binary-trait model settings.',
   bsize: 'Number of variants per block.',

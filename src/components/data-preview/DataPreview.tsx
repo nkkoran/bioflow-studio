@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { usePipelineStore } from '@/stores/pipelineStore'
 import type { DelimiterOverride } from '@/stores/dataPreviewStore'
 import { headPreviewFile, readFileBase64, statFile } from '@/stores/fileStore'
 import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
@@ -9,6 +10,7 @@ import { RawTextView } from './RawTextView'
 import { SavedViewsMenu } from './SavedViewsMenu'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
+import { pathBasename, pathDirname } from '@/lib/utils'
 
 export function DataPreview() {
   const {
@@ -31,6 +33,10 @@ export function DataPreview() {
     renameSavedView,
     deleteSavedView,
   } = useDataPreviewStore()
+  const addTransformNode = usePipelineStore((s) => s.addTransformNode)
+  const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const onConnect = usePipelineStore((s) => s.onConnect)
+  const nodes = usePipelineStore((s) => s.nodes)
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
@@ -153,6 +159,43 @@ export function DataPreview() {
   const activeTab = tabs.find((t) => t.id === activeTabId)
   const activeViews = activeTab ? (savedViews[activeTab.filePath] ?? []) : []
   const selectedSavedViewId = activeTab ? activeSavedViewId[activeTab.filePath] : undefined
+  const activeFilters = activeTab ? (filters[activeTab.filePath] ?? []) : []
+
+  const exportFiltered = () => {
+    if (!activeTab || activeFilters.length === 0) return
+    const offset = nodes.length * 16
+    const inputId = addFileNode(
+      { x: 120 + offset, y: 120 + offset },
+      {
+        isInput: true,
+        label: pathBasename(activeTab.filePath) || 'Input file',
+        path: activeTab.filePath,
+        fileType: 'tsv',
+      },
+    )
+    const transformId = addTransformNode(
+      { x: 360 + offset, y: 120 + offset },
+      {
+        label: `${pathBasename(activeTab.filePath)} filtered`,
+        fileType: 'tsv',
+        filters: activeFilters,
+      },
+    )
+    const outputFilename = `${pathBasename(activeTab.filePath).replace(/(\.[^.]+)?$/, '')}.filtered.tsv`
+    const outputId = addFileNode(
+      { x: 620 + offset, y: 120 + offset },
+      {
+        isInput: false,
+        label: `${pathBasename(activeTab.filePath)} filtered`,
+        path: `${pathDirname(activeTab.filePath)}/${outputFilename}`,
+        outputFilename,
+        outputDir: pathDirname(activeTab.filePath),
+        fileType: 'tsv',
+      },
+    )
+    onConnect({ source: inputId, sourceHandle: 'output', target: transformId, targetHandle: 'input' })
+    onConnect({ source: transformId, sourceHandle: 'output', target: outputId, targetHandle: 'input' })
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -251,7 +294,12 @@ export function DataPreview() {
         )}
 
         {activeTab && !activeTab.loading && activeTab.data && activeTab.mode === 'tabular' && activeTab.data.headers.length > 0 && (
-          <DataTable filePath={activeTab.filePath} headers={activeTab.data.headers} rows={activeTab.data.rows} />
+          <DataTable
+            filePath={activeTab.filePath}
+            headers={activeTab.data.headers}
+            rows={activeTab.data.rows}
+            onExportFiltered={exportFiltered}
+          />
         )}
 
         {activeTab && !activeTab.loading && activeTab.mode === 'image' && mediaUrls[activeTab.id] && (

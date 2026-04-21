@@ -8,6 +8,7 @@ import { registerPipelineHandlers } from './pipelineHandlers'
 import { registerSlurmHandlers } from './slurmHandlers'
 import { registerFsHandlers } from './fsHandlers'
 import { registerClusterHandlers } from './clusterHandlers'
+import { registerAnnovarHandlers } from './annovarHandlers'
 
 export function registerAllHandlers(): void {
   registerSshHandlers()
@@ -20,4 +21,5 @@ export function registerAllHandlers(): void {
   registerSlurmHandlers()
   registerFsHandlers()
   registerClusterHandlers()
+  registerAnnovarHandlers()
 }

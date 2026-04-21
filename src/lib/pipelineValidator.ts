@@ -15,6 +15,7 @@ import type {
   TransformNodeData,
 } from '@/types/pipeline'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { blockHasValue, getFlagDef, toolUsesFlagBuilder } from '@/lib/flagRegistry'
 import { connectedInputSchema, toolColumnWarnings, transformInputWarnings, type SchemaCache } from '@/lib/schemaResolver'
 
 export type ValidationSeverity = 'error' | 'warning' | 'info'
@@ -189,7 +190,8 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       // Required inputs
       for (const port of tool.inputs) {
         const edges = inMap.get(port.id)
-        if (port.required && (!edges || edges.length === 0)) {
+        const satisfiesFileBlock = toolUsesFlagBuilder(d.toolId) && blockProvidesInput(d, port.id, Boolean(edges?.length))
+        if (port.required && (!edges || edges.length === 0) && !satisfiesFileBlock) {
           issues.push({
             severity: 'error', nodeId: node.id, portId: port.id,
             code: 'MISSING_INPUT',
@@ -218,6 +220,51 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
                 message: `Edge into "${port.label}" expects ${port.fileType} but receives ${srcType}.`,
               })
             }
+          }
+        }
+      }
+
+      if (toolUsesFlagBuilder(d.toolId) && (d.flagBlocks?.length ?? 0) > 0) {
+        for (const block of d.flagBlocks ?? []) {
+          const def = getFlagDef(d.toolId, block.flagId)
+          if (!def || !block.enabled) continue
+          if (def.requiredValue && !blockHasValue(block.value)) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'FLAG_VALUE_MISSING',
+              message: `Flag "${def.label}" on "${d.label}" needs a value.`,
+              suggestion: 'Fill in the block value or disable the block.',
+            })
+          }
+          for (const requiredFlagId of def.requires ?? []) {
+            const requiredBlock = d.flagBlocks?.find((candidate) => candidate.flagId === requiredFlagId && candidate.enabled)
+            if (!requiredBlock || !blockHasValue(requiredBlock.value)) {
+              issues.push({
+                severity: 'error', nodeId: node.id,
+                code: 'FLAG_REQUIRED',
+                message: `Flag "${def.label}" on "${d.label}" requires "${getFlagDef(d.toolId, requiredFlagId)?.label ?? requiredFlagId}".`,
+                suggestion: 'Enable the required flag block and provide a value.',
+              })
+            }
+          }
+          for (const conflictFlagId of def.conflicts ?? []) {
+            const conflict = d.flagBlocks?.find((candidate) => candidate.flagId === conflictFlagId && candidate.enabled)
+            if (conflict) {
+              issues.push({
+                severity: 'error', nodeId: node.id,
+                code: 'FLAG_CONFLICT',
+                message: `Flag "${def.label}" on "${d.label}" conflicts with "${getFlagDef(d.toolId, conflictFlagId)?.label ?? conflictFlagId}".`,
+                suggestion: 'Disable one of the conflicting flag blocks.',
+              })
+            }
+          }
+          if (def.kind === 'fileInput' && !blockHasFileSource(block, Boolean(inMap.get(def.sourcePortId ?? 'input')?.length))) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'FLAG_VALUE_MISSING',
+              message: `Flag "${def.label}" on "${d.label}" does not have a connected or typed file source.`,
+              suggestion: 'Connect an upstream file or enter a path in the block.',
+            })
           }
         }
       }
@@ -315,6 +362,17 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
 
       // Orphan outputs — warning
       for (const port of tool.outputs) {
+        const mergeConfig = d.outputMerge?.[port.id]
+        const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
+        const mergeStrategy = mergeConfig?.strategy ?? port.autoMergeDefault
+        if (autoMergeEnabled && !mergeStrategy) {
+          issues.push({
+            severity: 'error', nodeId: node.id, portId: port.id,
+            code: 'AUTO_MERGE_STRATEGY_MISSING',
+            message: `Output "${port.label}" on "${d.label}" is set to auto-merge but no merge strategy is defined.`,
+            suggestion: 'Pick a merge strategy or switch the output back to fan-out.',
+          })
+        }
         if (!hasOutgoing.has(`${node.id}:${port.id}`)) {
           issues.push({
             severity: 'warning', nodeId: node.id, portId: port.id,
@@ -349,35 +407,13 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           })
           .filter(Boolean) as string[]
         const uniqueTypes = new Set(fileTypes.filter((type) => type !== 'any'))
-        const mode = d.convergeMode ?? 'axed-fan-in'
-        if (mode === 'axed-fan-in') {
-          const axes = new Set(edges.map((edge) => axisForNode(snapshot, edge.source)).filter(Boolean))
-          if (axes.size > 1 || axes.has('__mixed__')) {
-            issues.push({
-              severity: 'error', nodeId: node.id,
-              code: 'AXIS_COLLISION',
-              message: `Merge "${d.label}" receives branches with different split axes.`,
-              suggestion: 'Use Parallel branches mode for independent branches, or align the split axis first.',
-            })
-          }
-        } else {
-          if (uniqueTypes.size > 1) {
-            issues.push({
-              severity: 'warning', nodeId: node.id,
-              code: 'BRANCH_MERGE_SCHEMA_MISMATCH',
-              message: `Parallel merge "${d.label}" receives different file types: ${[...uniqueTypes].join(', ')}.`,
-              suggestion: 'Choose a merge strategy that can safely combine these outputs.',
-            })
-          }
-          const strategy = typeof d.strategy === 'string' ? d.strategy as MergeNodeData['strategy'] : 'auto'
-          if (!mergeStrategyCompatible(strategy, fileTypes[0] ?? 'any')) {
-            issues.push({
-              severity: 'error', nodeId: node.id,
-              code: 'PARALLEL_STRATEGY_INCOMPATIBLE',
-              message: `Strategy "${d.strategy}" is not compatible with ${fileTypes[0] ?? 'unknown'} branch outputs.`,
-              suggestion: 'Use Auto or a strategy that matches the incoming output type.',
-            })
-          }
+        if (uniqueTypes.size > 1) {
+          issues.push({
+            severity: 'warning', nodeId: node.id,
+            code: 'TRANSFORM_MIXED_INPUT_TYPES',
+            message: `Transform "${d.label}" receives multiple input file types: ${[...uniqueTypes].join(', ')}.`,
+            suggestion: 'Transforms work best on one consistent tabular schema; align upstream outputs if this looks accidental.',
+          })
         }
       }
       if (!hasOutgoing.has(`${node.id}:output`)) {
@@ -587,6 +623,21 @@ function mergeStrategyCompatible(strategy: MergeNodeData['strategy'], fileType: 
   if (strategy === 'bcftools-concat') return fileType === 'vcf' || fileType === 'bcf'
   if (strategy === 'plink-pmerge-list') return fileType === 'plink' || fileType === 'pgen'
   return true
+}
+
+function blockProvidesInput(data: ToolNodeData, portId: string, hasConnectedEdge: boolean): boolean {
+  const block = data.flagBlocks?.find((candidate) => {
+    const def = getFlagDef(data.toolId, candidate.flagId)
+    return def?.kind === 'fileInput' && def.sourcePortId === portId && candidate.enabled
+  })
+  if (!block) return false
+  return blockHasFileSource(block, hasConnectedEdge)
+}
+
+function blockHasFileSource(block: NonNullable<ToolNodeData['flagBlocks']>[number], hasConnectedEdge: boolean): boolean {
+  const value = block.value as { kind?: string; value?: string } | undefined
+  if (value?.kind === 'upstream-file') return hasConnectedEdge
+  return blockHasValue(block.value)
 }
 
 /** Filter a validation result down to issues attached to one node. */

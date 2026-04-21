@@ -26,6 +26,9 @@ export interface AppSettings {
   notifyOnRunFail: boolean
   notifySoundEnabled: boolean
   clusterLoginPolicyWarnSeconds: number
+  plinkFlagBuilderEnabled: boolean
+  arrayChainMode: 'task-level' | 'job-level'
+  fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -52,6 +55,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notifyOnRunFail: true,
   notifySoundEnabled: false,
   clusterLoginPolicyWarnSeconds: 600,
+  plinkFlagBuilderEnabled: false,
+  arrayChainMode: 'task-level',
+  fileLifecyclePolicy: 'keep-all',
 }
 
 interface SettingsState {
@@ -95,6 +101,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       notifyOnRunFail: await readSetting('settings:notifyOnRunFail', DEFAULT_SETTINGS.notifyOnRunFail),
       notifySoundEnabled: await readSetting('settings:notifySoundEnabled', DEFAULT_SETTINGS.notifySoundEnabled),
       clusterLoginPolicyWarnSeconds: await readSetting('settings:cluster:loginPolicyWarnSeconds', DEFAULT_SETTINGS.clusterLoginPolicyWarnSeconds),
+      plinkFlagBuilderEnabled: await readSetting('settings:experimental:plinkFlagBuilderEnabled', DEFAULT_SETTINGS.plinkFlagBuilderEnabled),
+      arrayChainMode: await readSetting('settings:execution:arrayChainMode', DEFAULT_SETTINGS.arrayChainMode),
+      fileLifecyclePolicy: await readSetting('settings:fileLifecyclePolicy', DEFAULT_SETTINGS.fileLifecyclePolicy),
     }
     set({ settings, loaded: true })
   },
@@ -131,6 +140,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           : DEFAULT_SETTINGS.clusterLoginPolicyWarnSeconds
         break
       }
+      case 'settings:experimental:plinkFlagBuilderEnabled':
+        next.plinkFlagBuilderEnabled = Boolean(value)
+        break
+      case 'settings:execution:arrayChainMode':
+        next.arrayChainMode = value === 'job-level' ? 'job-level' : 'task-level'
+        break
+      case 'settings:fileLifecyclePolicy':
+        next.fileLifecyclePolicy =
+          value === 'keep-outputs-only' || value === 'delete-intermediates-on-success'
+            ? value
+            : 'keep-all'
+        break
     }
     set({ settings: next, loaded: true })
   },

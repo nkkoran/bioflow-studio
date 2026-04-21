@@ -41,12 +41,54 @@ export interface ToolParam {
   columnMulti?: boolean
 }
 
+export type ValueSourceKind =
+  | 'literal'
+  | 'upstream-column'
+  | 'upstream-file'
+  | 'path'
+  | 'local-path'
+
+export interface ValueSource {
+  kind: ValueSourceKind
+  value?: string
+  portId?: string
+}
+
+export interface ToolFlagDef {
+  id: string
+  flag: string
+  label: string
+  group: 'Input' | 'Model' | 'Filters' | 'Output' | 'Resources' | 'Advanced'
+  kind: 'toggle' | 'value' | 'columnRef' | 'fileInput' | 'list' | 'enum' | 'raw'
+  description?: string
+  docUrl?: string
+  requires?: string[]
+  conflicts?: string[]
+  defaultEnabled?: boolean
+  defaultValue?: unknown
+  options?: string[]
+  placeholder?: string
+  sourcePortId?: string
+  multiValue?: boolean
+  requiredValue?: boolean
+  paramName?: string
+}
+
+export interface ToolFlagBlock {
+  id: string
+  flagId: string
+  value?: unknown
+  enabled: boolean
+}
+
 /** Input/output port on a tool. */
 export interface ToolPort {
   id: string                // unique within node (e.g., "input", "output")
   label: string
   description?: string      // plain-language explanation shown in the inspector
   fileType: FileType
+  autoMergeDefault?: MergeStrategy
+  intermediate?: boolean
   required?: boolean
   multi?: boolean           // accepts multiple files
   /**
@@ -107,6 +149,9 @@ export interface ToolNodeData {
   toolId: string                               // references ToolDef.id
   label: string                                // user-editable display label
   paramValues: Record<string, unknown>         // name -> value
+  flagBlocks?: ToolFlagBlock[]
+  outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
+  outputIntermediate?: Record<string, boolean>
   /** Optional module name to load instead of the registry default. */
   moduleOverride?: string
   slurmOverride?: {
@@ -200,6 +245,7 @@ export interface MergeNodeData {
   label: string
   strategy: MergeStrategy
   convergeMode?: 'axed-fan-in' | 'parallel-branches'
+  outputIntermediate?: Record<string, boolean>
   /** See ToolNodeData.outputDirOverride. */
   outputDirOverride?: string
   slurmOverride?: {
@@ -228,6 +274,7 @@ export type TransformFilterOp =
 export interface TransformFilterRule {
   id: string
   column: string
+  join?: 'and' | 'or'
   op: TransformFilterOp
   value?: string
 }
@@ -243,6 +290,8 @@ export interface TransformNodeData {
   selectedColumns?: string[]
   filters?: TransformFilterRule[]
   renames?: TransformRenameRule[]
+  outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
+  outputIntermediate?: Record<string, boolean>
   /** See ToolNodeData.outputDirOverride. */
   outputDirOverride?: string
   slurmOverride?: {
@@ -272,6 +321,10 @@ export interface PipelineSnapshot {
   id: string
   name: string
   description?: string
+  execution?: {
+    arrayChainMode?: 'task-level' | 'job-level'
+    fileLifecyclePolicy?: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
+  }
   createdAt: number
   updatedAt: number
   nodes: Array<{
@@ -323,6 +376,8 @@ export interface RunState {
   /** Human-readable pipeline name captured at submit time; survives rename. */
   pipelineName?: string
   connectionId: string
+  arrayChainMode?: 'task-level' | 'job-level'
+  fileLifecyclePolicy?: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
   workDir: string
   scriptsDir?: string
   logsDir?: string

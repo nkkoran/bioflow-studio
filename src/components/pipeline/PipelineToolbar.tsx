@@ -8,7 +8,7 @@
  * shown (fix required). If there are only warnings the modal offers "Run
  * anyway". If everything is clean the run starts immediately.
  */
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -24,7 +24,7 @@ import type { DryRunScript, PipelineSnapshot } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import { Dialog } from '@/components/ui/Dialog'
-import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
+import { savePipelineSnapshot, savePipelineSnapshotAs } from '@/lib/pipelinePersistence'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -130,6 +130,10 @@ function ModalIssueRow({ issue, color }: { issue: ValidationIssue; color: string
 export function PipelineToolbar() {
   const pipelineName = usePipelineStore((s) => s.pipelineName)
   const setPipelineName = usePipelineStore((s) => s.setPipelineName)
+  const arrayChainMode = usePipelineStore((s) => s.arrayChainMode)
+  const fileLifecyclePolicy = usePipelineStore((s) => s.fileLifecyclePolicy)
+  const setArrayChainMode = usePipelineStore((s) => s.setArrayChainMode)
+  const setFileLifecyclePolicy = usePipelineStore((s) => s.setFileLifecyclePolicy)
   const dirty = usePipelineStore((s) => s.dirty)
   const past = usePipelineStore((s) => s.past)
   const future = usePipelineStore((s) => s.future)
@@ -181,6 +185,25 @@ export function PipelineToolbar() {
       flashMessage('Save failed')
     }
   }, [exportSnapshot, flashMessage, markSaved])
+
+  const handleSaveAs = useCallback(async () => {
+    const snapshot = exportSnapshot()
+    const nextName = window.prompt('Save pipeline as:', `${snapshot.name} copy`)
+    if (!nextName?.trim()) return
+    try {
+      const next = {
+        ...snapshot,
+        createdAt: snapshot.createdAt,
+      }
+      const created = await savePipelineSnapshotAs(next, nextName.trim())
+      loadSnapshot(created)
+      markSaved()
+      flashMessage('Saved as new pipeline')
+    } catch (err) {
+      console.error('Save as failed:', err)
+      flashMessage('Save as failed', true)
+    }
+  }, [exportSnapshot, flashMessage, loadSnapshot, markSaved])
 
   const handleOpen = useCallback(async () => {
     if (dirty && !confirm('Discard unsaved changes and open a pipeline?')) return
@@ -363,6 +386,19 @@ export function PipelineToolbar() {
     }
   }, [activeRunId, activeRunIsCancellable, cancelRun, flashMessage])
 
+  useEffect(() => {
+    const onMenuCommand = (event: Event) => {
+      const detail = (event as CustomEvent<{ command: 'new' | 'open' | 'save' | 'saveAs' }>).detail
+      if (!detail) return
+      if (detail.command === 'new') void handleNew()
+      if (detail.command === 'open') void handleOpen()
+      if (detail.command === 'save') void handleSave()
+      if (detail.command === 'saveAs') void handleSaveAs()
+    }
+    window.addEventListener('bioflow:menu-command', onMenuCommand as EventListener)
+    return () => window.removeEventListener('bioflow:menu-command', onMenuCommand as EventListener)
+  }, [handleNew, handleOpen, handleSave, handleSaveAs])
+
   return (
     <>
       <div className="h-10 px-3 bg-bg-secondary border-b border-border flex items-center gap-2 shrink-0">
@@ -388,6 +424,33 @@ export function PipelineToolbar() {
           )}
           {dirty && <span className="w-1.5 h-1.5 rounded-full bg-accent" title="Unsaved changes" />}
           <span className="text-[10px] text-text-muted">{nodes.length} node{nodes.length === 1 ? '' : 's'}</span>
+          <div className="hidden xl:flex items-center gap-1 text-[10px] text-text-muted">
+            <span>Chain</span>
+            <select
+              value={arrayChainMode}
+              onChange={(e) => setArrayChainMode(e.target.value === 'job-level' ? 'job-level' : 'task-level')}
+              className="h-6 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
+              title="Per-pipeline array dependency mode"
+            >
+              <option value="task-level">Task</option>
+              <option value="job-level">Job</option>
+            </select>
+            <span>Files</span>
+            <select
+              value={fileLifecyclePolicy}
+              onChange={(e) => setFileLifecyclePolicy(
+                e.target.value === 'keep-outputs-only' || e.target.value === 'delete-intermediates-on-success'
+                  ? e.target.value
+                  : 'keep-all',
+              )}
+              className="h-6 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
+              title="Per-pipeline intermediate file policy"
+            >
+              <option value="keep-all">Keep all</option>
+              <option value="keep-outputs-only">Keep outputs</option>
+              <option value="delete-intermediates-on-success">Clean up</option>
+            </select>
+          </div>
           <ValidationBadge />
         </div>
 

@@ -1,5 +1,6 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern } from '../../src/types/pipeline'
+import type { AnnovarInstallRequest, AnnovarInstallProgress, AnnovarStatusResult } from '../../src/types/annotation'
 
 // Types matching src/types/
 export interface ConnectionConfig {
@@ -11,6 +12,9 @@ export interface ConnectionConfig {
   privateKeyPath?: string
   passphrase?: string
   password?: string
+  rememberPassword?: boolean
+  generatedKeyPath?: string
+  setupNote?: string
   defaultDirectory?: string
 }
 
@@ -58,6 +62,25 @@ export interface FileStat {
   permissions: string
 }
 
+export interface SshKeySetupRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  comment?: string
+  overwrite?: boolean
+  addToAgent?: boolean
+  addToKeychain?: boolean
+}
+
+export interface SshKeySetupResult {
+  keyPath: string
+  publicKeyPath: string
+  agentAdded: boolean
+  keychainAdded: boolean
+  note?: string
+}
+
 export interface SlurmQueueEntry {
   jobId: string
   name: string
@@ -75,6 +98,15 @@ export interface SshDebugEvent {
   at: number
 }
 
+export interface SshPromptRequest {
+  promptId: string
+  title: string
+  message: string
+  detail?: string
+  isPassword: boolean
+  placeholder?: string
+}
+
 const api = {
   ssh: {
     connect: (config: ConnectionConfig): Promise<ConnectionResult> =>
@@ -85,6 +117,8 @@ const api = {
       ipcRenderer.invoke('ssh:status', id),
     exec: (id: string, command: string): Promise<ExecResult> =>
       ipcRenderer.invoke('ssh:exec', id, command),
+    setupKey: (request: SshKeySetupRequest): Promise<SshKeySetupResult> =>
+      ipcRenderer.invoke('ssh:setup-key', request),
     /**
      * List every live SSH connection held by the main process. Used by the
      * renderer on mount to re-hydrate its connection store after a window
@@ -98,7 +132,7 @@ const api = {
       return () => ipcRenderer.removeListener('ssh:status-change', handler)
     },
     /** Listen for MFA/2FA prompts from the main process */
-    onPrompt: (callback: (data: { promptId: string; title: string; message: string; isPassword: boolean }) => void): (() => void) => {
+    onPrompt: (callback: (data: SshPromptRequest) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('ssh:prompt', handler)
       return () => ipcRenderer.removeListener('ssh:prompt', handler)
@@ -172,7 +206,13 @@ const api = {
     set: <T>(key: string, value: T): Promise<void> =>
       ipcRenderer.invoke('store:set', key, value),
     delete: (key: string): Promise<void> =>
-      ipcRenderer.invoke('store:delete', key)
+      ipcRenderer.invoke('store:delete', key),
+    getSecret: (key: string): Promise<string | undefined> =>
+      ipcRenderer.invoke('store:get-secret', key),
+    setSecret: (key: string, value: string): Promise<void> =>
+      ipcRenderer.invoke('store:set-secret', key, value),
+    deleteSecret: (key: string): Promise<void> =>
+      ipcRenderer.invoke('store:delete-secret', key),
   },
   local: {
     ls: (dirPath: string): Promise<RemoteFileEntry[]> =>
@@ -197,6 +237,8 @@ const api = {
       ipcRenderer.invoke('local:write', filePath, content),
     homedir: (): Promise<string> =>
       ipcRenderer.invoke('local:homedir'),
+    pathForFile: (file: File): string =>
+      webUtils.getPathForFile(file),
   },
   dialog: {
     openFile: (options?: { filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | null> =>
@@ -255,6 +297,17 @@ const api = {
     resetLearnedResources: (connectionId: string, toolId: string) =>
       ipcRenderer.invoke('cluster:resetLearnedResources', connectionId, toolId),
   },
+  annovar: {
+    status: (connectionId: string, humandbPath: string, buildver: string, databases: string[]): Promise<AnnovarStatusResult> =>
+      ipcRenderer.invoke('annovar:status', connectionId, humandbPath, buildver, databases),
+    install: (request: AnnovarInstallRequest): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('annovar:install', request),
+    onInstallProgress: (callback: (data: AnnovarInstallProgress) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('annovar:install-progress', handler)
+      return () => ipcRenderer.removeListener('annovar:install-progress', handler)
+    },
+  },
   fs: {
     resolveSplit: (
       connectionId: string,
@@ -262,6 +315,13 @@ const api = {
       manualItems?: Array<{ key: string; path: string }>,
     ): Promise<{ items: Array<{ key: string; path: string }>; missing: string[] }> =>
       ipcRenderer.invoke('split:resolve', connectionId, pattern, manualItems),
+  },
+  app: {
+    onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('app:menu-command', handler)
+      return () => ipcRenderer.removeListener('app:menu-command', handler)
+    },
   }
 }
 

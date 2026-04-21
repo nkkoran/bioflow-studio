@@ -38,6 +38,7 @@ interface DataPreviewStore {
   activeTabId: string | null
   visibleColumns: Record<string, string[]>
   filters: Record<string, TransformFilterRule[]>
+  draftFilters: Record<string, TransformFilterRule[]>
   sort: Record<string, { column: string; dir: 'asc' | 'desc' } | undefined>
   delimiterOverride: Record<string, DelimiterOverride>
   scrollOffset: Record<string, number>
@@ -53,6 +54,9 @@ interface DataPreviewStore {
   setTabData: (id: string, data: DataPreviewData) => void
   setVisibleColumns: (filePath: string, columns: string[]) => void
   setFilters: (filePath: string, filters: TransformFilterRule[]) => void
+  setDraftFilters: (filePath: string, filters: TransformFilterRule[]) => void
+  applyDraftFilters: (filePath: string) => void
+  resetDraftFilters: (filePath: string) => void
   setSort: (filePath: string, sort: { column: string; dir: 'asc' | 'desc' } | undefined) => void
   setDelimiterOverride: (filePath: string, delimiter: DelimiterOverride) => void
   setScrollOffset: (filePath: string, offset: number) => void
@@ -73,6 +77,7 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
   activeTabId: null,
   visibleColumns: {},
   filters: {},
+  draftFilters: {},
   sort: {},
   delimiterOverride: {},
   scrollOffset: {},
@@ -106,12 +111,14 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
 
       const id = `preview-${nextPreviewId++}`
       const { [filePath]: _filters, ...filters } = state.filters
+      const { [filePath]: _draftFilters, ...draftFilters } = state.draftFilters
       const { [filePath]: _sort, ...sort } = state.sort
       const { [filePath]: _activeSavedViewId, ...activeSavedViewId } = state.activeSavedViewId
       return {
         tabs: [...state.tabs, { id, filePath, fileName, mode, data: null, loading: true }],
         activeTabId: id,
         filters,
+        draftFilters,
         sort,
         activeSavedViewId,
       }
@@ -136,8 +143,9 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
       if (stillOpen) return { tabs: filtered, activeTabId: newActiveId }
       const { [filePath]: _vc, ...visibleColumns } = state.visibleColumns
       const { [filePath]: _f, ...filters } = state.filters
+      const { [filePath]: _df, ...draftFilters } = state.draftFilters
       const { [filePath]: _s, ...sort } = state.sort
-      return { tabs: filtered, activeTabId: newActiveId, visibleColumns, filters, sort }
+      return { tabs: filtered, activeTabId: newActiveId, visibleColumns, filters, draftFilters, sort }
     }),
 
   setActiveTab: (id) => set({ activeTabId: id }),
@@ -170,7 +178,24 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
   setFilters: (filePath, filters) =>
     set((state) => ({
       filters: { ...state.filters, [filePath]: filters },
+      draftFilters: { ...state.draftFilters, [filePath]: filters },
       activeSavedViewId: { ...state.activeSavedViewId, [filePath]: undefined },
+    })),
+
+  setDraftFilters: (filePath, filters) =>
+    set((state) => ({
+      draftFilters: { ...state.draftFilters, [filePath]: filters },
+    })),
+
+  applyDraftFilters: (filePath) =>
+    set((state) => ({
+      filters: { ...state.filters, [filePath]: state.draftFilters[filePath] ?? state.filters[filePath] ?? [] },
+      activeSavedViewId: { ...state.activeSavedViewId, [filePath]: undefined },
+    })),
+
+  resetDraftFilters: (filePath) =>
+    set((state) => ({
+      draftFilters: { ...state.draftFilters, [filePath]: state.filters[filePath] ?? [] },
     })),
 
   setSort: (filePath, sort) =>
@@ -239,6 +264,7 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
       if (!view) return state
       return {
         filters: { ...state.filters, [filePath]: view.filters },
+        draftFilters: { ...state.draftFilters, [filePath]: view.filters },
         delimiterOverride: { ...state.delimiterOverride, [filePath]: view.delimiterOverride },
         scrollOffset: { ...state.scrollOffset, [filePath]: view.scrollOffset },
         sort: { ...state.sort, [filePath]: view.sort },
@@ -258,6 +284,7 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
       const nextActive = { ...state.activeSavedViewId, [filePath]: undefined }
       return {
         filters,
+        draftFilters: { ...state.draftFilters, [filePath]: [] },
         sort,
         delimiterOverride: { ...state.delimiterOverride, [filePath]: 'auto' },
         scrollOffset: { ...state.scrollOffset, [filePath]: 0 },

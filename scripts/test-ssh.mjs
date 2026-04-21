@@ -14,6 +14,8 @@ import { Client } from 'ssh2'
 import { readFileSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { resolve } from 'path'
+import readline from 'node:readline/promises'
+import { stdin as input, stdout as output } from 'node:process'
 
 const [,, host, username, keyPath] = process.argv
 
@@ -77,7 +79,6 @@ const config = {
       'aes128-ctr',
       'aes192-ctr',
       'aes256-ctr',
-      'chacha20-poly1305@openssh.com',
     ],
     hmac: [
       'hmac-sha2-256-etm@openssh.com',
@@ -115,8 +116,23 @@ console.log(`Auth methods: ${expandedKey ? 'publickey' : ''}${process.env.SSH_AU
 conn.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
   console.log(`[keyboard-interactive] name="${name}" instructions="${instructions}"`)
   console.log(`[keyboard-interactive] prompts:`, prompts.map(p => p.prompt))
-  // Auto-respond empty for now
-  finish(prompts.map(() => ''))
+  const rl = readline.createInterface({ input, output })
+  void (async () => {
+    try {
+      const responses = []
+      for (const prompt of prompts) {
+        if (instructions) console.log(instructions)
+        const response = await rl.question(prompt.prompt || 'Authentication response: ')
+        responses.push(response)
+      }
+      finish(responses)
+    } finally {
+      rl.close()
+    }
+  })().catch((err) => {
+    console.error('[keyboard-interactive] prompt failed:', err)
+    finish(prompts.map(() => ''))
+  })
 })
 
 conn.on('handshake', (negotiated) => {

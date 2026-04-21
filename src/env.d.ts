@@ -23,9 +23,10 @@ interface Window {
       disconnect: (id: string) => Promise<void>
       status: (id: string) => Promise<import('./types/ssh').ConnectionStatus | null>
       exec: (id: string, command: string) => Promise<import('./types/ssh').ExecResult>
+      setupKey: (request: import('./types/ssh').SshKeySetupRequest) => Promise<import('./types/ssh').SshKeySetupResult>
       listConnections: () => Promise<Array<{ id: string; config: Omit<import('./types/ssh').ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }>>
       onStatusChange: (callback: (event: any, data: { connectionId: string; status: string }) => void) => () => void
-      onPrompt: (callback: (data: { promptId: string; title: string; message: string; isPassword: boolean }) => void) => () => void
+      onPrompt: (callback: (data: { promptId: string; title: string; message: string; detail?: string; isPassword: boolean; placeholder?: string }) => void) => () => void
       respondToPrompt: (promptId: string, value: string | null) => void
       onBanner: (callback: (data: { connectionId: string; message: string }) => void) => () => void
       onDebug: (callback: (data: import('./types/ssh').SshDebugEvent) => void) => () => void
@@ -54,6 +55,9 @@ interface Window {
       get: <T>(key: string) => Promise<T | undefined>
       set: <T>(key: string, value: T) => Promise<void>
       delete: (key: string) => Promise<void>
+      getSecret: (key: string) => Promise<string | undefined>
+      setSecret: (key: string, value: string) => Promise<void>
+      deleteSecret: (key: string) => Promise<void>
     }
     local: {
       ls: (dirPath: string) => Promise<import('./types/files').RemoteFileEntry[]>
@@ -67,6 +71,7 @@ interface Window {
       delete: (filePath: string) => Promise<void>
       write: (filePath: string, content: string) => Promise<void>
       homedir: () => Promise<string>
+      pathForFile: (file: File) => string
     }
     dialog: {
       openFile: (options?: { filters?: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
@@ -104,12 +109,20 @@ interface Window {
       getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) => Promise<import('./types/ssh').LearnedResourceSummary | null>
       resetLearnedResources: (connectionId: string, toolId: string) => Promise<void>
     }
+    annovar: {
+      status: (connectionId: string, humandbPath: string, buildver: string, databases: string[]) => Promise<import('./types/annotation').AnnovarStatusResult>
+      install: (request: import('./types/annotation').AnnovarInstallRequest) => Promise<{ ok: boolean }>
+      onInstallProgress: (callback: (data: import('./types/annotation').AnnovarInstallProgress) => void) => () => void
+    }
     fs: {
       resolveSplit: (
         connectionId: string,
         pattern: import('./types/pipeline').SplitPattern,
         manualItems?: Array<{ key: string; path: string }>,
       ) => Promise<{ items: Array<{ key: string; path: string }>; missing: string[] }>
+    }
+    app: {
+      onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' }) => void) => () => void
     }
   }
 }

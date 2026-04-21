@@ -46,6 +46,13 @@ export interface AxisPlan {
   upstreamFileType?: FileType
   /** For merge nodes: the strategy resolved from `auto`. */
   resolvedMergeStrategy?: Exclude<MergeStrategy, 'auto'>
+  /** Synthetic merge jobs attached to array outputs on this node. */
+  implicitMerges?: Record<string, {
+    strategy: Exclude<MergeStrategy, 'auto'>
+    outputPath: string
+    input: Extract<AxedValue, { kind: 'array' }>
+    upstreamFileType: FileType
+  }>
 }
 
 export class AxisPlanError extends Error {
@@ -176,6 +183,24 @@ function pathBasename(path: string): string {
   return idx === -1 ? path : path.slice(idx + 1)
 }
 
+function outputMergeMode(
+  data: ToolNodeData | TransformNodeData,
+  portId: string,
+  autoMergeDefault?: MergeStrategy,
+): { enabled: boolean; strategy?: MergeStrategy } {
+  const explicit = data.outputMerge?.[portId]
+  if (explicit) {
+    return {
+      enabled: explicit.mode === 'auto-merge',
+      strategy: explicit.strategy ?? autoMergeDefault,
+    }
+  }
+  return {
+    enabled: Boolean(autoMergeDefault),
+    strategy: autoMergeDefault,
+  }
+}
+
 export interface PlannerContext {
   /** Absolute remote output directory for the run (used for output path convention). */
   outputRoot: string
@@ -248,6 +273,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
 
     // ----- runnable node (tool, transform, or merge) -----
     const dependsOnArrayNodeIds = new Set<string>()
+    const dependsOnNodeIds = new Set<string>()
     const resolvedInputs: Record<string, AxedValue> = {}
 
     // Helper — collapse one upstream AxedValue into a list of paths.
@@ -283,6 +309,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         resolvedInputs[portId] = u.val
         // Track dependency if upstream produced an array from this port
         if (u.val.kind === 'array') dependsOnArrayNodeIds.add(u.source)
+        else if (u.upstreamPlan.implicitMerges?.[u.sourceHandle]) dependsOnNodeIds.add(u.source)
       } else {
         // Multi port — flatten all upstreams into a single list. Any array upstream is collapsed.
         const allPaths: string[] = []
@@ -293,6 +320,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           } else if (u.val.kind === 'multi') {
             allPaths.push(...u.val.paths)
           } else {
+            if (u.upstreamPlan.implicitMerges?.[u.sourceHandle]) dependsOnNodeIds.add(u.source)
             allPaths.push(u.val.path)
           }
         }
@@ -309,6 +337,22 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
       const fallbackOut = outputPath(outputDir, slug, 'output', null, data.fileType)
       if (input?.kind === 'array') {
+        const mergeMode = outputMergeMode(data, 'output')
+        const implicitMerges = mergeMode.enabled && mergeMode.strategy
+          ? {
+              output: {
+                strategy: resolveMergeStrategyStatic(mergeMode.strategy, data.fileType),
+                outputPath: resolveSinkPath(
+                  sink,
+                  outputDir,
+                  `${outputDir}/${slug}.output.merged${mergeOutputExt(resolveMergeStrategyStatic(mergeMode.strategy, data.fileType))}`,
+                  ctx.homeDir,
+                ),
+                input,
+                upstreamFileType: data.fileType,
+              },
+            }
+          : undefined
         plans.set(nodeId, {
           nodeId,
           nodeType: 'transform',
@@ -317,17 +361,21 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           keys: input.keys,
           arrayPortId: 'input',
           dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+          dependsOnNodeIds: [...dependsOnNodeIds],
           inputs: resolvedInputs,
           outputs: {
-            output: {
-              kind: 'array',
-              axis: input.axis,
-              keys: input.keys,
-              paths: input.keys.map((key) =>
-                outputPathFromTemplate(resolveSinkPath(sink, outputDir, fallbackOut, ctx.homeDir), key),
-              ),
-            },
+            output: implicitMerges?.output
+              ? { kind: 'single', path: implicitMerges.output.outputPath }
+              : {
+                  kind: 'array',
+                  axis: input.axis,
+                  keys: input.keys,
+                  paths: input.keys.map((key) =>
+                    outputPathFromTemplate(resolveSinkPath(sink, outputDir, fallbackOut, ctx.homeDir), key),
+                  ),
+                },
           },
+          implicitMerges,
         })
       } else {
         plans.set(nodeId, {
@@ -335,6 +383,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           nodeType: 'transform',
           mode: dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single',
           dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+          dependsOnNodeIds: [...dependsOnNodeIds],
           inputs: resolvedInputs,
           outputs: {
             output: {
@@ -353,6 +402,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const data = node.data as MergeNodeData
       const convergeMode = data.convergeMode ?? 'axed-fan-in'
       const directRunnableDeps = new Set<string>()
+      for (const dependencyId of dependsOnNodeIds) directRunnableDeps.add(dependencyId)
       if (convergeMode === 'parallel-branches') {
         for (const edge of snapshot.edges) {
           if (edge.target !== nodeId) continue
@@ -457,19 +507,41 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
 
     // Compute outputs
     const outputs: Record<string, AxedValue> = {}
+    const implicitMerges: NonNullable<AxisPlan['implicitMerges']> = {}
     const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
     const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
       const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
       const fallbackOut = outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType)
+      const mergeMode = outputMergeMode(toolData, outPort.id, outPort.autoMergeDefault)
       if (mode === 'array' && keys) {
-        outputs[outPort.id] = {
+        const arrayValue: Extract<AxedValue, { kind: 'array' }> = {
           kind: 'array',
           axis: axis!,
           keys,
           paths: keys.map((k) =>
             outputPathFromTemplate(resolveSinkPath(sink, perNodeOutputDir, fallbackOut, ctx.homeDir), k),
           ),
+        }
+        const strategy = mergeMode.enabled && mergeMode.strategy
+          ? resolveMergeStrategyStatic(mergeMode.strategy, outPort.fileType)
+          : null
+        if (strategy) {
+          const mergedPath = resolveSinkPath(
+            sink,
+            perNodeOutputDir,
+            `${perNodeOutputDir}/${slug}.${outPort.id}.merged${mergeOutputExt(strategy)}`,
+            ctx.homeDir,
+          )
+          outputs[outPort.id] = { kind: 'single', path: mergedPath }
+          implicitMerges[outPort.id] = {
+            strategy,
+            outputPath: mergedPath,
+            input: arrayValue,
+            upstreamFileType: outPort.fileType,
+          }
+        } else {
+          outputs[outPort.id] = arrayValue
         }
       } else {
         outputs[outPort.id] = {
@@ -487,8 +559,10 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       keys,
       arrayPortId,
       dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+      dependsOnNodeIds: [...dependsOnNodeIds],
       inputs: resolvedInputs,
       outputs,
+      implicitMerges: Object.keys(implicitMerges).length > 0 ? implicitMerges : undefined,
     })
   }
 

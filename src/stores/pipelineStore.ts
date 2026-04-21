@@ -18,6 +18,9 @@ import type {
   ToolNodeData,
 } from '@/types/pipeline'
 import { getTool } from '@/lib/toolRegistry'
+import { areTypesCompatible } from '@/lib/toolRegistry'
+import { ensureFlagBlocks, flagBlocksToParamValues, toolUsesFlagBuilder } from '@/lib/flagRegistry'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
 export type BioflowEdge = Edge
@@ -33,6 +36,8 @@ interface PipelineState {
   pipelineId: string
   pipelineName: string
   pipelineDescription: string
+  arrayChainMode: 'task-level' | 'job-level'
+  fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
 
   /** Graph */
   nodes: BioflowNode[]
@@ -64,6 +69,8 @@ interface PipelineState {
   // --- actions ---
   setPipelineName: (name: string) => void
   setPipelineDescription: (desc: string) => void
+  setArrayChainMode: (mode: 'task-level' | 'job-level') => void
+  setFileLifecyclePolicy: (policy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success') => void
 
   onNodesChange: (changes: NodeChange[]) => void
   onEdgesChange: (changes: EdgeChange[]) => void
@@ -75,6 +82,7 @@ interface PipelineState {
   addTransformNode: (position: { x: number; y: number }, data?: Partial<TransformNodeData>) => string
   addNoteNode: (position: { x: number; y: number }) => string
   addNodesAndEdges: (nodes: BioflowNode[], edges: BioflowEdge[]) => void
+  wireFileNodeToCompatibleInputs: (nodeId: string) => number
 
   updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData>) => void
   deleteNode: (nodeId: string) => void
@@ -118,6 +126,47 @@ function defaultParamValues(toolId: string): Record<string, unknown> {
   return values
 }
 
+function defaultOutputMerge(toolId: string): ToolNodeData['outputMerge'] | undefined {
+  const tool = getTool(toolId)
+  if (!tool) return undefined
+  const entries = tool.outputs
+    .filter((port) => port.autoMergeDefault)
+    .map((port) => [port.id, { mode: 'auto-merge' as const, strategy: port.autoMergeDefault }])
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
+function defaultOutputIntermediate(toolId: string): ToolNodeData['outputIntermediate'] | undefined {
+  const tool = getTool(toolId)
+  if (!tool) return undefined
+  const entries = tool.outputs
+    .filter((port) => port.intermediate)
+    .map((port) => [port.id, true])
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
+function migrateToolNodeData(data: ToolNodeData): ToolNodeData {
+  const next: ToolNodeData = {
+    ...data,
+    outputMerge: data.outputMerge ?? defaultOutputMerge(data.toolId),
+    outputIntermediate: data.outputIntermediate ?? defaultOutputIntermediate(data.toolId),
+  }
+  if (!toolUsesFlagBuilder(data.toolId)) return next
+  const flagBlocks = ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
+  return {
+    ...next,
+    flagBlocks,
+    paramValues: flagBlocksToParamValues(data.toolId, flagBlocks, data.paramValues),
+  }
+}
+
+function executionDefaults(): Pick<PipelineState, 'arrayChainMode' | 'fileLifecyclePolicy'> {
+  const settings = useSettingsStore.getState().settings
+  return {
+    arrayChainMode: settings.arrayChainMode ?? 'task-level',
+    fileLifecyclePolicy: settings.fileLifecyclePolicy ?? 'keep-all',
+  }
+}
+
 /** Push the current state onto the `past` stack before a mutation. */
 function pushHistory(state: PipelineState): Pick<PipelineState, 'past' | 'future'> {
   const entry: HistoryEntry = {
@@ -133,6 +182,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   pipelineId: makeId('pipeline'),
   pipelineName: 'Untitled pipeline',
   pipelineDescription: '',
+  ...executionDefaults(),
 
   nodes: [],
   edges: [],
@@ -147,6 +197,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
 
   setPipelineName: (name) => set({ pipelineName: name, dirty: true }),
   setPipelineDescription: (description) => set({ pipelineDescription: description, dirty: true }),
+  setArrayChainMode: (arrayChainMode) => set({ arrayChainMode, dirty: true }),
+  setFileLifecyclePolicy: (fileLifecyclePolicy) => set({ fileLifecyclePolicy, dirty: true }),
 
   onNodesChange: (changes) => {
     // Only push history for structural changes (add/remove), not position/selection drags
@@ -182,6 +234,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   },
 
   addToolNode: (toolId, position) => {
+    if (toolId === 'flow.filterFile') {
+      return get().addTransformNode(position, { label: 'Filter file', fileType: 'tsv' })
+    }
     const tool = getTool(toolId)
     if (!tool) {
       console.error(`Tool not found: ${toolId}`)
@@ -196,6 +251,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         toolId,
         label: tool.name,
         paramValues: defaultParamValues(toolId),
+        flagBlocks: toolUsesFlagBuilder(toolId) ? ensureFlagBlocks(toolId, undefined, defaultParamValues(toolId)) : undefined,
+        outputMerge: defaultOutputMerge(toolId),
+        outputIntermediate: defaultOutputIntermediate(toolId),
         status: 'idle',
       },
     }
@@ -266,6 +324,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         selectedColumns: data?.selectedColumns,
         filters: data?.filters ?? [],
         renames: data?.renames ?? [],
+        outputMerge: data?.outputMerge,
+        outputIntermediate: data?.outputIntermediate,
         slurmOverride: data?.slurmOverride,
         status: 'idle',
       },
@@ -304,6 +364,72 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       ...pushHistory(state),
       dirty: true,
     }))
+  },
+
+  wireFileNodeToCompatibleInputs: (nodeId) => {
+    const state = get()
+    const sourceNode = state.nodes.find((node) => node.id === nodeId)
+    if (!sourceNode || sourceNode.type !== 'file') return 0
+    const sourceType = (sourceNode.data as FileNodeData).fileType
+    const existing = new Set(
+      state.edges.map((edge) => `${edge.source}:${edge.sourceHandle ?? 'output'}:${edge.target}:${edge.targetHandle ?? 'input'}`),
+    )
+    const nextEdges: BioflowEdge[] = []
+
+    for (const target of state.nodes) {
+      if (target.id === nodeId || target.type === 'note' || target.type === 'file') continue
+      if (target.type === 'tool') {
+        const tool = getTool((target.data as ToolNodeData).toolId)
+        if (!tool) continue
+        for (const port of tool.inputs) {
+          if (!areTypesCompatible(sourceType, port.fileType)) continue
+          if (!port.multi && state.edges.some((edge) => edge.target === target.id && (edge.targetHandle ?? 'input') === port.id)) continue
+          const key = `${nodeId}:output:${target.id}:${port.id}`
+          if (existing.has(key)) continue
+          nextEdges.push({
+            id: makeId('edge'),
+            source: nodeId,
+            sourceHandle: 'output',
+            target: target.id,
+            targetHandle: port.id,
+          })
+          existing.add(key)
+        }
+      } else if (target.type === 'transform') {
+        const key = `${nodeId}:output:${target.id}:input`
+        if (existing.has(key)) continue
+        if (!areTypesCompatible(sourceType, 'any')) continue
+        if (state.edges.some((edge) => edge.target === target.id && (edge.targetHandle ?? 'input') === 'input')) continue
+        nextEdges.push({
+          id: makeId('edge'),
+          source: nodeId,
+          sourceHandle: 'output',
+          target: target.id,
+          targetHandle: 'input',
+        })
+        existing.add(key)
+      } else if (target.type === 'merge') {
+        const key = `${nodeId}:output:${target.id}:input`
+        if (existing.has(key)) continue
+        nextEdges.push({
+          id: makeId('edge'),
+          source: nodeId,
+          sourceHandle: 'output',
+          target: target.id,
+          targetHandle: 'input',
+        })
+        existing.add(key)
+      }
+    }
+
+    if (nextEdges.length > 0) {
+      set((current) => ({
+        edges: [...current.edges, ...nextEdges],
+        ...pushHistory(current),
+        dirty: true,
+      }))
+    }
+    return nextEdges.length
   },
 
   updateNodeData: (nodeId, patch) => {
@@ -475,7 +601,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       id: n.id,
       type: n.type,
       position: n.position,
-      data: n.data as BioflowNode['data'],
+      data: (n.type === 'tool'
+        ? migrateToolNodeData(n.data as ToolNodeData)
+        : n.data) as BioflowNode['data'],
     }))
     set((state) => {
       // Stash the outgoing pipeline's history, then restore the incoming one's
@@ -492,6 +620,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         pipelineId: snapshot.id,
         pipelineName: snapshot.name,
         pipelineDescription: snapshot.description ?? '',
+        arrayChainMode: snapshot.execution?.arrayChainMode ?? executionDefaults().arrayChainMode,
+        fileLifecyclePolicy: snapshot.execution?.fileLifecyclePolicy ?? executionDefaults().fileLifecyclePolicy,
         nodes,
         edges: snapshot.edges,
         groups: snapshot.groups ?? [],
@@ -512,6 +642,10 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       id: state.pipelineId,
       name: state.pipelineName,
       description: state.pipelineDescription,
+      execution: {
+        arrayChainMode: state.arrayChainMode,
+        fileLifecyclePolicy: state.fileLifecyclePolicy,
+      },
       createdAt: Date.now(), // caller may overwrite
       updatedAt: Date.now(),
       nodes: state.nodes.map((n) => ({
@@ -534,10 +668,13 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   markSaved: () => set({ dirty: false }),
 
   reset: () => {
+    const defaults = executionDefaults()
     set({
       pipelineId: makeId('pipeline'),
       pipelineName: 'Untitled pipeline',
       pipelineDescription: '',
+      arrayChainMode: defaults.arrayChainMode,
+      fileLifecyclePolicy: defaults.fileLifecyclePolicy,
       nodes: [],
       edges: [],
       groups: [],
@@ -569,12 +706,15 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     await window.api.store.set('pipelines:ids', ids.filter((existing) => existing !== id))
     await window.api.store.delete(`pipeline:${id}`)
     set((state) => {
+      const defaults = executionDefaults()
       const { [id]: _history, ...historyByPipeline } = state.historyByPipeline
       if (state.pipelineId !== id) return { historyByPipeline }
       return {
         pipelineId: makeId('pipeline'),
         pipelineName: 'Untitled pipeline',
         pipelineDescription: '',
+        arrayChainMode: defaults.arrayChainMode,
+        fileLifecyclePolicy: defaults.fileLifecyclePolicy,
         nodes: [],
         edges: [],
         groups: [],

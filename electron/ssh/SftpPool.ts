@@ -136,24 +136,44 @@ export class SftpPool {
         })
       })
 
-      const entries: RemoteFileEntry[] = list.map((item) => {
-        const isDirectory = (item.attrs.mode & 0o40000) !== 0
+      const entries: RemoteFileEntry[] = await Promise.all(list.map(async (item) => {
+        const fullPath = remotePath.endsWith('/')
+          ? `${remotePath}${item.filename}`
+          : `${remotePath}/${item.filename}`
+        const mode = item.attrs.mode ?? 0
+        const typeBits = mode & 0o170000
+        const longname = typeof (item as { longname?: unknown }).longname === 'string'
+          ? String((item as { longname?: string }).longname)
+          : ''
+        const symlinkLike = typeBits === 0o120000 || longname.startsWith('l')
+        let isDirectory = typeBits === 0o040000 || longname.startsWith('d')
+        if (symlinkLike) {
+          try {
+            const attrs = await new Promise<{ mode: number }>((resolve, reject) => {
+              sftp.stat(fullPath, (err, stats) => {
+                if (err) reject(err)
+                else resolve(stats as { mode: number })
+              })
+            })
+            isDirectory = ((attrs.mode ?? 0) & 0o170000) === 0o040000
+          } catch {
+            isDirectory = false
+          }
+        }
         const name = item.filename
         const dotIndex = name.lastIndexOf('.')
         const extension = !isDirectory && dotIndex > 0 ? name.slice(dotIndex + 1) : ''
 
         return {
           name,
-          path: remotePath.endsWith('/')
-            ? `${remotePath}${name}`
-            : `${remotePath}/${name}`,
+          path: fullPath,
           isDirectory,
           size: item.attrs.size,
           modified: item.attrs.mtime * 1000,
           permissions: modeToPermissions(item.attrs.mode),
           extension,
         }
-      })
+      }))
 
       // Sort: directories first, then alphabetical by name
       entries.sort((a, b) => {

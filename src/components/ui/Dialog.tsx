@@ -37,7 +37,9 @@ export function Dialog({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity p-4"
-      onClick={onClose}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
     >
       <div
         className={classNames(
@@ -46,6 +48,7 @@ export function Dialog({
           'max-h-[90vh] flex flex-col',
           width,
         )}
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header — fixed */}

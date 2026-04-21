@@ -14,7 +14,9 @@ import type {
   TransformNodeData,
   MergeStrategy,
   FileType,
+  ToolFlagBlock,
 } from '../../src/types/pipeline'
+import { activeFlagBlocks, getFlagDef, toolUsesFlagBuilder } from '../../src/lib/flagRegistry'
 import type { AxedValue, AxisPlan } from './axisPlanner'
 
 export interface ConnectionDefaults {
@@ -128,29 +130,46 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
 
   // Compose the command invocation.
   const cmdParts: string[] = [tool.command]
+  const useFlagBlocks = toolUsesFlagBuilder(tool.id) && activeFlagBlocks(tool.id, nodeData.flagBlocks).length > 0
 
-  // Params first (in registry order for stability)
-  for (const p of tool.params) {
-    const raw = nodeData.paramValues?.[p.name]
-    appendParamArgs(tool, p, raw, cmdParts)
-  }
-
-  // Inputs, in the order the tool declares them
-  for (const port of tool.inputs) {
-    const val = axisPlan.inputs[port.id]
-    if (!val) continue
-    const flag = portFlag(tool, port)
-    if (isArray && port.id === axisPlan.arrayPortId) {
-      // One value per task, read from the pre-declared array variable
-      if (isPlinkInputPort(tool, port)) {
-        const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
-        cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${port.id}`, firstPath)}`)
-      } else {
-        cmdParts.push(flag ? `${flag} "$i_${port.id}"` : `"$i_${port.id}"`)
+  if (useFlagBlocks) {
+    const mainInput = tool.inputs.find((port) => port.id === 'input')
+    if (mainInput) {
+      const val = axisPlan.inputs[mainInput.id]
+      if (val) {
+        if (isArray && mainInput.id === axisPlan.arrayPortId) {
+          const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
+          cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${mainInput.id}`, firstPath)}`)
+        } else {
+          renderPortArgs(tool, mainInput, val, cmdParts)
+        }
       }
-      continue
     }
-    renderPortArgs(tool, port, val, cmdParts)
+    cmdParts.push(...emitFlagBlocks(tool, nodeData, axisPlan, isArray))
+  } else {
+    // Params first (in registry order for stability)
+    for (const p of tool.params) {
+      const raw = nodeData.paramValues?.[p.name]
+      appendParamArgs(tool, p, raw, cmdParts)
+    }
+
+    // Inputs, in the order the tool declares them
+    for (const port of tool.inputs) {
+      const val = axisPlan.inputs[port.id]
+      if (!val) continue
+      const flag = portFlag(tool, port)
+      if (isArray && port.id === axisPlan.arrayPortId) {
+        // One value per task, read from the pre-declared array variable
+        if (isPlinkInputPort(tool, port)) {
+          const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
+          cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${port.id}`, firstPath)}`)
+        } else {
+          cmdParts.push(flag ? `${flag} "$i_${port.id}"` : `"$i_${port.id}"`)
+        }
+        continue
+      }
+      renderPortArgs(tool, port, val, cmdParts)
+    }
   }
 
   // Output paths — one output flag if present.
@@ -552,6 +571,117 @@ function splitPlinkListValue(raw: unknown): string[] {
     .filter(Boolean)
 }
 
+function emitFlagBlocks(
+  tool: ToolDef,
+  nodeData: ToolNodeData,
+  axisPlan: AxisPlan,
+  isArray: boolean,
+): string[] {
+  const parts: string[] = []
+  const blocks = activeFlagBlocks(tool.id, nodeData.flagBlocks)
+  const byId = new Map(blocks.map((block) => [block.flagId, block]))
+
+  for (const block of blocks) {
+    const def = getFlagDef(tool.id, block.flagId)
+    if (!def) continue
+
+    if (tool.id === 'plink2.score' && ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation'].includes(def.id)) {
+      continue
+    }
+
+    if (tool.id === 'plink2.score' && def.id === 'score') {
+      const emitted = emitScoreFlag(def, block.value, axisPlan, isArray, byId)
+      if (emitted) parts.push(emitted)
+      continue
+    }
+
+    if (def.kind === 'toggle') {
+      parts.push(def.flag)
+      continue
+    }
+
+    if (def.kind === 'fileInput') {
+      const emitted = emitFileInputFlag(def.flag, block.value, def.sourcePortId, axisPlan, isArray)
+      if (emitted) parts.push(emitted)
+      continue
+    }
+
+    const emitted = emitValueFlag(def.flag, block.value, def.multiValue)
+    if (emitted) parts.push(emitted)
+  }
+
+  return parts
+}
+
+function emitScoreFlag(
+  def: NonNullable<ReturnType<typeof getFlagDef>>,
+  value: unknown,
+  axisPlan: AxisPlan,
+  isArray: boolean,
+  byId: Map<string, ToolFlagBlock>,
+): string | null {
+  const fileArg = resolveFileInputArg(value, def.sourcePortId, axisPlan, isArray)
+  if (!fileArg) return null
+  const extras: string[] = []
+  const scoreCols = emitValueFlag('', byId.get('score-col-nums')?.value, true)?.trim()
+  if (scoreCols) extras.push(scoreCols)
+  for (const modifier of ['header', 'center', 'variance-standardize', 'no-mean-imputation']) {
+    if (byId.get(modifier)?.enabled) extras.push(modifier)
+  }
+  return `${def.flag} ${fileArg}${extras.length ? ` ${extras.join(' ')}` : ''}`
+}
+
+function emitFileInputFlag(
+  flag: string,
+  value: unknown,
+  sourcePortId: string | undefined,
+  axisPlan: AxisPlan,
+  isArray: boolean,
+): string | null {
+  const arg = resolveFileInputArg(value, sourcePortId, axisPlan, isArray)
+  return arg ? `${flag} ${arg}` : null
+}
+
+function resolveFileInputArg(
+  value: unknown,
+  sourcePortId: string | undefined,
+  axisPlan: AxisPlan,
+  isArray: boolean,
+): string | null {
+  if (value && typeof value === 'object' && 'kind' in (value as Record<string, unknown>)) {
+    const source = value as { kind?: string; value?: string; portId?: string }
+    if (source.kind === 'upstream-file') {
+      const portId = sourcePortId ?? source.portId ?? 'input'
+      const upstream = axisPlan.inputs[portId]
+      if (!upstream) return null
+      if (isArray && portId === axisPlan.arrayPortId && upstream.kind === 'array') return `"${`$i_${portId}`}"`
+      if (upstream.kind === 'single') return shellQuote(upstream.path)
+      return upstream.paths[0] ? shellQuote(upstream.paths[0]) : null
+    }
+    if (source.value?.trim()) return shellQuote(source.value.trim())
+    return null
+  }
+  if (value === undefined || value === null || value === '') return null
+  return shellQuote(String(value))
+}
+
+function emitValueFlag(flag: string, value: unknown, multiValue = false): string | null {
+  if (value && typeof value === 'object' && 'kind' in (value as Record<string, unknown>)) {
+    const source = value as { value?: string }
+    if (!source.value?.trim()) return null
+    const rendered = multiValue
+      ? splitPlinkListValue(source.value).map(shellQuote).join(' ')
+      : shellQuote(source.value.trim())
+    return flag ? `${flag} ${rendered}` : rendered
+  }
+  if (value === undefined || value === null || value === '') return null
+  if (multiValue) {
+    const rendered = splitPlinkListValue(value).map(shellQuote).join(' ')
+    return rendered ? (flag ? `${flag} ${rendered}` : rendered) : null
+  }
+  return flag ? `${flag} ${shellQuote(String(value))}` : shellQuote(String(value))
+}
+
 function renderPortArgs(tool: ToolDef, port: ToolPort, val: AxedValue, out: string[]): void {
   if (isPlinkInputPort(tool, port)) {
     const paths: string[] = val.kind === 'single' ? [val.path]
@@ -730,6 +860,16 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   lines.push('    except ValueError:')
   lines.push('        return False')
   lines.push('    return (op == "gt" and a > b) or (op == "gte" and a >= b) or (op == "lt" and a < b) or (op == "lte" and a <= b)')
+  lines.push('def matches_filters(row, rules):')
+  lines.push('    if not rules: return True')
+  lines.push('    result = match(row, rules[0])')
+  lines.push('    for rule in rules[1:]:')
+  lines.push('        current = match(row, rule)')
+  lines.push('        if rule.get("join", "and") == "or":')
+  lines.push('            result = result or current')
+  lines.push('        else:')
+  lines.push('            result = result and current')
+  lines.push('    return result')
   lines.push('in_delim = delimiter(in_path, "")')
   lines.push('out_delim = delimiter(out_path, config.get("fileType", ""))')
   lines.push('with open(in_path, newline="") as src, open(out_path, "w", newline="") as dst:')
@@ -742,7 +882,7 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   lines.push('    writer = csv.DictWriter(dst, fieldnames=out_fields, delimiter=out_delim, extrasaction="ignore", lineterminator="\\n")')
   lines.push('    writer.writeheader()')
   lines.push('    for row in reader:')
-  lines.push('        if all(match(row, rule) for rule in config.get("filters", [])):')
+  lines.push('        if matches_filters(row, config.get("filters", [])):')
   lines.push('            writer.writerow({rename.get(c, c): row.get(c, "") for c in fields})')
   lines.push('PY')
   lines.push('')

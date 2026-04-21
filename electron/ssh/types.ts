@@ -7,6 +7,9 @@ export interface ConnectionConfig {
   privateKeyPath?: string
   passphrase?: string
   password?: string
+  rememberPassword?: boolean
+  generatedKeyPath?: string
+  setupNote?: string
   defaultDirectory?: string
 }
 
@@ -52,4 +55,23 @@ export interface FileStat {
   modified: number
   isDirectory: boolean
   permissions: string
+}
+
+export interface SshKeySetupRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  comment?: string
+  overwrite?: boolean
+  addToAgent?: boolean
+  addToKeychain?: boolean
+}
+
+export interface SshKeySetupResult {
+  keyPath: string
+  publicKeyPath: string
+  agentAdded: boolean
+  keychainAdded: boolean
+  note?: string
 }
