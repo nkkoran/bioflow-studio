@@ -34,6 +34,8 @@ import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { BUNDLE_DRAG_MIME, DRAG_MIME } from './ToolPalette'
 import { usePipelineStore, type BioflowNode } from '@/stores/pipelineStore'
+import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
 import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
@@ -83,9 +85,12 @@ function CanvasInner() {
   const createGroup = usePipelineStore((s) => s.createGroup)
   const updateGroup = usePipelineStore((s) => s.updateGroup)
   const deleteGroup = usePipelineStore((s) => s.deleteGroup)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const uploadsSubfolder = useSettingsStore((s) => s.settings.paths.uploadsSubfolder)
 
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
+  const [dropMessage, setDropMessage] = useState<string | null>(null)
   const displayEdges = useMemo(() => {
     const snapshot = {
       version: 1 as const,
@@ -115,6 +120,30 @@ function CanvasInner() {
       data: { ...(edge.data ?? {}), axisChip: chips[edge.id], label: chips[edge.id]?.label ?? '' },
     }))
   }, [edges, nodes, groups])
+  const hiddenNodeIds = useMemo(() => {
+    const visualMembership = new Map<string, Array<{ collapsed: boolean }>>()
+    for (const group of groups) {
+      if (group.kind !== 'visual') continue
+      for (const nodeId of group.nodeIds) {
+        visualMembership.set(nodeId, [...(visualMembership.get(nodeId) ?? []), { collapsed: Boolean(group.collapsed) }])
+      }
+    }
+    const ids = new Set<string>()
+    for (const [nodeId, memberships] of visualMembership) {
+      if (memberships.length > 0 && memberships.every((membership) => membership.collapsed)) {
+        ids.add(nodeId)
+      }
+    }
+    return ids
+  }, [groups])
+  const displayNodes = useMemo(
+    () => nodes.filter((node) => !hiddenNodeIds.has(node.id)),
+    [hiddenNodeIds, nodes],
+  )
+  const visibleEdges = useMemo(
+    () => displayEdges.filter((edge) => !hiddenNodeIds.has(edge.source) && !hiddenNodeIds.has(edge.target)),
+    [displayEdges, hiddenNodeIds],
+  )
 
   /** Accept drop events from the tool palette */
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -123,30 +152,76 @@ function CanvasInner() {
   }, [])
 
   const onDrop = useCallback(
-    (event: React.DragEvent) => {
+    async (event: React.DragEvent) => {
       event.preventDefault()
       const payload = event.dataTransfer.getData(DRAG_MIME)
       const bundlePayload = event.dataTransfer.getData(BUNDLE_DRAG_MIME)
       const filePath = event.dataTransfer.getData(FILE_DRAG_MIME)
-      if (!payload && !bundlePayload && !filePath) return
+      const droppedLocalPaths = readLocalDropPaths(event)
+      if (!payload && !bundlePayload && !filePath && droppedLocalPaths.length === 0) return
+
+      if (droppedLocalPaths.length > 1) {
+        setDropMessage('Drag one file at a time for now.')
+        window.setTimeout(() => setDropMessage(null), 3000)
+        return
+      }
 
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       })
 
-      if (filePath) {
-        const fileType = inferFileType(filePath) as FileType
-        const label = pathBasename(filePath)
+      const droppedLocalPath = droppedLocalPaths[0]
+      if (droppedLocalPath) {
+        try {
+          const stat = await window.api.local.stat(droppedLocalPath)
+          if (stat.isDirectory) {
+            setDropMessage('Dropping folders is not supported yet. Drop a single file instead.')
+            window.setTimeout(() => setDropMessage(null), 3000)
+            return
+          }
+        } catch (err) {
+          setDropMessage(err instanceof Error ? err.message : String(err))
+          window.setTimeout(() => setDropMessage(null), 3000)
+          return
+        }
+      }
+
+      if (filePath || droppedLocalPath) {
+        const rawPath = filePath || droppedLocalPath
+        const localDrop = Boolean(droppedLocalPath)
+        const fileType = inferFileType(rawPath) as FileType
+        const label = pathBasename(rawPath)
+        let resolvedPath = rawPath
+        let source: 'local' | 'remote' = localDrop ? 'local' : 'remote'
+        if (localDrop && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
+          const uploadNow = window.confirm(`Upload ${label} to the active cluster connection now?`)
+          if (uploadNow) {
+            try {
+              const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
+              const uploadDir = `${home}/${uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
+              const remotePath = `${uploadDir}/${label}`
+              await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
+              await window.api.sftp.upload(activeConnectionId, rawPath, remotePath)
+              resolvedPath = remotePath
+              source = 'remote'
+              setDropMessage(`Uploaded ${label} to ${remotePath}`)
+              window.setTimeout(() => setDropMessage(null), 3000)
+            } catch (err) {
+              setDropMessage(err instanceof Error ? err.message : String(err))
+              window.setTimeout(() => setDropMessage(null), 3000)
+            }
+          }
+        }
         const target = findDropTargetTool(nodes, position)
         if (!target) {
-          addFileNode(position, { isInput: true, label, path: filePath, fileType })
+          addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
           return
         }
 
         const tool = getTool((target.data as any).toolId)
         if (!tool || tool.inputs.length === 0) {
-          addFileNode(position, { isInput: true, label, path: filePath, fileType })
+          addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
           return
         }
 
@@ -158,7 +233,7 @@ function CanvasInner() {
         const attach = (portId: string) => {
           const fileId = addFileNode(
             { x: target.position.x - 220, y: target.position.y },
-            { isInput: true, label, path: filePath, fileType },
+            { isInput: true, label, path: resolvedPath, fileType, source },
           )
           onConnect({
             source: fileId,
@@ -175,7 +250,7 @@ function CanvasInner() {
         })
 
         if (compatible.length === 0) {
-          addFileNode(position, { isInput: true, label, path: filePath, fileType })
+          addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
           return
         }
 
@@ -218,7 +293,7 @@ function CanvasInner() {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges, onConnect],
+    [activeConnectionId, uploadsSubfolder, screenToFlowPosition, nodes, edges, addToolNode, addFileNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges, onConnect],
   )
 
   /**
@@ -331,10 +406,10 @@ function CanvasInner() {
   )
 
   return (
-    <div ref={wrapperRef} className="flex-1 h-full w-full" onDrop={onDrop} onDragOver={onDragOver}>
+    <div ref={wrapperRef} className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
       <ReactFlow
-        nodes={nodes}
-        edges={displayEdges}
+        nodes={displayNodes}
+        edges={visibleEdges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
@@ -370,8 +445,18 @@ function CanvasInner() {
           maskColor="rgba(0,0,0,0.5)"
           style={{ background: 'var(--color-bg-secondary)' }}
         />
-        <GroupOverlay groups={groups} nodes={nodes} onContextMenu={onGroupContextMenu} />
+        <GroupOverlay
+          groups={groups}
+          nodes={nodes}
+          onContextMenu={onGroupContextMenu}
+          onToggleCollapse={(group) => updateGroup(group.id, { collapsed: !group.collapsed })}
+        />
       </ReactFlow>
+      {dropMessage && (
+        <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded border border-accent/40 bg-bg-secondary px-3 py-1 text-xs text-text-primary shadow">
+          {dropMessage}
+        </div>
+      )}
       {portPicker && <PortPickerPopover state={portPicker} />}
       {menu && (
         <>
@@ -381,19 +466,30 @@ function CanvasInner() {
             style={{ left: menu.x, top: menu.y }}
           >
             {menu.kind === 'selection' && (
-              <button
-                className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
-                onClick={() => {
-                  const selected = usePipelineStore.getState().nodes.filter((node) => node.selected).map((node) => node.id)
-                  createGroup(selected)
-                  setMenu(null)
-                }}
-              >
-                Group into single sbatch
-              </button>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
+                  onClick={() => {
+                    const selected = usePipelineStore.getState().nodes.filter((node) => node.selected).map((node) => node.id)
+                    createGroup(selected)
+                    setMenu(null)
+                  }}
+                >
+                  Group into single sbatch
+                </button>
             )}
             {menu.kind === 'group' && menu.group && (
               <>
+                {menu.group.kind === 'visual' && (
+                  <button
+                    className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
+                    onClick={() => {
+                      updateGroup(menu.group!.id, { collapsed: !menu.group!.collapsed })
+                      setMenu(null)
+                    }}
+                  >
+                    {menu.group.collapsed ? 'Expand group' : 'Collapse group'}
+                  </button>
+                )}
                 <button
                   className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
                   onClick={() => {
@@ -403,27 +499,29 @@ function CanvasInner() {
                 >
                   Ungroup
                 </button>
-                <button
-                  className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
-                  onClick={() => {
-                    const group = menu.group!
-                    const cpus = prompt('CPUs for grouped sbatch (blank = max across nodes)', group.sharedResources?.cpus?.toString() ?? '')
-                    const memoryGB = prompt('Memory GB for grouped sbatch (blank = max across nodes)', group.sharedResources?.memoryGB?.toString() ?? '')
-                    const timeHours = prompt('Time hours for grouped sbatch (blank = max across nodes)', group.sharedResources?.timeHours?.toString() ?? '')
-                    const partition = prompt('Partition for grouped sbatch (blank = default)', group.sharedResources?.partition ?? '')
-                    updateGroup(group.id, {
-                      sharedResources: {
-                        cpus: cpus ? Number(cpus) : undefined,
-                        memoryGB: memoryGB ? Number(memoryGB) : undefined,
-                        timeHours: timeHours ? Number(timeHours) : undefined,
-                        partition: partition || undefined,
-                      },
-                    })
-                    setMenu(null)
-                  }}
-                >
-                  Edit group resources...
-                </button>
+                {menu.group.kind !== 'visual' && (
+                  <button
+                    className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
+                    onClick={() => {
+                      const group = menu.group!
+                      const cpus = prompt('CPUs for grouped sbatch (blank = max across nodes)', group.sharedResources?.cpus?.toString() ?? '')
+                      const memoryGB = prompt('Memory GB for grouped sbatch (blank = max across nodes)', group.sharedResources?.memoryGB?.toString() ?? '')
+                      const timeHours = prompt('Time hours for grouped sbatch (blank = max across nodes)', group.sharedResources?.timeHours?.toString() ?? '')
+                      const partition = prompt('Partition for grouped sbatch (blank = default)', group.sharedResources?.partition ?? '')
+                      updateGroup(group.id, {
+                        sharedResources: {
+                          cpus: cpus ? Number(cpus) : undefined,
+                          memoryGB: memoryGB ? Number(memoryGB) : undefined,
+                          timeHours: timeHours ? Number(timeHours) : undefined,
+                          partition: partition || undefined,
+                        },
+                      })
+                      setMenu(null)
+                    }}
+                  >
+                    Edit group resources...
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -431,6 +529,13 @@ function CanvasInner() {
       )}
     </div>
   )
+}
+
+function readLocalDropPaths(event: React.DragEvent): string[] {
+  const files = Array.from(event.dataTransfer.files ?? [])
+    .map((file) => ((file as File & { path?: string }).path ?? ''))
+    .filter(Boolean)
+  return [...new Set(files)]
 }
 
 function findDropTargetTool(

@@ -5,6 +5,7 @@ import type {
   TransformNodeData,
 } from '@/types/pipeline'
 import {
+  detectDelimiter,
   delimiterForPath as preferredDelimiterForPath,
   parseHeaderLine as parseDelimitedHeader,
 } from '@/lib/delimitedText'
@@ -27,7 +28,7 @@ export function parseHeaderLine(text: string, delimiter?: string): string[] {
 }
 
 export function parseHeader(text: string, path: string): ColumnSchema {
-  const parsed = parseDelimitedHeader(text, preferredDelimiterForPath(path))
+  const parsed = parseDelimitedHeader(text, detectDelimiter(text, preferredDelimiterForPath(path)))
   return { columns: parsed.columns, delimiter: parsed.delimiter, sourcePath: path }
 }
 
@@ -94,10 +95,11 @@ function outputPath(snapshot: PipelineSnapshot, nodeId: string, _portId: string)
   return null
 }
 
-export function columnParamValues(raw: unknown): string[] {
+export function columnParamValues(raw: unknown, options?: { whitespaceSeparated?: boolean }): string[] {
   if (Array.isArray(raw)) return raw.map(String).map((v) => v.trim()).filter(Boolean)
+  const splitter = options?.whitespaceSeparated ? /[,\s]+/ : /,/
   return String(raw ?? '')
-    .split(',')
+    .split(splitter)
     .map((value) => value.trim())
     .filter(Boolean)
 }
@@ -142,7 +144,7 @@ export function toolColumnWarnings(
     const schema = connectedInputSchema(snapshot, nodeId, param.columnSourcePortId ?? 'input', schemas)
     if (!schema) continue
     const available = new Set(schema.columns)
-    const missing = columnParamValues(data.paramValues?.[param.name]).filter((column) => !available.has(column))
+    const missing = columnParamValues(data.paramValues?.[param.name], { whitespaceSeparated: param.columnMulti }).filter((column) => !available.has(column))
     if (missing.length > 0) warnings.push({ paramName: param.name, missing })
   }
   return warnings

@@ -9,6 +9,7 @@
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
 import { X, Trash2, Copy, Plus, Folder, Info, RefreshCcw, ChevronDown } from 'lucide-react'
+import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
@@ -20,15 +21,18 @@ import { useUIStore } from '@/stores/uiStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useClusterInfoStore } from '@/stores/clusterInfoStore'
 import { getTool } from '@/lib/toolRegistry'
 import { iconForTool } from '@/lib/toolIcons'
 import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
 import { ANNOVAR_FEATURES, VEP_FEATURES, annovarDbNames, annovarParamsForFeatures } from '@/lib/annotationCatalog'
 import {
+  columnParamValues,
   connectedInputPath,
   parseHeader,
 } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
+import { inferFileType } from '@/lib/fileTypeInference'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -45,6 +49,7 @@ import type {
   TransformNodeData,
 } from '@/types/pipeline'
 import type { RemoteFileEntry } from '@/types/files'
+import type { ClusterModuleSuggestion, LearnedResourceSummary } from '@/types/ssh'
 import { classNames, pathBasename, pathDirname } from '@/lib/utils'
 
 type SplitDetectMode = 'auto' | 'files' | 'folders'
@@ -56,6 +61,8 @@ interface DetectedSplit {
   summary: string
   quality: number
 }
+
+const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
 
 function connectedInputPaths(
   snapshot: PipelineSnapshot,
@@ -215,20 +222,41 @@ function ColumnParamField({
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [focused, setFocused] = useState(false)
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
+  const [draft, setDraft] = useState('')
   const current = String(value ?? '')
-  const selected = current.split(/[,\s]+/).map((v) => v.trim()).filter(Boolean)
-  const token = current.split(/[,\s]+/).pop()?.toLowerCase() ?? ''
+  const allowsMultiple = Boolean(param.columnMulti)
+  const selected = columnParamValues(value, { whitespaceSeparated: allowsMultiple })
+  const token = allowsMultiple ? draft.trim().toLowerCase() : current.split(/[,\s]+/).pop()?.toLowerCase() ?? ''
   const suggestions = columns
-    .filter((column) => !selected.includes(column) || column.toLowerCase().includes(token))
+    .filter((column) => !selected.includes(column) || !allowsMultiple || column.toLowerCase().includes(token))
     .filter((column) => column.toLowerCase().includes(token))
     .slice(0, 12)
-  const toggleColumn = (column: string) => {
-    const next = selected.includes(column)
-      ? selected.filter((value) => value !== column)
-      : [...selected, column]
-    onChange(next.join(' '))
+  useEffect(() => {
+    setActiveSuggestionIndex((index) => Math.min(index, Math.max(suggestions.length - 1, 0)))
+  }, [suggestions.length])
+  useEffect(() => {
+    if (!allowsMultiple && draft) setDraft('')
+  }, [allowsMultiple, draft])
+
+  const removeColumn = (column: string) => {
+    onChange(selected.filter((value) => value !== column).join(' '))
   }
+
+  const addColumn = (column: string) => {
+    if (selected.includes(column)) return
+    onChange([...selected, column].join(' '))
+    setDraft('')
+    setShowSuggestions(false)
+    window.setTimeout(() => inputRef.current?.focus(), 0)
+  }
+
   const insertColumn = (column: string) => {
+    if (allowsMultiple) {
+      addColumn(column)
+      return
+    }
     const cursor = inputRef.current?.selectionStart ?? current.length
     const before = current.slice(0, cursor)
     const after = current.slice(cursor)
@@ -240,6 +268,7 @@ function ColumnParamField({
     const suffix = current.slice(end).replace(/^[,\s]*/, '')
     const next = [prefix, column, suffix].filter(Boolean).join(separator)
     onChange(next)
+    setShowSuggestions(false)
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }
 
@@ -253,19 +282,59 @@ function ColumnParamField({
           <input
             ref={inputRef}
             type="text"
-            value={current}
-            placeholder={columns.length > 0 ? 'Start typing a column name...' : (loading ? 'Loading columns...' : param.placeholder)}
+            value={allowsMultiple ? draft : current}
+            placeholder={columns.length > 0 ? (allowsMultiple ? 'Type to add a column...' : 'Start typing a column name...') : (loading ? 'Loading columns...' : param.placeholder)}
             onFocus={() => {
               setFocused(true)
+              setShowSuggestions(!allowsMultiple || draft.trim().length > 0)
+              setActiveSuggestionIndex(0)
               if (columns.length === 0 && !loading && onRefresh) onRefresh()
             }}
-            onBlur={() => window.setTimeout(() => setFocused(false), 120)}
-            onChange={(e) => onChange(e.target.value)}
+            onBlur={() => window.setTimeout(() => {
+              setFocused(false)
+              setShowSuggestions(false)
+            }, 120)}
+            onChange={(e) => {
+              if (allowsMultiple) {
+                setDraft(e.target.value)
+                setShowSuggestions(e.target.value.trim().length > 0)
+              } else {
+                onChange(e.target.value)
+                setShowSuggestions(true)
+              }
+              setActiveSuggestionIndex(0)
+            }}
+            onKeyDown={(event) => {
+              if (allowsMultiple && event.key === 'Backspace' && draft.length === 0 && selected.length > 0) {
+                event.preventDefault()
+                removeColumn(selected[selected.length - 1])
+                return
+              }
+              if (!showSuggestions || suggestions.length === 0) return
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setActiveSuggestionIndex((index) => Math.min(index + 1, suggestions.length - 1))
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setActiveSuggestionIndex((index) => Math.max(index - 1, 0))
+                return
+              }
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                insertColumn(suggestions[activeSuggestionIndex] ?? suggestions[0])
+                return
+              }
+              if (event.key === 'Escape') {
+                setShowSuggestions(false)
+              }
+            }}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
           />
-          {focused && columns.length > 0 && suggestions.length > 0 && (
+          {focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && (
             <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
-              {suggestions.map((column) => (
+              {suggestions.map((column, index) => (
                 <button
                   key={column}
                   type="button"
@@ -273,7 +342,11 @@ function ColumnParamField({
                     event.preventDefault()
                     insertColumn(column)
                   }}
-                  className="block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover"
+                  onMouseEnter={() => setActiveSuggestionIndex(index)}
+                  className={classNames(
+                    'block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover',
+                    index === activeSuggestionIndex && 'bg-bg-hover',
+                  )}
                 >
                   {column}
                 </button>
@@ -293,28 +366,27 @@ function ColumnParamField({
           </button>
         )}
       </div>
-      {columns.length > 0 ? (
-        <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
-          {columns.map((column) => {
-            const active = selected.includes(column)
-            return (
+      {allowsMultiple && selected.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {selected.map((column) => (
+            <span
+              key={column}
+              className="inline-flex items-center gap-1 rounded-md border border-accent/30 bg-accent/10 px-2 py-1 text-[11px] text-text-primary"
+            >
+              <span className="font-mono">{column}</span>
               <button
-                key={column}
                 type="button"
-                onClick={() => toggleColumn(column)}
-                className={classNames(
-                  'rounded border px-1.5 py-0.5 text-[10px]',
-                  active
-                    ? 'border-accent/50 bg-accent/10 text-text-primary'
-                    : 'border-border bg-bg-primary text-text-muted hover:text-text-primary',
-                )}
+                onClick={() => removeColumn(column)}
+                className="text-text-muted transition-colors hover:text-text-primary"
+                title={`Remove ${column}`}
               >
-                {active ? '✓ ' : ''}{column}
+                <X size={12} />
               </button>
-            )
-          })}
+            </span>
+          ))}
         </div>
-      ) : (
+      )}
+      {columns.length === 0 && (
         <p className="text-[10px] text-text-muted">
           {loading ? 'Reading the upstream header…' : 'Connect a tabular input or preview it once to enable column picks.'}
         </p>
@@ -405,6 +477,87 @@ function FolderPickerField({
           <Folder size={12} className="mr-1" />
           Browse
         </Button>
+      </div>
+    </div>
+  )
+}
+
+function ModuleAutocompleteField({
+  connectionId,
+  value,
+  loading,
+  placeholder,
+  onChange,
+  onRefresh,
+}: {
+  connectionId: string | null
+  value: string
+  loading: boolean
+  placeholder?: string
+  onChange: (value: string) => void
+  onRefresh?: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const [focused, setFocused] = useState(false)
+  const modules = useClusterInfoStore((s) => {
+    if (!connectionId) return EMPTY_MODULE_SUGGESTIONS
+    return s.modulesByConnection[connectionId]?.modules ?? EMPTY_MODULE_SUGGESTIONS
+  })
+  const loadModules = useClusterInfoStore((s) => s.loadModules)
+  const suggestions = modules
+    .flatMap((entry) => entry.versions.length > 0 ? entry.versions.map((version) => `${entry.name}/${version}`) : [entry.name])
+    .filter((name) => name.toLowerCase().includes(value.toLowerCase()))
+    .slice(0, 12)
+
+  useEffect(() => {
+    if (!focused || !connectionId || connectionId === LOCAL_CONNECTION_ID) return
+    void loadModules(connectionId, value || undefined).catch(() => undefined)
+  }, [connectionId, focused, loadModules, value])
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-end gap-1.5">
+        <div className="relative flex flex-1 flex-col gap-1">
+          <label className="text-text-secondary text-xs font-medium">Module override</label>
+          <input
+            ref={inputRef}
+            type="text"
+            value={value}
+            placeholder={placeholder}
+            onFocus={() => setFocused(true)}
+            onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+            onChange={(e) => onChange(e.target.value)}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          {focused && suggestions.length > 0 && (
+            <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+              {suggestions.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    onChange(name)
+                    window.setTimeout(() => inputRef.current?.focus(), 0)
+                  }}
+                  className="block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover"
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          title="Refresh module list"
+          onClick={onRefresh}
+          className="mb-0 flex h-8 items-center gap-1 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+          disabled={!connectionId || connectionId === LOCAL_CONNECTION_ID}
+        >
+          <RefreshCcw size={13} className={loading ? 'animate-spin' : ''} />
+          Modules
+        </button>
       </div>
     </div>
   )
@@ -744,12 +897,15 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const settings = useSettingsStore((s) => s.settings)
+  const loadModules = useClusterInfoStore((s) => s.loadModules)
+  const loadingModules = useClusterInfoStore((s) => activeConnectionId ? s.loadingModules[activeConnectionId] : false)
   const schemas = useDataPreviewStore((s) => s.schemas)
   const setSchema = useDataPreviewStore((s) => s.setSchema)
   const tool = getTool(data.toolId)
   const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
   const loadingSchemaKey = useMemo(() => `${nodeId}:${Object.keys(schemas).length}`, [nodeId, schemas])
   const [estimate, setEstimate] = useState<EstimateOutput | null>(null)
+  const [learnedEstimate, setLearnedEstimate] = useState<LearnedResourceSummary | null>(null)
   const [estimating, setEstimating] = useState(false)
   const [showEstimateWhy, setShowEstimateWhy] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
@@ -841,6 +997,20 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   }, [activeConnectionId, loadingSchemaKey, loadSchemaForPath, nodeId, schemas, snapshot, tool])
 
   useEffect(() => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !tool) {
+      setLearnedEstimate(null)
+      return
+    }
+    let cancelled = false
+    void window.api.cluster.getLearnedResources(activeConnectionId, tool.id).then((result) => {
+      if (!cancelled) setLearnedEstimate(result)
+    }).catch(() => {
+      if (!cancelled) setLearnedEstimate(null)
+    })
+    return () => { cancelled = true }
+  }, [activeConnectionId, tool])
+
+  useEffect(() => {
     if (!activeConnectionId || !tool) {
       setEstimate(null)
       return
@@ -874,6 +1044,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             : undefined,
           hasFilter: hasFilteringParam(data),
           partitionMaxMemGB: settings.partitionMaxMemGB,
+          learned: learnedEstimate,
         }))
       } finally {
         if (!cancelled) setEstimating(false)
@@ -881,7 +1052,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     }
     void loadEstimate()
     return () => { cancelled = true }
-  }, [activeConnectionId, axedInputPorts, data, nodeId, settings.partitionMaxMemGB, snapshot, tool])
+  }, [activeConnectionId, axedInputPorts, data, learnedEstimate, nodeId, settings.partitionMaxMemGB, snapshot, tool])
 
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
@@ -980,6 +1151,23 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             Running an array or heavy job on the login node will likely be killed by cluster admins. Consider Slurm for anything beyond quick commands.
           </div>
         )}
+        <div className="mt-2">
+          <ModuleAutocompleteField
+            connectionId={activeConnectionId}
+            value={data.moduleOverride ?? tool.module ?? ''}
+            loading={Boolean(loadingModules)}
+            placeholder={tool.module ?? 'plink/2.00a3'}
+            onChange={(value) => updateNodeData(nodeId, { moduleOverride: value.trim() || undefined })}
+            onRefresh={() => {
+              if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
+                void loadModules(activeConnectionId, data.moduleOverride ?? tool.module ?? '', { force: true })
+              }
+            }}
+          />
+          <p className="mt-1 text-[10px] text-text-muted">
+            Leave blank to keep the registry default. Free text still works if the module list is incomplete.
+          </p>
+        </div>
       </div>
 
       <div>
@@ -1191,8 +1379,22 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                   : estimating ? 'Estimating resources...' : 'No resource suggestion yet'}
               </div>
               {estimate && (
-                <div className="text-[10px] text-text-muted mt-0.5">
-                  Confidence: {estimate.confidence}
+                <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] text-text-muted">
+                  <span>Confidence: {estimate.confidence}</span>
+                  <span>{estimate.source === 'learned' ? `Learned from ${estimate.learnedSampleCount} jobs` : 'Registry default'}</span>
+                  {estimate.source === 'learned' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && (
+                    <button
+                      type="button"
+                      className="underline hover:text-text-primary"
+                      onClick={() => {
+                        void window.api.cluster.resetLearnedResources(activeConnectionId, tool.id).then(() => {
+                          setLearnedEstimate(null)
+                        })
+                      }}
+                    >
+                      Reset learned values
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1458,20 +1660,38 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     setUploadMessage(null)
     try {
       await window.api.local.stat(data.path)
-      const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
-      const fileName = data.path.split('/').pop() || 'input'
-      const uploadDir = `${home}/${settings.paths.uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
-      const remotePath = `${uploadDir}/${fileName}`
-      await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
-      await window.api.sftp.upload(activeConnectionId, data.path, remotePath)
-      updateNodeData(nodeId, { path: remotePath, source: 'remote' })
-      setUploadMessage(`Uploaded to ${remotePath}`)
+      await uploadLocalFileForPath(activeConnectionId, data.path, settings.paths.uploadsSubfolder, nodeId, updateNodeData, setUploadMessage)
     } catch (err: any) {
       setUploadMessage(err?.message ?? String(err))
     } finally {
       setUploading(false)
     }
   }, [activeConnectionId, data.path, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
+
+  const acceptDroppedLocalFile = useCallback(async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const files = Array.from(event.dataTransfer.files ?? [])
+    const localPath = (files[0] as File & { path?: string } | undefined)?.path
+    if (!localPath) return
+    if (files.length > 1) {
+      setUploadMessage('Drop one file at a time for now.')
+      return
+    }
+    const stat = await window.api.local.stat(localPath)
+    if (stat.isDirectory) {
+      setUploadMessage('Dropping folders is not supported yet.')
+      return
+    }
+    updateNodeData(nodeId, {
+      source: 'local',
+      path: localPath,
+      fileType: inferFileType(localPath),
+    })
+    setUploadMessage(`Using ${pathBasename(localPath)}`)
+    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && window.confirm('Upload this file to the cluster now?')) {
+      await uploadLocalFileForPath(activeConnectionId, localPath, settings.paths.uploadsSubfolder, nodeId, updateNodeData, setUploadMessage)
+    }
+  }, [activeConnectionId, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
 
   return (
     <div className="flex flex-col gap-3">
@@ -1503,7 +1723,15 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               </button>
             ))}
           </div>
-          <div className="flex items-end gap-1.5">
+          <div
+            className="flex items-end gap-1.5"
+            onDragOver={(event) => {
+              if ((data.source ?? 'remote') === 'local') event.preventDefault()
+            }}
+            onDrop={(event) => {
+              if ((data.source ?? 'remote') === 'local') void acceptDroppedLocalFile(event)
+            }}
+          >
             <Input
               value={data.path}
               placeholder={(data.source ?? 'remote') === 'local' ? '/Users/you/data/phenotype.txt' : '/project/username/data/input.vcf.gz'}
@@ -1933,6 +2161,24 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       </div>
     </div>
   )
+}
+
+async function uploadLocalFileForPath(
+  activeConnectionId: string,
+  localPath: string,
+  uploadsSubfolder: string,
+  nodeId: string,
+  updateNodeData: (nodeId: string, patch: Partial<FileNodeData>) => void,
+  setUploadMessage: (message: string | null) => void,
+) {
+  const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
+  const fileName = localPath.split('/').pop() || 'input'
+  const uploadDir = `${home}/${uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
+  const remotePath = `${uploadDir}/${fileName}`
+  await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
+  await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
+  updateNodeData(nodeId, { path: remotePath, source: 'remote' })
+  setUploadMessage(`Uploaded to ${remotePath}`)
 }
 
 function splitOutputPath(data: FileNodeData): { folder: string; filename: string } {

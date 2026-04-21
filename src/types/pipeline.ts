@@ -37,6 +37,8 @@ export interface ToolParam {
   columnRef?: boolean
   /** Prefer columns from this connected input port (e.g. "pheno", "covar"). */
   columnSourcePortId?: string
+  /** When true, render the column picker as add/remove chips instead of a single text field. */
+  columnMulti?: boolean
 }
 
 /** Input/output port on a tool. */
@@ -105,6 +107,8 @@ export interface ToolNodeData {
   toolId: string                               // references ToolDef.id
   label: string                                // user-editable display label
   paramValues: Record<string, unknown>         // name -> value
+  /** Optional module name to load instead of the registry default. */
+  moduleOverride?: string
   slurmOverride?: {
     cpus?: number
     memoryGB?: number
@@ -160,7 +164,10 @@ export interface NodeGroup {
   id: string
   label: string
   nodeIds: string[]
+  kind?: 'execution' | 'visual'
   sharedResources?: SlurmOverride
+  collapsed?: boolean
+  axisSummary?: string
 }
 
 /** A file node — represents an input/output file in the graph. */
@@ -289,6 +296,7 @@ export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
 export interface NodeRunState {
   nodeId: string
+  toolId?: string
   status: ToolNodeData['status']
   jobId?: string                // Slurm job id (array jobs use the parent id)
   scriptPath?: string           // remote path to the submitted sbatch script

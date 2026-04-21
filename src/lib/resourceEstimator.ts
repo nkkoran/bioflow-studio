@@ -1,4 +1,5 @@
 import type { ToolDef, ToolNodeData } from '@/types/pipeline'
+import type { LearnedResourceSummary } from '@/types/ssh'
 
 export interface EstimateInput {
   tool: ToolDef
@@ -8,6 +9,7 @@ export interface EstimateInput {
   arraySize?: number
   hasFilter: boolean
   partitionMaxMemGB?: number
+  learned?: LearnedResourceSummary | null
 }
 
 export interface EstimateOutput {
@@ -16,6 +18,8 @@ export interface EstimateOutput {
   timeHours: number
   rationale: string[]
   confidence: 'low' | 'medium' | 'high'
+  source: 'registry' | 'learned'
+  learnedSampleCount?: number
 }
 
 function roundUp(value: number, step: number): number {
@@ -37,6 +41,24 @@ function confidenceFor(inputSizes: Record<string, number>): EstimateOutput['conf
 }
 
 export function estimateResources(input: EstimateInput): EstimateOutput {
+  if (input.learned && input.learned.sampleCount >= 2) {
+    const cpus = input.tool.slurm?.cpus ?? 2
+    const memGB = Math.max(1, Math.ceil(input.learned.p90MemoryGB))
+    const timeHours = Math.max(0.25, input.learned.p90RuntimeHours)
+    return {
+      cpus,
+      memGB: input.partitionMaxMemGB ? Math.min(input.partitionMaxMemGB, memGB) : memGB,
+      timeHours,
+      rationale: [
+        `Learned from ${input.learned.sampleCount} successful BioFlow jobs on this cluster.`,
+        `P90 memory ${input.learned.p90MemoryGB} GB and P90 runtime ${input.learned.p90RuntimeHours} h were used.`,
+      ],
+      confidence: input.learned.sampleCount >= 4 ? 'high' : 'medium',
+      source: 'learned',
+      learnedSampleCount: input.learned.sampleCount,
+    }
+  }
+
   const id = input.tool.id
   const sizeGB = largestInputGB(input.inputSizes)
   const rationale: string[] = []
@@ -124,5 +146,6 @@ export function estimateResources(input: EstimateInput): EstimateOutput {
     timeHours,
     rationale,
     confidence,
+    source: 'registry',
   }
 }

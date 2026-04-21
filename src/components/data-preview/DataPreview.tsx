@@ -6,6 +6,7 @@ import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
 import { Tabs } from '@/components/ui/Tabs'
 import { DataTable } from './DataTable'
 import { RawTextView } from './RawTextView'
+import { SavedViewsMenu } from './SavedViewsMenu'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
 
@@ -15,14 +16,28 @@ export function DataPreview() {
     activeTabId,
     filters,
     delimiterOverride,
+    savedViews,
+    activeSavedViewId,
+    savedViewsLoaded,
     setActiveTab,
     closeTab,
     setTabData,
     setDelimiterOverride,
+    loadSavedViews,
+    saveView,
+    applySavedView,
+    resetFreshView,
+    updateSavedView,
+    renameSavedView,
+    deleteSavedView,
   } = useDataPreviewStore()
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    if (!savedViewsLoaded) void loadSavedViews()
+  }, [loadSavedViews, savedViewsLoaded])
 
   useEffect(() => {
     for (const tab of tabs) {
@@ -136,6 +151,8 @@ export function DataPreview() {
   }
 
   const activeTab = tabs.find((t) => t.id === activeTabId)
+  const activeViews = activeTab ? (savedViews[activeTab.filePath] ?? []) : []
+  const selectedSavedViewId = activeTab ? activeSavedViewId[activeTab.filePath] : undefined
 
   return (
     <div className="flex flex-col h-full">
@@ -174,22 +191,51 @@ export function DataPreview() {
             Table
           </button>
           {activeTab.mode === 'tabular' && (
-            <label className="ml-1 flex items-center gap-1 text-[11px] text-text-muted">
-              Delimiter
-              <select
-                value={delimiterOverride[activeTab.filePath] ?? 'auto'}
-                onChange={(e) => setDelimiterOverride(activeTab.filePath, e.target.value as DelimiterOverride)}
-                className="h-6 rounded border border-border bg-bg-primary px-1.5 text-[11px] text-text-primary outline-none focus:ring-1 focus:ring-accent"
-                title="Override the delimiter used to parse this file"
-              >
-                <option value="auto">Auto</option>
-                <option value={'\t'}>Tab</option>
-                <option value=",">Comma</option>
-                <option value=" ">Space</option>
-                <option value=";">Semicolon</option>
-                <option value="|">Pipe</option>
-              </select>
-            </label>
+            <>
+              <label className="ml-1 flex items-center gap-1 text-[11px] text-text-muted">
+                Delimiter
+                <select
+                  value={delimiterOverride[activeTab.filePath] ?? 'auto'}
+                  onChange={(e) => setDelimiterOverride(activeTab.filePath, e.target.value as DelimiterOverride)}
+                  className="h-6 rounded border border-border bg-bg-primary px-1.5 text-[11px] text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                  title="Override the delimiter used to parse this file"
+                >
+                  <option value="auto">Auto</option>
+                  <option value={'\t'}>Tab</option>
+                  <option value=",">Comma</option>
+                  <option value=" ">Space</option>
+                  <option value=";">Semicolon</option>
+                  <option value="|">Pipe</option>
+                </select>
+              </label>
+              <SavedViewsMenu
+                views={activeViews}
+                activeViewId={selectedSavedViewId}
+                onApply={(viewId) => {
+                  if (viewId) applySavedView(activeTab.filePath, viewId)
+                  else resetFreshView(activeTab.filePath)
+                }}
+                onSave={() => {
+                  const name = window.prompt('Save preview view as:')
+                  if (name) void saveView(activeTab.filePath, name)
+                }}
+                onUpdate={() => {
+                  if (selectedSavedViewId) void updateSavedView(activeTab.filePath, selectedSavedViewId)
+                }}
+                onRename={() => {
+                  if (!selectedSavedViewId) return
+                  const current = activeViews.find((view) => view.id === selectedSavedViewId)
+                  const name = window.prompt('Rename saved view:', current?.name ?? '')
+                  if (name) void renameSavedView(activeTab.filePath, selectedSavedViewId, name)
+                }}
+                onDelete={() => {
+                  if (!selectedSavedViewId) return
+                  if (window.confirm('Delete this saved preview view?')) {
+                    void deleteSavedView(activeTab.filePath, selectedSavedViewId)
+                  }
+                }}
+              />
+            </>
           )}
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>

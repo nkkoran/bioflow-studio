@@ -248,6 +248,12 @@ const api = {
       ipcRenderer.invoke('cluster:loginPolicy', connectionId),
     listAccounts: (connectionId: string): Promise<{ accounts: string[]; source: 'sacctmgr' | 'sshare' | 'groups'; cachedAt: number }> =>
       ipcRenderer.invoke('cluster:listAccounts', connectionId),
+    listModules: (connectionId: string, query?: string, options?: { force?: boolean }) =>
+      ipcRenderer.invoke('cluster:listModules', connectionId, query, options),
+    getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) =>
+      ipcRenderer.invoke('cluster:getLearnedResources', connectionId, toolId, options),
+    resetLearnedResources: (connectionId: string, toolId: string) =>
+      ipcRenderer.invoke('cluster:resetLearnedResources', connectionId, toolId),
   },
   fs: {
     resolveSplit: (

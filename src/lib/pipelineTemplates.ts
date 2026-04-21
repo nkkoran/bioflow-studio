@@ -189,6 +189,16 @@ export const PIPELINE_TEMPLATES: PipelineTemplate[] = [
         { id: 'e_assoc_merge', source: 'assoc', sourceHandle: 'output', target: 'merge_assoc', targetHandle: 'input' },
         { id: 'e_merge_out', source: 'merge_assoc', sourceHandle: 'output', target: 'assoc_out', targetHandle: 'input' },
       ],
+      groups: [
+        {
+          id: 'g_per_chrom_branch',
+          label: 'Per-chromosome branch',
+          kind: 'visual',
+          collapsed: true,
+          axisSummary: 'chrom×22',
+          nodeIds: ['pgen_chr', 'assoc', 'merge_assoc'],
+        },
+      ],
     },
   },
   {
@@ -219,6 +229,22 @@ export const PIPELINE_TEMPLATES: PipelineTemplate[] = [
         { id: 'e_female_merge', source: 'female_gwas', sourceHandle: 'output', target: 'branch_merge', targetHandle: 'input' },
         { id: 'e_branch_out', source: 'branch_merge', sourceHandle: 'output', target: 'branch_out', targetHandle: 'input' },
       ],
+      groups: [
+        {
+          id: 'g_male_branch',
+          label: 'Male branch',
+          kind: 'visual',
+          collapsed: true,
+          nodeIds: ['geno_all', 'pheno_sex', 'male_gwas'],
+        },
+        {
+          id: 'g_female_branch',
+          label: 'Female branch',
+          kind: 'visual',
+          collapsed: true,
+          nodeIds: ['geno_all', 'pheno_sex', 'female_gwas'],
+        },
+      ],
     },
   },
 ]
@@ -236,5 +262,6 @@ export function instantiateTemplate(template: PipelineTemplate): PipelineSnapsho
       data: { ...node.data },
     })),
     edges: template.snapshot.edges.map((edge) => ({ ...edge })),
+    groups: template.snapshot.groups?.map((group) => ({ ...group, nodeIds: [...group.nodeIds] })),
   }
 }

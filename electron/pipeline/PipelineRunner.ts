@@ -137,7 +137,11 @@ export class PipelineRunner {
     const nodes: Record<string, NodeRunState> = {}
     for (const n of snapshot.nodes) {
       if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
-        nodes[n.id] = { nodeId: n.id, status: 'idle' }
+        nodes[n.id] = {
+          nodeId: n.id,
+          toolId: n.type === 'tool' ? (n.data as ToolNodeData).toolId : n.type,
+          status: 'idle',
+        }
       }
     }
     const runState: RunState = {
@@ -402,11 +406,18 @@ export class PipelineRunner {
     run.updatedAt = Date.now()
     this.emitRunStatus(runId, 'running')
     for (const id of affected) {
-      const existing = run.nodes[id] ?? { nodeId: id, status: 'idle' as const }
+      const snapshotNode = snapshot.nodes.find((node) => node.id === id)
+      const existing = run.nodes[id] ?? {
+        nodeId: id,
+        toolId: snapshotNode?.type === 'tool'
+          ? (snapshotNode.data as ToolNodeData).toolId
+          : snapshotNode?.type,
+        status: 'idle' as const,
+      }
       if (existing.jobId && (existing.status === 'queued' || existing.status === 'running')) {
         await this.tracker.cancel(run.connectionId, existing.jobId)
       }
-      run.nodes[id] = { nodeId: id, status: 'idle' }
+      run.nodes[id] = { nodeId: id, toolId: existing.toolId, status: 'idle' }
       this.emitNodeStatus(runId, id, 'idle')
     }
 

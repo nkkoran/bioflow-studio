@@ -51,3 +51,26 @@ export interface ClusterAccountsResult {
   source: 'sacctmgr' | 'sshare' | 'groups'
   cachedAt: number
 }
+
+export interface ClusterModuleSuggestion {
+  name: string
+  versions: string[]
+  description?: string
+  details?: string
+}
+
+export interface ClusterModulesResult {
+  modules: ClusterModuleSuggestion[]
+  source: 'module-spider' | 'module-avail'
+  cachedAt: number
+}
+
+export interface LearnedResourceSummary {
+  toolId: string
+  sampleCount: number
+  p50RuntimeHours: number
+  p90RuntimeHours: number
+  p90MemoryGB: number
+  sourceJobIds: string[]
+  lastUpdated: number
+}

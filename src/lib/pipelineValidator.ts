@@ -448,6 +448,7 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
   }
 
   for (const group of snapshot.groups ?? []) {
+    if (group.kind === 'visual') continue
     const groupNodeIds = new Set(group.nodeIds)
     const members = group.nodeIds.map((id) => nodeById.get(id)).filter(Boolean) as PipelineSnapshot['nodes']
     if (members.length !== group.nodeIds.length || members.length < 2) {

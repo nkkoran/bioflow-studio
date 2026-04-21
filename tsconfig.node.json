@@ -16,5 +16,5 @@
     "declaration": true,
     "composite": true
   },
-  "include": ["electron/**/*.ts", "src/types/**/*.ts", "src/lib/toolRegistry.ts"]
+  "include": ["electron/**/*.ts", "src/types/**/*.ts", "src/lib/toolRegistry.ts", "src/lib/resourceLearning.ts"]
 }

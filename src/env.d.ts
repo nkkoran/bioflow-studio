@@ -100,6 +100,9 @@ interface Window {
     cluster: {
       loginPolicy: (connectionId: string) => Promise<import('./types/ssh').LoginPolicy>
       listAccounts: (connectionId: string) => Promise<import('./types/ssh').ClusterAccountsResult>
+      listModules: (connectionId: string, query?: string, options?: { force?: boolean }) => Promise<import('./types/ssh').ClusterModulesResult>
+      getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) => Promise<import('./types/ssh').LearnedResourceSummary | null>
+      resetLearnedResources: (connectionId: string, toolId: string) => Promise<void>
     }
     fs: {
       resolveSplit: (

@@ -57,7 +57,7 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
         <FileText size={14} className="text-amber-400 shrink-0" />
         <div className="flex-1 min-w-0">
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
-            {nodeData.fileType} {isInput ? 'input' : 'output'}
+            {nodeData.fileType} {isInput ? 'input' : 'output'}{isInput && nodeData.source === 'local' ? ' · local' : ''}
           </div>
           <div className="text-xs font-semibold text-text-primary truncate">
             {nodeData.label}

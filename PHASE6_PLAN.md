@@ -1,8 +1,9 @@
 # Phase 6 — Polish, Real-World Ergonomics, and Parallel Branches
 
-**Status:** in progress. Tracks A and B are implemented; several Phase 6
-ergonomics fixes landed during interactive testing and are recorded below.
-Remaining planned work is still listed in Tracks C-D.
+**Status:** implemented and audit-polished. Tracks A-D are in the tree; the
+latest audit pass tightened a few edge cases around visual group collapse,
+module autocomplete caching, learned-resource refresh, and local-file drop
+paths.
 
 ## Project context
 
@@ -20,7 +21,7 @@ plan.
 | # | Area | Status |
 |---|---|---|
 | A-10b | Axis chips on edges | implemented |
-| A-10c | Column mapping in inspector | partially implemented (delimiter-aware schema loading; full mtime cache/refresh remains B-5) |
+| A-10c | Column mapping in inspector | implemented |
 | A-10f | Login-node warning banner | implemented |
 | A-10g | Centralized tool icons | implemented |
 | A-11 | Axis splitter UX and auto-detection | implemented |
@@ -38,14 +39,14 @@ plan.
 | B-7 | Pipeline templates gallery | implemented |
 | B-8 | Failed-job diagnostic helper | implemented |
 | B-9 | Local→remote upload helper | implemented |
-| C-7 | Delimiter detection + filter UI | partially implemented (shared detector + schema use; manual override/filter operators remain planned) |
-| C-8 | Jobs tab declutter | planned |
-| C-9 | Data preview tab hygiene | planned |
-| D-1 | Saved preview views | planned |
-| D-2 | Drag-and-drop local file upload | planned |
-| D-3 | Learned resource estimation | planned |
-| D-4 | Full module spider autocomplete | planned |
-| D-5 | Canvas node group auto-collapse | planned |
+| C-7 | Delimiter detection + filter UI | implemented |
+| C-8 | Jobs tab declutter | implemented |
+| C-9 | Data preview tab hygiene | implemented |
+| D-1 | Saved preview views | implemented |
+| D-2 | Drag-and-drop local file upload | implemented |
+| D-3 | Learned resource estimation | implemented |
+| D-4 | Full module spider autocomplete | implemented |
+| D-5 | Canvas node group auto-collapse | implemented |
 
 ---
 
@@ -424,9 +425,7 @@ interface MergeNodeData {
 
 **Motivation:** `.glm`, `.profile`, space-delimited `.eigenvec` files parse as single-column; filter UI has no operator affordance; no manual delimiter override.
 
-**Status:** partially implemented. The shared detector and parser are done and
-used by both data preview and analysis-block column selectors. Filter operators
-and manual delimiter override remain planned.
+**Status:** implemented.
 
 **Plan:**
 - **7a. Detector** (`src/components/data-preview/DelimiterDetector.ts`): change `detectDelimiter` to score by column-count consistency (mode + standard deviation) first; tie-break tab > comma > space > semicolon. Add invariants at the top of the file.
@@ -448,6 +447,8 @@ and manual delimiter override remain planned.
 
 ### C-8. Jobs tab declutter
 
+**Status:** implemented.
+
 **Motivation:** NodeRunList rows are too dense; run selector shows slug ids; log viewer chrome wastes space; no empty state.
 
 **Plan:**
@@ -461,6 +462,8 @@ and manual delimiter override remain planned.
 ### C-9. Data preview tab hygiene
 
 **Motivation:** same preview panel as C-7 but opened via file explorer double-click. Filter state leaks across tabs, close button too small, scroll resets on tab revisit.
+
+**Status:** implemented.
 
 **Plan:**
 - `dataPreviewStore` keyed by `path`, stored fields include `filters`, `delimiterOverride`, `scrollOffset`. Always reset `filters` on fresh tab open unless an explicit `savedView` flag is set (scaffold flag only; saved-views is future work).
@@ -478,6 +481,8 @@ and manual delimiter override remain planned.
 
 **Motivation:** researchers often return to the same filtered, sorted, scrolled view while comparing GWAS outputs. C-9 scaffolds `savedView`; Phase 6 now makes it user-facing instead of leaving it as future work.
 
+**Status:** implemented.
+
 **Plan:**
 - Extend `dataPreviewStore` with saved views keyed by file path: `{ name, filters, delimiterOverride, scrollOffset, sortState?, createdAt, updatedAt }`.
 - `DataPreview.tsx` adds a compact saved-view selector next to the delimiter override: "Save view", "Update current", "Rename", and "Delete".
@@ -490,6 +495,8 @@ and manual delimiter override remain planned.
 
 **Motivation:** B-9 adds a button flow for laptop files, but users naturally drag phenotype/covariate files from Finder into the app.
 
+**Status:** implemented.
+
 **Plan:**
 - Add drag targets to the canvas and FileNode inspector. Dropping a local file creates or updates a FileNode with `source: 'local'`, path, and inferred file type.
 - Reuse B-9 upload infrastructure, progress UI, settings key, and validator rule; do not create a second upload path.
@@ -501,6 +508,8 @@ and manual delimiter override remain planned.
 ### D-3. Learned resource estimation from `sacct` history
 
 **Motivation:** static resource estimates are useful for first runs but weak after users have real cluster history. Recent successful jobs can teach better memory/time defaults.
+
+**Status:** implemented.
 
 **Plan:**
 - Add a main-process helper that queries `sacct` for completed BioFlow jobs by job name prefix and parses elapsed time, requested memory, max RSS, state, node count, and tool id encoded in job metadata.
@@ -515,6 +524,8 @@ and manual delimiter override remain planned.
 
 **Motivation:** users still need to know exact module names for PLINK2, REGENIE, bcftools, VEP, ANNOVAR dependencies, and custom shell nodes.
 
+**Status:** implemented.
+
 **Plan:**
 - New IPC `cluster:listModules(connectionId, query?)` backed by `module spider` or `module avail`, cached per connection with a manual refresh.
 - Add module suggestions to settings/tool inspector fields that accept module names. Support fuzzy search by package name and version string.
@@ -527,6 +538,8 @@ and manual delimiter override remain planned.
 ### D-5. Automatic collapse/expand of canvas node groups
 
 **Motivation:** large GWAS pipelines become hard to scan after templates, parallel branches, and per-chromosome flows land. Users need a way to compress completed or logically related groups without losing graph meaning.
+
+**Status:** implemented.
 
 **Plan:**
 - Add group metadata to pipeline state for collapsed bounds and member node ids. Keep the existing node types; groups are layout metadata, not execution nodes.
@@ -543,8 +556,8 @@ and manual delimiter override remain planned.
 
 Batches — each mergeable and verifiable on its own.
 
-**Current branch completed:** A-10g, A-10b, A-10f, A-11, A-12, A-13,
-A-14, B-1 through B-9, plus the implemented portions of C-7.
+**Current branch completed:** A-10g, A-10b, A-10c, A-10f, A-11, A-12, A-13,
+A-14, B-1 through B-9, C-7 through C-9, and D-1 through D-5.
 
 1. **Batch 1 — low-risk carry-forward + plumbing.** A-10g (icons), A-10b (edge chips), A-10f (login banner), B-1 (account dropdown), B-2a (debug log), B-2b (session reuse). All additive; no model changes.
 2. **Batch 2 — inspector ergonomics.** B-3 (advanced collapsible), B-4a (hover card), B-4b (param tooltip + docUrl), B-5 (column matching + refresh). Shared file: `NodeInspector.tsx` — land as one PR or coordinate carefully.
@@ -564,9 +577,8 @@ A-14, B-1 through B-9, plus the implemented portions of C-7.
 `src/lib/resolveUpstreamSchema.ts`, `src/components/jobs/FailureDiagnostic.tsx`,
 `src/components/pipeline/TemplateGallery.tsx`.
 
-**Remaining planned new files:**
-`src/components/data-preview/SavedViewsMenu.tsx`, `src/lib/resourceLearning.ts`,
-`src/components/pipeline/CanvasGroup.tsx`
+**Later/current branch additions:**
+`src/components/data-preview/SavedViewsMenu.tsx`, `src/lib/resourceLearning.ts`
 
 **Heavily modified / current branch:**
 - `src/components/pipeline/NodeInspector.tsx` — implemented axis split
@@ -590,13 +602,13 @@ A-14, B-1 through B-9, plus the implemented portions of C-7.
   `src/components/data-preview/DataPreview.tsx`, `src/lib/fileTypeInference.ts`
   — implemented shared delimiter parsing and genetics file inference.
 
-**Remaining planned heavy modifications:**
+**Later/current branch heavy modifications:**
 - `src/components/data-preview/{DataPreview,DataTable,DelimiterDetector}.tsx`
 - `src/stores/dataPreviewStore.ts`
 - `src/components/jobs/{JobsPanel,NodeRunList,LogViewer,RunSelector}.tsx`
 - `src/components/pipeline/PipelineCanvas.tsx` — drag-drop upload target, axed edge types, visual groups
 - `src/stores/uiStore.ts` — `advancedExpanded`, saved preview view controls, group collapse state as needed
-- `src/stores/resourceEstimateStore.ts` — learned `sacct` summaries
+- `src/lib/resourceEstimator.ts` + `electron/ipc/clusterHandlers.ts` — learned `sacct` summaries
 
 ## Verification plan (end-to-end)
 
@@ -635,4 +647,4 @@ A-14, B-1 through B-9, plus the implemented portions of C-7.
 
 ## Deferred / out of scope
 
-- None from the previous Phase 6 deferred list. Those items are now planned as Track D.
+- None from the previous Phase 6 deferred list. Those items were completed in Track D.
