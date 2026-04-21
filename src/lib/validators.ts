@@ -1,15 +1,15 @@
 import { z } from 'zod'
 
 export const connectionConfigSchema = z.object({
-  name: z.string().min(1, 'Connection name is required'),
-  host: z.string().min(1, 'Host is required'),
+  name: z.string().trim().min(1, 'Connection name is required'),
+  host: z.string().trim().min(1, 'Host is required'),
   port: z.number().int().min(1).max(65535).default(22),
-  username: z.string().min(1, 'Username is required'),
+  username: z.string().trim().min(1, 'Username is required'),
   authMethod: z.enum(['key', 'password', 'agent']),
-  privateKeyPath: z.string().optional(),
+  privateKeyPath: z.string().trim().optional(),
   passphrase: z.string().optional(),
   password: z.string().optional(),
-  defaultDirectory: z.string().optional(),
+  defaultDirectory: z.string().trim().optional(),
 }).refine(
   (data) => {
     if (data.authMethod === 'key') return !!data.privateKeyPath

@@ -36,19 +36,23 @@ export function Dialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity"
-      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
     >
       <div
         className={classNames(
           'w-full bg-bg-secondary border border-border rounded-lg shadow-2xl',
           'animate-dialog-in',
+          'max-h-[90vh] flex flex-col',
           width,
         )}
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+        {/* Header — fixed */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
           <h2 className="text-lg font-semibold text-text-primary">{title}</h2>
           <button
             onClick={onClose}
@@ -69,12 +73,12 @@ export function Dialog({
           </button>
         </div>
 
-        {/* Body */}
-        <div className="px-6 py-4">{children}</div>
+        {/* Body — scrolls when content exceeds available space */}
+        <div className="px-6 py-4 overflow-y-auto flex-1 min-h-0">{children}</div>
 
-        {/* Footer */}
+        {/* Footer — fixed */}
         {footer && (
-          <div className="flex justify-end gap-2 px-6 py-3 border-t border-border">
+          <div className="flex justify-end gap-2 px-6 py-3 border-t border-border shrink-0">
             {footer}
           </div>
         )}

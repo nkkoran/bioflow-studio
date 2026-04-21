@@ -1,14 +1,23 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { ConnectionDialog } from './ConnectionDialog'
-import { Wifi, WifiOff, ChevronDown, Settings, Server } from 'lucide-react'
+import { Wifi, WifiOff, ChevronDown, Settings, Server, Bug, RefreshCcw } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { useUIStore } from '@/stores/uiStore'
+import { useClusterInfoStore } from '@/stores/clusterInfoStore'
+import { ConnectionLogDrawer } from './ConnectionLogDrawer'
 
-export function ConnectionStatus() {
+interface ConnectionStatusProps {
+  /** When true, collapse to an icon-only pill (used in narrow TopBar widths). */
+  compact?: boolean
+}
+
+export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [slurmOpen, setSlurmOpen] = useState(false)
+  const [logOpen, setLogOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const { connections, activeConnectionId, disconnect, connectLocal } = useConnectionStore()
@@ -61,12 +70,17 @@ export function ConnectionStatus() {
 
   return (
     <>
-      <div className="relative" ref={dropdownRef}>
+      <div className="relative flex items-center" ref={dropdownRef}>
         <button
           onClick={handleClick}
-          className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors text-sm"
+          className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors text-sm min-w-0"
+          title={
+            status === 'connected' && activeEntry
+              ? `${activeEntry.config.name} (${activeEntry.config.username}@${activeEntry.config.host})`
+              : undefined
+          }
         >
-          <span className="relative flex items-center">
+          <span className="relative flex items-center shrink-0">
             <span
               className={`w-2 h-2 rounded-full ${dotColor} ${isAnimated ? 'animate-pulse' : ''}`}
             />
@@ -74,34 +88,46 @@ export function ConnectionStatus() {
 
           {status === 'connected' && activeEntry && (
             <>
-              <span className="text-text-primary">
-                {activeEntry.config.name}
-              </span>
-              <span className="text-text-muted">
-                ({activeEntry.config.username}@{activeEntry.config.host})
-              </span>
-              <ChevronDown size={14} className="text-text-muted" />
+              {compact ? (
+                <>
+                  <span className="text-text-primary text-xs font-mono truncate max-w-[120px]">
+                    {activeEntry.config.name}
+                  </span>
+                  <ChevronDown size={12} className="text-text-muted shrink-0" />
+                </>
+              ) : (
+                <>
+                  <span className="text-text-primary truncate">
+                    {activeEntry.config.name}
+                  </span>
+                  <span className="text-text-muted truncate">
+                    ({activeEntry.config.username}@{activeEntry.config.host})
+                  </span>
+                  <ChevronDown size={14} className="text-text-muted shrink-0" />
+                </>
+              )}
             </>
           )}
 
           {status === 'connecting' && (
-            <span className="text-text-secondary">Connecting...</span>
+            <span className="text-text-secondary">{compact ? '...' : 'Connecting...'}</span>
           )}
 
           {status === 'reconnecting' && (
-            <span className="text-text-secondary">Reconnecting...</span>
+            <span className="text-text-secondary">{compact ? '...' : 'Reconnecting...'}</span>
           )}
 
           {status === 'error' && (
-            <span className="text-error">Connection error</span>
+            <span className="text-error">{compact ? 'Err' : 'Connection error'}</span>
           )}
 
-          {status === 'disconnected' && (
+          {status === 'disconnected' && !compact && (
             <span className="text-text-muted">Not connected</span>
           )}
         </button>
 
-        {/* Disconnected/Error: show Connect + Local buttons */}
+        {/* Disconnected/Error: show Connect + Local buttons. In compact mode
+            collapse the labels to icons to save space. */}
         {(status === 'disconnected' || status === 'error') && (
           <>
             <Button
@@ -109,17 +135,19 @@ export function ConnectionStatus() {
               size="sm"
               icon={<Wifi size={14} />}
               onClick={() => setDialogOpen(true)}
-              className="ml-1"
+              className="ml-1 shrink-0"
+              title="Connect"
             >
-              Connect
+              {!compact && 'Connect'}
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => connectLocal()}
-              className="ml-1"
+              className="ml-1 shrink-0"
+              title="Use local filesystem"
             >
-              Local
+              {compact ? <Server size={14} /> : 'Local'}
             </Button>
           </>
         )}
@@ -145,8 +173,27 @@ export function ConnectionStatus() {
                   Connected {formatUptime(Date.now() - activeEntry.connectedAt)}
                 </div>
               )}
+              {activeEntry.reused && (
+                <div className="mt-1 text-[11px] text-accent">
+                  Reused existing session
+                </div>
+              )}
+              {!isLocal && (
+                <div className="mt-2 rounded border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+                  Keep heavy work on Slurm. Login-node actions are for setup, downloads, and quick checks only.
+                </div>
+              )}
             </div>
             <div className="p-2 flex flex-col gap-1">
+              {!isLocal && (
+                <button
+                  onClick={() => setLogOpen(true)}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
+                >
+                  <Bug size={14} />
+                  SSH diagnostic log
+                </button>
+              )}
               {!isLocal && (
                 <button
                   onClick={() => setSlurmOpen((v) => !v)}
@@ -186,6 +233,7 @@ export function ConnectionStatus() {
       </div>
 
       <ConnectionDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+      <ConnectionLogDrawer open={logOpen} onClose={() => setLogOpen(false)} connectionId={activeConnectionId} />
     </>
   )
 }
@@ -198,24 +246,34 @@ export function ConnectionStatus() {
 function SlurmSettings({ connectionId }: { connectionId: string }) {
   const [account, setAccount] = useState('')
   const [partition, setPartition] = useState('')
+  const [analysisFolder, setAnalysisFolder] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
+  const accountInfo = useClusterInfoStore((s) => s.accountsByConnection[connectionId])
+  const accountsLoading = useClusterInfoStore((s) => s.loadingAccounts[connectionId])
+  const accountError = useClusterInfoStore((s) => s.errorByConnection[connectionId])
+  const loadAccounts = useClusterInfoStore((s) => s.loadAccounts)
 
   // Load current values once.
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const [a, p] = await Promise.all([
+      const [a, p, f] = await Promise.all([
         window.api.store.get<string>(`connection:${connectionId}:slurmAccount`),
         window.api.store.get<string>(`connection:${connectionId}:slurmPartition`),
+        window.api.store.get<string>(`connection:${connectionId}:defaultAnalysisFolder`),
       ])
       if (cancelled) return
       setAccount(a ?? '')
       setPartition(p ?? '')
+      setAnalysisFolder(f ?? '')
       setLoaded(true)
+      void loadAccounts(connectionId).then((result) => {
+        if (!cancelled && !a && result.accounts.length === 1) setAccount(result.accounts[0])
+      }).catch(() => undefined)
     })()
     return () => { cancelled = true }
-  }, [connectionId])
+  }, [connectionId, loadAccounts])
 
   const save = useCallback(async () => {
     // electron-store rejects undefined ("Use delete() to clear values"), so we
@@ -225,6 +283,7 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
       await Promise.all([
         window.api.store.set(`connection:${connectionId}:slurmAccount`, account.trim()),
         window.api.store.set(`connection:${connectionId}:slurmPartition`, partition.trim()),
+        window.api.store.set(`connection:${connectionId}:defaultAnalysisFolder`, analysisFolder.trim()),
       ])
       setSaveMsg('Saved')
     } catch (err: any) {
@@ -232,7 +291,7 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
       setSaveMsg(`Error: ${err?.message ?? err}`)
     }
     setTimeout(() => setSaveMsg(null), 2500)
-  }, [connectionId, account, partition])
+  }, [connectionId, account, partition, analysisFolder])
 
   if (!loaded) {
     return (
@@ -242,18 +301,71 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
 
   return (
     <div className="px-3 py-2 flex flex-col gap-2 border border-border rounded bg-bg-tertiary/40">
-      <Input
-        label="Slurm account"
-        value={account}
-        onChange={(e) => setAccount(e.target.value)}
-        placeholder="rrg-xxxx"
-      />
+      <div className="flex flex-col gap-1">
+        <label className="text-text-secondary text-xs font-medium">Slurm account</label>
+        <div className="flex items-center gap-1.5">
+          <input
+            value={account}
+            onChange={(e) => setAccount(e.target.value)}
+            placeholder="rrg-xxxx"
+            list={`slurm-accounts-${connectionId}`}
+            className="h-8 min-w-0 flex-1 rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          <button
+            type="button"
+            className="h-8 rounded-md border border-border bg-bg-secondary px-2 text-text-muted hover:bg-bg-hover hover:text-text-primary"
+            title="Refresh Slurm accounts"
+            onClick={() => void loadAccounts(connectionId, { force: true })}
+          >
+            <RefreshCcw size={13} className={accountsLoading ? 'animate-spin' : ''} />
+          </button>
+        </div>
+        <datalist id={`slurm-accounts-${connectionId}`}>
+          {(accountInfo?.accounts ?? []).map((candidate) => (
+            <option key={candidate} value={candidate} />
+          ))}
+        </datalist>
+        <div className="text-[10px] text-text-muted">
+          {accountsLoading
+            ? 'Looking up accounts...'
+            : accountInfo
+              ? `Source: ${accountInfo.source}${accountInfo.accounts.length ? ` · ${accountInfo.accounts.length} account${accountInfo.accounts.length === 1 ? '' : 's'}` : ''}`
+              : 'Free text is still allowed if discovery is unavailable.'}
+          {accountError ? ` Discovery failed: ${accountError}` : ''}
+        </div>
+      </div>
       <Input
         label="Default partition"
         value={partition}
         onChange={(e) => setPartition(e.target.value)}
         placeholder="(optional)"
       />
+      <div className="flex flex-col gap-1">
+        <label className="text-text-secondary text-xs font-medium">Default analysis folder</label>
+        <div className="flex items-end gap-1.5">
+          <Input
+            value={analysisFolder}
+            onChange={(e) => setAnalysisFolder(e.target.value)}
+            placeholder="(optional, e.g. /scratch/username/bioflow)"
+            className="flex-1"
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 px-2 shrink-0"
+            title="Browse folders in the sidebar"
+            onClick={() =>
+              useUIStore.getState().startFilePick({
+                target: 'directory',
+                requesterLabel: 'Default analysis folder',
+                onResolve: ({ path }) => setAnalysisFolder(path),
+              })
+            }
+          >
+            Browse
+          </Button>
+        </div>
+      </div>
       <div className="flex items-center gap-2 mt-1">
         <Button variant="primary" size="sm" onClick={save} className="h-7 px-3 text-xs">
           Save

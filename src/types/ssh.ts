@@ -7,6 +7,9 @@ export interface ConnectionConfig {
   privateKeyPath?: string
   passphrase?: string
   password?: string
+  rememberPassword?: boolean
+  generatedKeyPath?: string
+  setupNote?: string
   defaultDirectory?: string
 }
 
@@ -14,6 +17,14 @@ export interface ConnectionResult {
   id: string
   host: string
   username: string
+  reused?: boolean
+}
+
+export interface LoginPolicy {
+  hostname: string
+  cpuTimeLimitSeconds: number | null
+  memLimitMB: number | null
+  source: 'ulimit' | 'unknown'
 }
 
 export interface ConnectionStatus {
@@ -30,3 +41,58 @@ export interface ExecResult {
 }
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+
+export interface SshDebugEvent {
+  connectionId: string
+  stage: 'connect' | 'auth' | 'prompt' | 'banner' | 'error'
+  detail: string
+  at: number
+}
+
+export interface ClusterAccountsResult {
+  accounts: string[]
+  source: 'sacctmgr' | 'sshare' | 'groups'
+  cachedAt: number
+}
+
+export interface ClusterModuleSuggestion {
+  name: string
+  versions: string[]
+  description?: string
+  details?: string
+}
+
+export interface ClusterModulesResult {
+  modules: ClusterModuleSuggestion[]
+  source: 'module-spider' | 'module-avail'
+  cachedAt: number
+}
+
+export interface LearnedResourceSummary {
+  toolId: string
+  sampleCount: number
+  p50RuntimeHours: number
+  p90RuntimeHours: number
+  p90MemoryGB: number
+  sourceJobIds: string[]
+  lastUpdated: number
+}
+
+export interface SshKeySetupRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  comment?: string
+  overwrite?: boolean
+  addToAgent?: boolean
+  addToKeychain?: boolean
+}
+
+export interface SshKeySetupResult {
+  keyPath: string
+  publicKeyPath: string
+  agentAdded: boolean
+  keychainAdded: boolean
+  note?: string
+}

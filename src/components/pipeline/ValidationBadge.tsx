@@ -1,24 +1,49 @@
 /**
- * ValidationBadge — compact badge in PipelineToolbar showing overall pipeline
- * health. Click opens a dropdown grouping issues by severity with a "jump to
- * node" action that selects the offending node on the canvas.
+ * ValidationBadge — on-demand pipeline health check in PipelineToolbar.
+ *
+ * Shows a neutral "Validate" button until the user clicks it. After a
+ * validation run the button switches to a severity-tinted chip with the
+ * issue count. Any edit to nodes or edges resets it back to the idle state
+ * so it never lingers as a stale, always-glaring red badge.
+ *
+ * Clicking the chip (after a validate run) toggles the issues dropdown,
+ * which groups issues by severity and offers a "jump" link to the offending
+ * node.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, AlertTriangle, XCircle, Info } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { CheckSquare, CheckCircle2, AlertTriangle, XCircle, Info } from 'lucide-react'
 import { usePipelineStore } from '@/stores/pipelineStore'
-import { validatePipeline, type ValidationIssue, type ValidationSeverity } from '@/lib/pipelineValidator'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { validatePipeline, type ValidationIssue, type ValidationResult, type ValidationSeverity } from '@/lib/pipelineValidator'
 
 export function ValidationBadge() {
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
+  const schemas = useDataPreviewStore((s) => s.schemas)
+  const settings = useSettingsStore((s) => s.settings)
+
+  const [result, setResult] = useState<ValidationResult | null>(null)
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 
-  const result = useMemo(() => validatePipeline(exportSnapshot()), [nodes, edges, exportSnapshot])
+  // Reset to idle whenever the pipeline structure changes after a validate run.
+  const validatedAt = useRef<{ nodeCount: number; edgeCount: number } | null>(null)
+  useEffect(() => {
+    if (!validatedAt.current) return
+    if (
+      nodes.length !== validatedAt.current.nodeCount ||
+      edges.length !== validatedAt.current.edgeCount
+    ) {
+      setResult(null)
+      setOpen(false)
+      validatedAt.current = null
+    }
+  }, [nodes, edges])
 
-  // Close the dropdown on outside click.
+  // Close dropdown on outside click.
   useEffect(() => {
     if (!open) return
     function onDown(e: MouseEvent) {
@@ -28,9 +53,42 @@ export function ValidationBadge() {
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
-  const { errorCount, warningCount, infoCount } = result
+  const handleValidate = () => {
+    const r = validatePipeline(exportSnapshot(), {
+      schemas,
+      annotationDefaults: {
+        annovarDbPath: settings.annovarDbPath,
+        annovarScriptsPath: settings.annovarScriptsPath,
+        vepCachePath: settings.vepCachePath,
+        vepPath: settings.vepPath,
+      },
+    })
+    setResult(r)
+    validatedAt.current = { nodeCount: nodes.length, edgeCount: edges.length }
+    setOpen(true)
+  }
 
-  // Choose badge style based on worst severity present.
+  const handleJump = (nodeId?: string) => {
+    if (nodeId) setSelectedNode(nodeId)
+    setOpen(false)
+  }
+
+  // ── Idle state ────────────────────────────────────────────────────────────
+  if (!result) {
+    return (
+      <button
+        onClick={handleValidate}
+        className="inline-flex items-center gap-1.5 px-2 h-6 rounded text-[10px] font-medium text-text-muted hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+        title="Check pipeline for errors and warnings"
+      >
+        <CheckSquare size={11} />
+        Validate
+      </button>
+    )
+  }
+
+  // ── Result state ──────────────────────────────────────────────────────────
+  const { errorCount, warningCount, infoCount } = result
   const { Icon, bg, text, label } = (() => {
     if (errorCount > 0)
       return { Icon: XCircle, bg: 'bg-error/15', text: 'text-error', label: `${errorCount} error${errorCount === 1 ? '' : 's'}` }
@@ -41,20 +99,12 @@ export function ValidationBadge() {
     return { Icon: CheckCircle2, bg: 'bg-success/10', text: 'text-success', label: 'Valid' }
   })()
 
-  // Group issues for the dropdown body.
-  const groups = useMemo(() => groupBySeverity(result.issues), [result])
-
-  const handleJump = (nodeId?: string) => {
-    if (nodeId) setSelectedNode(nodeId)
-    setOpen(false)
-  }
-
   return (
     <div className="relative" ref={rootRef}>
       <button
         onClick={() => setOpen((v) => !v)}
         className={`inline-flex items-center gap-1.5 px-2 h-6 rounded text-[10px] font-medium transition-colors ${bg} ${text} hover:brightness-125`}
-        title="Pipeline validation"
+        title="Pipeline validation — click to see details"
       >
         <Icon size={12} />
         {label}
@@ -63,7 +113,7 @@ export function ValidationBadge() {
       {open && result.issues.length > 0 && (
         <div className="absolute top-full mt-1 left-0 z-50 w-[360px] max-h-[420px] overflow-auto bg-bg-secondary border border-border rounded-lg shadow-lg py-1">
           {(['error', 'warning', 'info'] as const).map((sev) => {
-            const list = groups[sev]
+            const list = groupBySeverity(result.issues)[sev]
             if (list.length === 0) return null
             return (
               <div key={sev}>
@@ -88,13 +138,7 @@ export function ValidationBadge() {
   )
 }
 
-function IssueRow({
-  issue,
-  onJump,
-}: {
-  issue: ValidationIssue
-  onJump: (nodeId?: string) => void
-}) {
+function IssueRow({ issue, onJump }: { issue: ValidationIssue; onJump: (nodeId?: string) => void }) {
   const color =
     issue.severity === 'error' ? 'text-error'
     : issue.severity === 'warning' ? 'text-warning'
@@ -110,10 +154,7 @@ function IssueRow({
           )}
         </div>
         {issue.nodeId && (
-          <button
-            onClick={() => onJump(issue.nodeId)}
-            className="text-[10px] text-accent hover:underline shrink-0"
-          >
+          <button onClick={() => onJump(issue.nodeId)} className="text-[10px] text-accent hover:underline shrink-0">
             jump
           </button>
         )}

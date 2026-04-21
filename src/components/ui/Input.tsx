@@ -3,23 +3,24 @@ import { classNames } from '@/lib/utils'
 
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string
+  labelNode?: React.ReactNode
   error?: string
   icon?: React.ReactNode
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ label, error, icon, className, id, ...props }, ref) => {
+  ({ label, labelNode, error, icon, className, id, ...props }, ref) => {
     const autoId = useId()
     const inputId = id ?? autoId
 
     return (
       <div className="flex flex-col gap-1">
-        {label && (
+        {(label || labelNode) && (
           <label
             htmlFor={inputId}
             className="text-text-secondary text-xs font-medium"
           >
-            {label}
+            {labelNode ?? label}
           </label>
         )}
         <div className="relative">

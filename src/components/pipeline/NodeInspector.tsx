@@ -8,24 +8,132 @@
  *
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
-import { X, Trash2, Copy, Plus, Folder } from 'lucide-react'
-import { useCallback, useMemo } from 'react'
+import { X, Trash2, Copy, Plus, Info, RefreshCcw, ChevronDown } from 'lucide-react'
+import type React from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { Tooltip } from '@/components/ui/Tooltip'
+import { FlagBuilder } from '@/components/pipeline/inspector/FlagBuilder'
+import { RemotePathField } from '@/components/file-browser/RemotePathField'
+import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useFileSizeStore } from '@/stores/fileSizeStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { useClusterInfoStore } from '@/stores/clusterInfoStore'
 import { getTool } from '@/lib/toolRegistry'
+import { iconForTool } from '@/lib/toolIcons'
+import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
+import { ANNOVAR_FEATURES, VEP_FEATURES, annovarDbNames, annovarParamsForFeatures } from '@/lib/annotationCatalog'
+import {
+  columnParamValues,
+  connectedInputPath,
+  parseHeader,
+} from '@/lib/schemaResolver'
+import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
+import { inferFileType } from '@/lib/fileTypeInference'
+import {
+  ensureFlagBlocks,
+  flagBlocksToParamValues,
+  syncFlagBlocksFromParamValues,
+  toolUsesFlagBuilder,
+} from '@/lib/flagRegistry'
 import type {
   FileNodeData,
   FileNodeSplit,
+  PipelineSnapshot,
+  SplitPattern,
   MergeNodeData,
   MergeStrategy,
   NoteNodeData,
   ToolNodeData,
   ToolParam,
+  ToolPort,
+  TransformFilterOp,
+  TransformFilterRule,
+  TransformNodeData,
 } from '@/types/pipeline'
-import { classNames } from '@/lib/utils'
+import type { RemoteFileEntry } from '@/types/files'
+import type { AnnovarInstallProgress, AnnovarStatusResult } from '@/types/annotation'
+import type { ClusterModuleSuggestion, LearnedResourceSummary } from '@/types/ssh'
+import { classNames, pathBasename, pathDirname } from '@/lib/utils'
+import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
+
+type SplitDetectMode = 'auto' | 'files' | 'folders'
+
+interface DetectedSplit {
+  pattern: SplitPattern
+  items: FileNodeSplit['items']
+  missing: string[]
+  summary: string
+  quality: number
+}
+
+const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
+
+function connectedInputPaths(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+): Record<string, string[]> {
+  const paths: Record<string, string[]> = {}
+  for (const edge of snapshot.edges) {
+    if (edge.target !== nodeId) continue
+    const portId = edge.targetHandle ?? 'input'
+    const source = snapshot.nodes.find((node) => node.id === edge.source)
+    if (!source) continue
+    if (source.type === 'file') {
+      const data = source.data as FileNodeData
+      paths[portId] = data.split?.items.length
+        ? data.split.items.map((item) => item.path).filter(Boolean)
+        : data.path ? [data.path] : []
+      continue
+    }
+    const path = connectedInputPath(snapshot, nodeId, portId)
+    if (path) paths[portId] = [path]
+  }
+  return paths
+}
+
+function hasFilteringParam(data: ToolNodeData): boolean {
+  const names = ['extract', 'keep', 'chr', 'region', 'regions', 'samples']
+  return Object.entries(data.paramValues ?? {}).some(([name, value]) => {
+    if (value === undefined || value === null || value === '' || value === false) return false
+    return names.some((candidate) => name.toLowerCase().includes(candidate))
+  })
+}
+
+function deviatesByTwo(current: number | undefined, suggested: number | undefined): boolean {
+  if (!current || !suggested) return false
+  return current >= suggested * 2 || current <= suggested / 2
+}
+
+function inspectorNodeLabel(node: PipelineSnapshot['nodes'][number]): string {
+  const data = node.data as { label?: unknown; text?: unknown; path?: unknown }
+  if (typeof data.label === 'string' && data.label.trim()) return data.label
+  if (typeof data.path === 'string' && data.path.trim()) return data.path.split('/').pop() ?? data.path
+  if (typeof data.text === 'string' && data.text.trim()) return data.text
+  return node.id
+}
+
+function inputConnectionDetail(node: PipelineSnapshot['nodes'][number], sourceHandle: string): string {
+  if (node.type === 'file') {
+    const data = node.data as FileNodeData
+    if (data.split?.items.length) return `${data.split.items.length} files split by ${data.split.axis}`
+    return data.path || 'File path not set'
+  }
+  if (node.type === 'tool') return `Output: ${sourceHandle}`
+  if (node.type === 'merge') return 'Merged output'
+  if (node.type === 'transform') return 'Transformed output'
+  return 'Connected'
+}
+
+function shellQuoteClient(value: string): string {
+  if (/^[A-Za-z0-9_\-./~:]+$/.test(value)) return value
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
 
 function ParamField({
   param,
@@ -36,6 +144,8 @@ function ParamField({
   value: unknown
   onChange: (v: unknown) => void
 }) {
+  const label = <ParamLabel param={param} />
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   switch (param.type) {
     case 'boolean':
       return (
@@ -46,7 +156,7 @@ function ParamField({
             onChange={(e) => onChange(e.target.checked)}
             className="accent-accent"
           />
-          <span className="text-xs text-text-primary">{param.label}</span>
+          <span className="text-xs text-text-primary">{label}</span>
           {param.required && <span className="text-error text-[10px]">*</span>}
         </label>
       )
@@ -55,6 +165,7 @@ function ParamField({
       return (
         <Input
           label={param.label + (param.required ? ' *' : '')}
+          labelNode={label}
           type="number"
           value={value === undefined || value === null ? '' : String(value)}
           min={param.min}
@@ -72,8 +183,7 @@ function ParamField({
       return (
         <div className="flex flex-col gap-1">
           <label className="text-text-secondary text-xs font-medium">
-            {param.label}
-            {param.required && <span className="text-error ml-0.5">*</span>}
+            {label}
           </label>
           <select
             value={value === undefined ? '' : String(value)}
@@ -89,11 +199,35 @@ function ParamField({
       )
 
     case 'string':
+      return (
+        <Input
+          label={param.label + (param.required ? ' *' : '')}
+          labelNode={label}
+          type="text"
+          value={value === undefined || value === null ? '' : String(value)}
+          placeholder={param.placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )
+
     case 'file':
+      return (
+        <RemotePathField
+          label={param.label + (param.required ? ' *' : '')}
+          value={value === undefined || value === null ? '' : String(value)}
+          placeholder={param.placeholder}
+          mode="file"
+          title={`Choose file for ${param.label}`}
+          buttonLabel={activeConnectionId ? 'Browse' : 'Connect first'}
+          onChange={onChange}
+        />
+      )
+
     default:
       return (
         <Input
           label={param.label + (param.required ? ' *' : '')}
+          labelNode={label}
           type="text"
           value={value === undefined || value === null ? '' : String(value)}
           placeholder={param.placeholder}
@@ -103,11 +237,874 @@ function ParamField({
   }
 }
 
+function ColumnParamField({
+  param,
+  value,
+  columns,
+  loading,
+  refreshing,
+  onRefresh,
+  onChange,
+}: {
+  param: ToolParam
+  value: unknown
+  columns: string[]
+  loading: boolean
+  refreshing?: boolean
+  onRefresh?: () => void
+  onChange: (v: unknown) => void
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const [focused, setFocused] = useState(false)
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
+  const [draft, setDraft] = useState('')
+  const current = String(value ?? '')
+  const allowsMultiple = Boolean(param.columnMulti)
+  const selected = columnParamValues(value, { whitespaceSeparated: allowsMultiple })
+  const token = allowsMultiple ? draft.trim().toLowerCase() : current.split(/[,\s]+/).pop()?.toLowerCase() ?? ''
+  const suggestions = columns
+    .filter((column) => !selected.includes(column) || !allowsMultiple || column.toLowerCase().includes(token))
+    .filter((column) => column.toLowerCase().includes(token))
+    .slice(0, 12)
+  useEffect(() => {
+    setActiveSuggestionIndex((index) => Math.min(index, Math.max(suggestions.length - 1, 0)))
+  }, [suggestions.length])
+  useEffect(() => {
+    if (!allowsMultiple && draft) setDraft('')
+  }, [allowsMultiple, draft])
+
+  const removeColumn = (column: string) => {
+    onChange(selected.filter((value) => value !== column).join(' '))
+  }
+
+  const addColumn = (column: string) => {
+    if (selected.includes(column)) return
+    onChange([...selected, column].join(' '))
+    setDraft('')
+    setShowSuggestions(false)
+    window.setTimeout(() => inputRef.current?.focus(), 0)
+  }
+
+  const insertColumn = (column: string) => {
+    if (allowsMultiple) {
+      addColumn(column)
+      return
+    }
+    const cursor = inputRef.current?.selectionStart ?? current.length
+    const before = current.slice(0, cursor)
+    const after = current.slice(cursor)
+    const start = Math.max(before.lastIndexOf(','), before.lastIndexOf(' '), before.lastIndexOf('\t')) + 1
+    const endOffset = after.search(/[,\s]/)
+    const end = endOffset === -1 ? current.length : cursor + endOffset
+    const separator = current.includes(',') ? ', ' : ' '
+    const prefix = current.slice(0, start).replace(/[,\s]*$/, '')
+    const suffix = current.slice(end).replace(/^[,\s]*/, '')
+    const next = [prefix, column, suffix].filter(Boolean).join(separator)
+    onChange(next)
+    setShowSuggestions(false)
+    window.setTimeout(() => inputRef.current?.focus(), 0)
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-end gap-1.5">
+        <div className="relative flex flex-1 flex-col gap-1">
+          <label className="text-text-secondary text-xs font-medium">
+            <ParamLabel param={param} />
+          </label>
+          <input
+            ref={inputRef}
+            type="text"
+            value={allowsMultiple ? draft : current}
+            placeholder={columns.length > 0 ? (allowsMultiple ? 'Type to add a column...' : 'Start typing a column name...') : (loading ? 'Loading columns...' : param.placeholder)}
+            onFocus={() => {
+              setFocused(true)
+              setShowSuggestions(!allowsMultiple || draft.trim().length > 0)
+              setActiveSuggestionIndex(0)
+              if (columns.length === 0 && !loading && onRefresh) onRefresh()
+            }}
+            onBlur={() => window.setTimeout(() => {
+              setFocused(false)
+              setShowSuggestions(false)
+            }, 120)}
+            onChange={(e) => {
+              if (allowsMultiple) {
+                setDraft(e.target.value)
+                setShowSuggestions(e.target.value.trim().length > 0)
+              } else {
+                onChange(e.target.value)
+                setShowSuggestions(true)
+              }
+              setActiveSuggestionIndex(0)
+            }}
+            onKeyDown={(event) => {
+              if (allowsMultiple && event.key === 'Backspace' && draft.length === 0 && selected.length > 0) {
+                event.preventDefault()
+                removeColumn(selected[selected.length - 1])
+                return
+              }
+              if (!showSuggestions || suggestions.length === 0) return
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setActiveSuggestionIndex((index) => Math.min(index + 1, suggestions.length - 1))
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setActiveSuggestionIndex((index) => Math.max(index - 1, 0))
+                return
+              }
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                insertColumn(suggestions[activeSuggestionIndex] ?? suggestions[0])
+                return
+              }
+              if (event.key === 'Escape') {
+                setShowSuggestions(false)
+              }
+            }}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          {focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && (
+            <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+              {suggestions.map((column, index) => (
+                <button
+                  key={column}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    insertColumn(column)
+                  }}
+                  onMouseEnter={() => setActiveSuggestionIndex(index)}
+                  className={classNames(
+                    'block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover',
+                    index === activeSuggestionIndex && 'bg-bg-hover',
+                  )}
+                >
+                  {column}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {onRefresh && (
+          <button
+            type="button"
+            title="Refresh upstream columns"
+            onClick={onRefresh}
+            className="mb-0 flex h-8 items-center gap-1 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text-primary"
+          >
+            <RefreshCcw size={13} className={refreshing ? 'animate-spin' : ''} />
+            Columns
+          </button>
+        )}
+      </div>
+      {allowsMultiple && selected.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {selected.map((column) => (
+            <span
+              key={column}
+              className="inline-flex items-center gap-1 rounded-md border border-accent/30 bg-accent/10 px-2 py-1 text-[11px] text-text-primary"
+            >
+              <span className="font-mono">{column}</span>
+              <button
+                type="button"
+                onClick={() => removeColumn(column)}
+                className="text-text-muted transition-colors hover:text-text-primary"
+                title={`Remove ${column}`}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {columns.length === 0 && (
+        <p className="text-[10px] text-text-muted">
+          {loading ? 'Reading the upstream header…' : 'Connect a tabular input or preview it once to enable column picks.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function ParamLabel({ param }: { param: ToolParam }) {
+  const text = (
+    <>
+      {param.label}
+      {param.required && <span className="text-error ml-0.5">*</span>}
+    </>
+  )
+  if (!param.description && !param.docUrl) return <>{text}</>
+  return (
+    <Tooltip
+      side="right"
+      content={
+        <span className="block max-w-[260px] whitespace-normal leading-relaxed">
+          {param.description && <span className="block">{param.description}</span>}
+          {param.docUrl && (
+            <button
+              type="button"
+              className="mt-1 text-accent underline"
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                window.open(param.docUrl, '_blank', 'noopener,noreferrer')
+              }}
+            >
+              View docs
+            </button>
+          )}
+        </span>
+      }
+    >
+      <span className="inline-flex cursor-help items-center gap-1">
+        <span>{text}</span>
+        <Info size={11} className="text-text-muted" />
+      </span>
+    </Tooltip>
+  )
+}
+
+/**
+ * Folder picker. Renders a text input + "Browse…" button that opens the
+ * FileExplorer directory-pick banner and writes the chosen path back via
+ * `onChange`.
+ */
+function FolderPickerField({
+  label,
+  value,
+  placeholder,
+  requesterLabel,
+  onChange,
+}: {
+  label: string
+  value: string
+  placeholder?: string
+  requesterLabel: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <RemotePathField
+      label={label}
+      value={value}
+      placeholder={placeholder}
+      onChange={onChange}
+      mode="directory"
+      title={`Choose folder for ${requesterLabel}`}
+    />
+  )
+}
+
+function ModuleAutocompleteField({
+  connectionId,
+  value,
+  loading,
+  placeholder,
+  onChange,
+  onRefresh,
+}: {
+  connectionId: string | null
+  value: string
+  loading: boolean
+  placeholder?: string
+  onChange: (value: string) => void
+  onRefresh?: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const [focused, setFocused] = useState(false)
+  const modules = useClusterInfoStore((s) => {
+    if (!connectionId) return EMPTY_MODULE_SUGGESTIONS
+    return s.modulesByConnection[connectionId]?.modules ?? EMPTY_MODULE_SUGGESTIONS
+  })
+  const loadModules = useClusterInfoStore((s) => s.loadModules)
+  const suggestions = modules
+    .flatMap((entry) => entry.versions.length > 0 ? entry.versions.map((version) => `${entry.name}/${version}`) : [entry.name])
+    .filter((name) => name.toLowerCase().includes(value.toLowerCase()))
+    .slice(0, 12)
+
+  useEffect(() => {
+    if (!focused || !connectionId || connectionId === LOCAL_CONNECTION_ID) return
+    void loadModules(connectionId, value || undefined).catch(() => undefined)
+  }, [connectionId, focused, loadModules, value])
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-end gap-1.5">
+        <div className="relative flex flex-1 flex-col gap-1">
+          <label className="text-text-secondary text-xs font-medium">Module override</label>
+          <input
+            ref={inputRef}
+            type="text"
+            value={value}
+            placeholder={placeholder}
+            onFocus={() => setFocused(true)}
+            onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+            onChange={(e) => onChange(e.target.value)}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          {focused && suggestions.length > 0 && (
+            <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+              {suggestions.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    onChange(name)
+                    window.setTimeout(() => inputRef.current?.focus(), 0)
+                  }}
+                  className="block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover"
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          title="Refresh module list"
+          onClick={onRefresh}
+          className="mb-0 flex h-8 items-center gap-1 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+          disabled={!connectionId || connectionId === LOCAL_CONNECTION_ID}
+        >
+          <RefreshCcw size={13} className={loading ? 'animate-spin' : ''} />
+          Modules
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ShellScriptField({
+  value,
+  onChange,
+}: {
+  value: unknown
+  onChange: (v: unknown) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-text-secondary text-xs font-medium">
+        Shell script <span className="text-error">*</span>
+      </label>
+      <textarea
+        value={value === undefined || value === null ? '' : String(value)}
+        placeholder={'cat "$INPUT"'}
+        onChange={(e) => onChange(e.target.value)}
+        rows={7}
+        className="rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent resize-y font-mono leading-relaxed"
+      />
+      <div className="rounded-md border border-accent/20 bg-accent/5 px-2 py-1.5 text-[10px] text-text-secondary leading-relaxed">
+        Connected files are available as <code className="font-mono text-text-primary">$INPUT</code>,{' '}
+        <code className="font-mono text-text-primary">$INPUT_1</code>,{' '}
+        <code className="font-mono text-text-primary">$INPUT_2</code>, and{' '}
+        <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code> for all inputs. The node captures stdout into{' '}
+        <code className="font-mono text-text-primary">$OUTPUT</code>, so{' '}
+        <code className="font-mono text-text-primary">cat "$INPUT"</code> creates the output file.
+      </div>
+    </div>
+  )
+}
+
+function ToolInputRow({
+  port,
+  connections,
+  snapshot,
+}: {
+  port: ToolPort
+  connections: PipelineSnapshot['edges']
+  snapshot: PipelineSnapshot
+}) {
+  const missingRequired = port.required && connections.length === 0
+
+  return (
+    <div className={classNames(
+      'rounded-md border px-2 py-1.5 text-xs',
+      missingRequired ? 'border-error/40 bg-error/5' : 'border-border bg-bg-tertiary',
+    )}>
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-text-primary">{port.label}</span>
+        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+        {port.required && <span className="rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">required</span>}
+        {port.multi && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">multiple</span>}
+      </div>
+      <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
+        {port.description ?? `Connect a ${port.fileType} file here.`}
+      </div>
+      <div className="mt-1.5 flex flex-col gap-0.5">
+        {connections.length === 0 ? (
+          <div className={missingRequired ? 'text-error' : 'text-text-muted'}>
+            {missingRequired ? `Connect a ${port.fileType} source before running.` : 'Optional input not connected.'}
+          </div>
+        ) : connections.map((edge) => {
+          const source = snapshot.nodes.find((node) => node.id === edge.source)
+          if (!source) return null
+          const detail = inputConnectionDetail(source, edge.sourceHandle ?? 'output')
+          return (
+            <div key={edge.id} className="min-w-0 text-text-secondary">
+              <span className="text-success">Connected</span>
+              {' to '}
+              <span className="text-text-primary" title={inspectorNodeLabel(source)}>
+                <MiddleEllipsis value={inspectorNodeLabel(source)} max={28} />
+              </span>
+              <span className="text-text-muted" title={detail}> · <MiddleEllipsis value={detail} max={54} /></span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ToolOutputRow({
+  port,
+  consumers,
+  nodeId,
+  data,
+  updateNodeData,
+  showMergeBehavior,
+}: {
+  port: ToolPort
+  consumers: PipelineSnapshot['edges']
+  nodeId: string
+  data: ToolNodeData
+  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData>) => void
+  showMergeBehavior: boolean
+}) {
+  const mergeConfig = data.outputMerge?.[port.id]
+  const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
+  const intermediate = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
+  return (
+    <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-text-primary">{port.label}</span>
+        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+      </div>
+      <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
+        {port.description ?? `Produces a ${port.fileType} output.`}
+      </div>
+      <div className="mt-1.5 text-text-secondary">
+        {consumers.length > 0
+          ? `${consumers.length} downstream connection${consumers.length === 1 ? '' : 's'}`
+          : 'Not connected downstream; the file is still written when the node runs.'}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {showMergeBehavior && (
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-text-muted">Array output</span>
+            <select
+              value={autoMergeEnabled ? 'auto-merge' : 'fan-out'}
+              onChange={(e) => updateNodeData(nodeId, {
+                outputMerge: {
+                  ...(data.outputMerge ?? {}),
+                  [port.id]: {
+                    mode: e.target.value as 'fan-out' | 'auto-merge',
+                    strategy: mergeConfig?.strategy ?? port.autoMergeDefault,
+                  },
+                },
+              })}
+              className="h-7 rounded border border-border bg-bg-primary px-2 text-[11px] text-text-primary"
+            >
+              <option value="fan-out">Fan-out</option>
+              <option value="auto-merge">Auto-merge</option>
+            </select>
+          </div>
+        )}
+        <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={intermediate}
+            onChange={(e) => updateNodeData(nodeId, {
+              outputIntermediate: {
+                ...(data.outputIntermediate ?? {}),
+                [port.id]: e.target.checked,
+              },
+            })}
+            className="accent-accent"
+          />
+          Intermediate output
+        </label>
+      </div>
+    </div>
+  )
+}
+
+const ANNOTATION_INTERNAL_PARAMS = new Set([
+  'toolPath',
+  'annotationDbPath',
+  'annotationFeatures',
+  'buildver',
+  'protocol',
+  'operation',
+  'remove',
+  'nastring',
+  'vcfinput',
+  'assembly',
+  'cache',
+  'offline',
+  'everything',
+  'check_existing',
+  'af_gnomad',
+  'nearest',
+  'fork',
+])
+
+function AnnotationConfigPanel({
+  nodeId,
+  data,
+}: {
+  nodeId: string
+  data: ToolNodeData
+}) {
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
+  const setSetting = useSettingsStore((s) => s.setSetting)
+  const [message, setMessage] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [annovarStatus, setAnnovarStatus] = useState<AnnovarStatusResult | null>(null)
+  const isAnnovar = data.toolId === 'annovar.table_annovar'
+  const isVep = data.toolId === 'vep'
+  if (!isAnnovar && !isVep) return null
+
+  const params = data.paramValues ?? {}
+  const featureIds = String(params.annotationFeatures ?? (isAnnovar ? 'gene,rsid' : 'consequence,rsid'))
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+  const build = String(params.buildver ?? 'hg38')
+  const assembly = String(params.assembly ?? 'GRCh38')
+  const toolsRoot = settings.toolsRoot || '~/bioflow/tools'
+  const defaultToolPath = isAnnovar
+    ? (settings.annovarScriptsPath || `${toolsRoot}/annovar`)
+    : (settings.vepPath || `${toolsRoot}/ensembl-vep/vep`)
+  const defaultDbPath = isAnnovar
+    ? (settings.annovarDbPath || `${toolsRoot}/annovar/humandb`)
+    : (settings.vepCachePath || `${toolsRoot}/vep/cache`)
+  const toolPath = params.toolPath === undefined ? defaultToolPath : String(params.toolPath ?? '')
+  const dbPath = params.annotationDbPath === undefined ? defaultDbPath : String(params.annotationDbPath ?? '')
+
+  const patchParams = (patch: Record<string, unknown>) => {
+    updateNodeData(nodeId, { paramValues: { ...params, ...patch } })
+  }
+
+  useEffect(() => {
+    if (!isAnnovar || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+    const databases = annovarDbNames(featureIds)
+    if (databases.length === 0) {
+      setAnnovarStatus(null)
+      return
+    }
+    let cancelled = false
+    void window.api.annovar.status(activeConnectionId, dbPath, build, databases).then((status) => {
+      if (!cancelled) setAnnovarStatus(status)
+    }).catch(() => {
+      if (!cancelled) setAnnovarStatus(null)
+    })
+    return () => { cancelled = true }
+  }, [activeConnectionId, build, dbPath, featureIds, isAnnovar])
+
+  useEffect(() => {
+    if (!isAnnovar) return
+    return window.api.annovar.onInstallProgress((progress) => {
+      if (progress.connectionId !== activeConnectionId) return
+      setMessage((prev) => `${progress.database}: ${progress.phase}${progress.chunk ? `\n${progress.chunk.trim()}` : prev ? `\n${prev}` : ''}`)
+    })
+  }, [activeConnectionId, isAnnovar])
+
+  const toggleAnnovarFeature = (id: string) => {
+    const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
+    const generated = annovarParamsForFeatures(next)
+    patchParams({ annotationFeatures: next.join(','), ...generated })
+  }
+
+  const toggleVepFeature = (id: string) => {
+    const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
+    const selected = VEP_FEATURES.filter((feature) => next.includes(feature.id))
+    const merged: Record<string, unknown> = {
+      annotationFeatures: next.join(','),
+      everything: false,
+      check_existing: false,
+      af_gnomad: false,
+      nearest: undefined,
+    }
+    for (const feature of selected) Object.assign(merged, feature.params)
+    patchParams(merged)
+  }
+
+  const runLoginCommand = async (command: string) => {
+    if (!activeConnectionId) {
+      setMessage('Connect to Rorqual before running a login-node installer.')
+      return
+    }
+    setRunning(true)
+    setMessage('Running on login node...')
+    try {
+      const result = await window.api.ssh.exec(activeConnectionId, command)
+      setMessage(result.exitCode === 0 ? 'Finished.' : `Failed (${result.exitCode}): ${result.stderr || result.stdout}`)
+    } catch (err: any) {
+      setMessage(`Failed: ${err?.message ?? err}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const prepareToolCommand = () => {
+    if (isAnnovar) {
+      return [
+        `mkdir -p ${shellQuoteClient(toolPath)} ${shellQuoteClient(dbPath)}`,
+        `cat > ${shellQuoteClient(`${toolPath}/README_BioFlow.txt`)} <<'EOF'`,
+        'ANNOVAR scripts are license-gated. Download ANNOVAR from https://annovar.openbioinformatics.org/, unpack table_annovar.pl and annotate_variation.pl into this folder, then use BioFlow to install databases.',
+        'EOF',
+      ].join('\n')
+    }
+    const vepDir = toolPath.endsWith('/vep') ? toolPath.slice(0, -4) : toolPath.replace(/\/+$/, '')
+    return [
+      `mkdir -p ${shellQuoteClient(toolsRoot)} ${shellQuoteClient(dbPath)}`,
+      `cd ${shellQuoteClient(toolsRoot)}`,
+      'if [ ! -d ensembl-vep ]; then git clone https://github.com/Ensembl/ensembl-vep.git; fi',
+      `cd ${shellQuoteClient(vepDir)}`,
+      'perl INSTALL.pl --AUTO a --NO_HTSLIB --NO_TEST',
+    ].join('\n')
+  }
+
+  const databaseCommand = () => {
+    if (isAnnovar) {
+      const dbs = annovarDbNames(featureIds)
+      const script = `${toolPath.replace(/\/+$/, '')}/annotate_variation.pl`
+      return [
+        `mkdir -p ${shellQuoteClient(dbPath)}`,
+        ...dbs.map((db) => `perl ${shellQuoteClient(script)} -buildver ${shellQuoteClient(build)} -downdb -webfrom annovar ${shellQuoteClient(db)} ${shellQuoteClient(dbPath)}`),
+      ].join('\n')
+    }
+    const installer = toolPath.endsWith('/vep') ? `${toolPath.slice(0, -4)}/INSTALL.pl` : `${toolPath.replace(/\/+$/, '')}/INSTALL.pl`
+    return [
+      `mkdir -p ${shellQuoteClient(dbPath)}`,
+      `perl ${shellQuoteClient(installer)} -a cf -s homo_sapiens -y ${shellQuoteClient(assembly)} -c ${shellQuoteClient(dbPath)}`,
+    ].join('\n')
+  }
+
+  const pendingAnnovarDatabases = annovarStatus?.databases
+    .filter((row) => row.status !== 'installed')
+    .map((row) => row.database) ?? annovarDbNames(featureIds)
+
+  return (
+    <div>
+      <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+        Annotation setup
+      </h4>
+      <div className="flex flex-col gap-3 rounded-md border border-border bg-bg-primary p-2">
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            {isAnnovar ? 'Scripts folder' : 'Tool path'}
+          </div>
+          {isAnnovar ? (
+            <RemotePathField
+              label="ANNOVAR scripts folder"
+              value={toolPath}
+              placeholder="~/bioflow/tools/annovar"
+              onChange={(value) => patchParams({ toolPath: value })}
+              mode="directory"
+              title="Choose ANNOVAR scripts folder"
+            />
+          ) : (
+            <RemotePathField
+              label="VEP executable or folder"
+              value={toolPath}
+              placeholder="vep or ~/bioflow/tools/ensembl-vep/vep"
+              onChange={(value) => patchParams({ toolPath: value })}
+              mode="file"
+              title="Choose VEP executable or folder"
+            />
+          )}
+          {isAnnovar && (
+            <p className="mt-1 text-[10px] text-text-muted">
+              Point this to the folder that contains <code className="font-mono">table_annovar.pl</code> and <code className="font-mono">annotate_variation.pl</code>.
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            {isAnnovar ? 'Database folder' : 'Cache folder'}
+          </div>
+          <RemotePathField
+            label={isAnnovar ? 'ANNOVAR humandb folder' : 'VEP cache folder'}
+            value={dbPath}
+            placeholder={isAnnovar ? '~/bioflow/tools/annovar/humandb' : '~/bioflow/tools/vep/cache'}
+            onChange={(value) => patchParams({ annotationDbPath: value })}
+            mode="directory"
+            title={isAnnovar ? 'Choose ANNOVAR humandb folder' : 'Choose VEP cache folder'}
+          />
+          {isAnnovar && annovarStatus && (
+            <div className="mt-2 rounded border border-border/70 bg-bg-primary/70 px-2 py-2 text-[11px]">
+              <div className="mb-1 text-text-secondary">Required databases</div>
+              <div className="flex flex-wrap gap-1">
+                {annovarStatus.databases.map((row) => (
+                  <span
+                    key={`${row.buildver}:${row.database}`}
+                    className={classNames(
+                      'rounded px-1.5 py-0.5',
+                      row.status === 'installed'
+                        ? 'bg-emerald-500/15 text-emerald-200'
+                        : row.status === 'stale'
+                          ? 'bg-red-500/15 text-red-200'
+                          : 'bg-amber-500/15 text-amber-200',
+                    )}
+                    title={row.expectedPath}
+                  >
+                    {row.database} · {row.status} · {row.estimatedSizeGB.toFixed(1)} GB
+                  </span>
+                ))}
+              </div>
+              <div className="mt-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
+                  onClick={async () => {
+                    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+                    setRunning(true)
+                    setMessage('Saving the humandb path and installing missing ANNOVAR databases...')
+                    try {
+                      await setSetting('settings:annovarDbPath', dbPath)
+                      if (toolPath.trim()) await setSetting('settings:annovarScriptsPath', toolPath)
+                      if (pendingAnnovarDatabases.length === 0) {
+                        setMessage('Saved the humandb path. All selected ANNOVAR databases are already installed.')
+                        return
+                      }
+                      await window.api.annovar.install({
+                        connectionId: activeConnectionId,
+                        scriptsPath: toolPath,
+                        humandbPath: dbPath,
+                        buildver: build,
+                        databases: pendingAnnovarDatabases,
+                      })
+                      const refreshed = await window.api.annovar.status(activeConnectionId, dbPath, build, annovarDbNames(featureIds))
+                      setAnnovarStatus(refreshed)
+                      setMessage('Saved the humandb path and finished installing the missing ANNOVAR databases.')
+                    } catch (err: any) {
+                      setMessage(err?.message ?? String(err))
+                    } finally {
+                      setRunning(false)
+                    }
+                  }}
+                >
+                  Set humandb + install missing DBs ({(annovarStatus?.totalDownloadSizeGB ?? 0).toFixed(1)} GB)
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            Build
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {isAnnovar ? (
+              <div className="flex flex-col gap-1">
+                <label className="text-text-secondary text-xs font-medium">Reference build</label>
+                <select
+                  value={build}
+                  onChange={(event) => patchParams({ buildver: event.target.value })}
+                  className="h-8 rounded-md border border-border bg-bg-primary px-2 text-sm text-text-primary"
+                >
+                  <option value="hg38">hg38</option>
+                  <option value="hg19">hg19</option>
+                </select>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1">
+                <label className="text-text-secondary text-xs font-medium">Assembly</label>
+                <select
+                  value={assembly}
+                  onChange={(event) => patchParams({ assembly: event.target.value })}
+                  className="h-8 rounded-md border border-border bg-bg-primary px-2 text-sm text-text-primary"
+                >
+                  <option value="GRCh38">GRCh38</option>
+                  <option value="GRCh37">GRCh37</option>
+                </select>
+              </div>
+            )}
+            {isVep && (
+              <Input
+                label="Forks"
+                type="number"
+                min={1}
+                value={String(params.fork ?? 4)}
+                onChange={(event) => patchParams({ fork: Number(event.target.value) })}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+            Annotations to add
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {(isAnnovar ? ANNOVAR_FEATURES : VEP_FEATURES).map((feature) => {
+              const active = featureIds.includes(feature.id)
+              return (
+                <button
+                  key={feature.id}
+                  type="button"
+                  onClick={() => isAnnovar ? toggleAnnovarFeature(feature.id) : toggleVepFeature(feature.id)}
+                  className={classNames(
+                    'rounded-md border px-2 py-1.5 text-left',
+                    active ? 'border-accent/50 bg-accent/10' : 'border-border bg-bg-primary hover:bg-bg-hover',
+                  )}
+                >
+                  <div className="text-xs font-medium text-text-primary">{active ? '✓ ' : ''}{feature.label}</div>
+                  <div className="text-[11px] text-text-muted">{feature.description}</div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {!isAnnovar && (
+          <div className="flex flex-wrap gap-1.5">
+            <Button variant="secondary" size="sm" disabled={running} onClick={() => void runLoginCommand(prepareToolCommand())}>
+              Install VEP
+            </Button>
+            <Button variant="secondary" size="sm" disabled={running || featureIds.length === 0} onClick={() => void runLoginCommand(databaseCommand())}>
+              Install selected databases
+            </Button>
+          </div>
+        )}
+
+        {message && <div className="text-[11px] text-text-muted whitespace-pre-wrap break-all">{message}</div>}
+      </div>
+    </div>
+  )
+}
+
 function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
+  const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
+  const loadModules = useClusterInfoStore((s) => s.loadModules)
+  const loadingModules = useClusterInfoStore((s) => activeConnectionId ? s.loadingModules[activeConnectionId] : false)
+  const schemas = useDataPreviewStore((s) => s.schemas)
+  const setSchema = useDataPreviewStore((s) => s.setSchema)
   const tool = getTool(data.toolId)
+  const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
+  const loadingSchemaKey = useMemo(() => `${nodeId}:${Object.keys(schemas).length}`, [nodeId, schemas])
+  const [estimate, setEstimate] = useState<EstimateOutput | null>(null)
+  const [learnedEstimate, setLearnedEstimate] = useState<LearnedResourceSummary | null>(null)
+  const [estimating, setEstimating] = useState(false)
+  const [showEstimateWhy, setShowEstimateWhy] = useState(false)
+  const [refreshingSchemaPath, setRefreshingSchemaPath] = useState<string | null>(null)
+  const advancedExpanded = useUIStore((s) => s.advancedExpanded[data.toolId] ?? false)
+  const setAdvancedExpanded = useUIStore((s) => s.setAdvancedExpanded)
 
   /**
    * Inputs whose upstream source carries an axis — either a file node with
@@ -135,11 +1132,15 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
 
   const setParam = useCallback(
     (name: string, value: unknown) => {
+      const nextParamValues = { ...data.paramValues, [name]: value }
       updateNodeData(nodeId, {
-        paramValues: { ...data.paramValues, [name]: value },
+        paramValues: nextParamValues,
+        flagBlocks: toolUsesFlagBuilder(data.toolId)
+          ? syncFlagBlocksFromParamValues(data.toolId, data.flagBlocks, nextParamValues)
+          : data.flagBlocks,
       })
     },
-    [nodeId, data.paramValues, updateNodeData],
+    [nodeId, data.flagBlocks, data.paramValues, data.toolId, updateNodeData],
   )
 
   const setSlurm = useCallback(
@@ -151,11 +1152,152 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     [nodeId, data.slurmOverride, updateNodeData],
   )
 
+  const loadSchemaForPath = useCallback(async (path: string, options?: { force?: boolean }) => {
+    if (!activeConnectionId || !path) return
+    if (!options?.force && schemas[path]) return
+    setRefreshingSchemaPath(path)
+    try {
+      const [stat, text] = await Promise.all([
+        window.api.sftp.stat(activeConnectionId, path).catch(() => null),
+        window.api.sftp.head(activeConnectionId, path, 30),
+      ])
+      const current = useDataPreviewStore.getState().schemas[path]
+      if (!options?.force && current && stat?.modified && current.modified === stat.modified) return
+      const schema = parseHeader(text, path)
+      if (schema.columns.length > 0) {
+        setSchema(path, { columns: schema.columns, delimiter: schema.delimiter, modified: stat?.modified })
+      }
+    } finally {
+      setRefreshingSchemaPath(null)
+    }
+  }, [activeConnectionId, schemas, setSchema])
+
+  useEffect(() => {
+    if (!activeConnectionId || !tool) return
+    const refs = tool.params.filter((param) => param.columnRef)
+    if (refs.length === 0) return
+    let cancelled = false
+    async function loadSchemas() {
+      for (const param of refs) {
+        const path = connectedInputPath(snapshot, nodeId, param.columnSourcePortId ?? 'input')
+        if (!path || schemas[path]) continue
+        try {
+          if (cancelled) return
+          await loadSchemaForPath(path)
+        } catch {
+          // Missing schema is non-blocking; users can still type values.
+        }
+      }
+    }
+    void loadSchemas()
+    return () => { cancelled = true }
+  }, [activeConnectionId, loadingSchemaKey, loadSchemaForPath, nodeId, schemas, snapshot, tool])
+
+  useEffect(() => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !tool) {
+      setLearnedEstimate(null)
+      return
+    }
+    let cancelled = false
+    void window.api.cluster.getLearnedResources(activeConnectionId, tool.id).then((result) => {
+      if (!cancelled) setLearnedEstimate(result)
+    }).catch(() => {
+      if (!cancelled) setLearnedEstimate(null)
+    })
+    return () => { cancelled = true }
+  }, [activeConnectionId, tool])
+
+  useEffect(() => {
+    if (!activeConnectionId || !tool) {
+      setEstimate(null)
+      return
+    }
+    const connectionId = activeConnectionId
+    const currentTool = tool
+    let cancelled = false
+    async function loadEstimate() {
+      setEstimating(true)
+      try {
+        const pathsByPort = connectedInputPaths(snapshot, nodeId)
+        const sizes: Record<string, number> = {}
+        const getSize = useFileSizeStore.getState().getSize
+        for (const [portId, paths] of Object.entries(pathsByPort)) {
+          const values = await Promise.all(paths.map((path) => getSize(connectionId, path)))
+          sizes[portId] = axedInputPorts.some((port) => port.portId === portId)
+            ? Math.max(0, ...values)
+            : values.reduce((sum, value) => sum + value, 0)
+        }
+        if (cancelled) return
+        const firstAxed = axedInputPorts[0]
+        setEstimate(estimateResources({
+          tool: currentTool,
+          nodeData: data,
+          inputSizes: sizes,
+          isArray: data.arrayOver !== null && axedInputPorts.length > 0,
+          arraySize: firstAxed
+            ? (snapshot.nodes.find((node) =>
+                snapshot.edges.some((edge) => edge.target === nodeId && edge.targetHandle === firstAxed.portId && edge.source === node.id),
+              )?.data as FileNodeData | undefined)?.split?.items.length
+            : undefined,
+          hasFilter: hasFilteringParam(data),
+          partitionMaxMemGB: settings.partitionMaxMemGB,
+          learned: learnedEstimate,
+        }))
+      } finally {
+        if (!cancelled) setEstimating(false)
+      }
+    }
+    void loadEstimate()
+    return () => { cancelled = true }
+  }, [activeConnectionId, axedInputPorts, data, learnedEstimate, nodeId, settings.partitionMaxMemGB, snapshot, tool])
+
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
+  const useFlagBuilder = settings.plinkFlagBuilderEnabled && toolUsesFlagBuilder(data.toolId)
+  const flagBlocks = toolUsesFlagBuilder(data.toolId)
+    ? ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
+    : []
+
+  const ToolIcon = iconForTool(data.toolId)
   const slurm = { ...tool.slurm, ...data.slurmOverride }
+  const executionMode = data.executionMode ?? 'sbatch'
+  const inputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
+  for (const edge of snapshot.edges) {
+    if (edge.target !== nodeId) continue
+    const portId = edge.targetHandle ?? 'input'
+    inputEdgesByPort.set(portId, [...(inputEdgesByPort.get(portId) ?? []), edge])
+  }
+  const outputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
+  for (const edge of snapshot.edges) {
+    if (edge.source !== nodeId) continue
+    const portId = edge.sourceHandle ?? 'output'
+    outputEdgesByPort.set(portId, [...(outputEdgesByPort.get(portId) ?? []), edge])
+  }
+  const visibleParams = tool.requiresDatabase
+    ? tool.params.filter((param) => !ANNOTATION_INTERNAL_PARAMS.has(param.name))
+    : tool.params
+  const commonParams = visibleParams.filter((param) => !param.advanced)
+  const advancedParams = visibleParams.filter((param) => param.advanced)
+  const applyEstimate = () => {
+    if (!estimate) return
+    updateNodeData(nodeId, {
+      slurmOverride: {
+        ...data.slurmOverride,
+        cpus: estimate.cpus,
+        memoryGB: estimate.memGB,
+        timeHours: estimate.timeHours,
+      },
+    })
+  }
+  const setFlagBlocks = useCallback((nextBlocks: ToolNodeData['flagBlocks']) => {
+    const safeBlocks = nextBlocks ?? []
+    updateNodeData(nodeId, {
+      flagBlocks: safeBlocks,
+      paramValues: flagBlocksToParamValues(data.toolId, safeBlocks, data.paramValues),
+    })
+  }, [data.paramValues, data.toolId, nodeId, updateNodeData])
 
   return (
     <div className="flex flex-col gap-4">
@@ -167,42 +1309,230 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <div className="text-[10px] text-text-muted mt-2 flex flex-col gap-0.5">
-          <div>Tool: <span className="font-mono text-text-secondary">{tool.id}</span></div>
+          <div className="flex items-center gap-1.5">
+            <ToolIcon size={11} className="text-text-muted" />
+            <span>Tool: <span className="font-mono text-text-secondary">{tool.id}</span></span>
+          </div>
           <div>Command: <span className="font-mono text-text-secondary">{tool.command}</span></div>
           {tool.module && <div>Module: <span className="font-mono text-text-secondary">{tool.module}</span></div>}
         </div>
         <p className="text-xs text-text-muted mt-2">{tool.description}</p>
       </div>
 
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Execution Mode
+        </h4>
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+          {[
+            { value: 'sbatch', label: 'Slurm job' },
+            { value: 'login', label: 'Login node' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => updateNodeData(nodeId, { executionMode: option.value === 'sbatch' ? undefined : 'login' })}
+              className={classNames(
+                'h-7 rounded text-xs transition-colors',
+                executionMode === option.value
+                  ? 'bg-accent text-white'
+                  : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        {executionMode === 'login' && (
+          <div className="mt-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1.5 text-[11px] text-yellow-200">
+            Running an array or heavy job on the login node will likely be killed by cluster admins. Consider Slurm for anything beyond quick commands.
+          </div>
+        )}
+        <div className="mt-2">
+          <ModuleAutocompleteField
+            connectionId={activeConnectionId}
+            value={data.moduleOverride ?? tool.module ?? ''}
+            loading={Boolean(loadingModules)}
+            placeholder={tool.module ?? 'plink/2.00a3'}
+            onChange={(value) => updateNodeData(nodeId, { moduleOverride: value.trim() || undefined })}
+            onRefresh={() => {
+              if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
+                void loadModules(activeConnectionId, data.moduleOverride ?? tool.module ?? '', { force: true })
+              }
+            }}
+          />
+          <p className="mt-1 text-[10px] text-text-muted">
+            Leave blank to keep the registry default. Free text still works if the module list is incomplete.
+          </p>
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Inputs
+        </h4>
+        <div className="flex flex-col gap-1.5">
+          {tool.inputs.map((port) => (
+            <ToolInputRow
+              key={port.id}
+              port={port}
+              connections={inputEdgesByPort.get(port.id) ?? []}
+              snapshot={snapshot}
+            />
+          ))}
+          {tool.inputs.length === 0 && (
+            <div className="text-xs text-text-muted italic">This tool has no inputs.</div>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Outputs
+        </h4>
+        <div className="flex flex-col gap-1.5">
+          {tool.outputs.map((port) => (
+            <ToolOutputRow
+              key={port.id}
+              port={port}
+              consumers={outputEdgesByPort.get(port.id) ?? []}
+              nodeId={nodeId}
+              data={data}
+              updateNodeData={updateNodeData}
+              showMergeBehavior={axedInputPorts.length > 0}
+            />
+          ))}
+          {tool.outputs.length === 0 && (
+            <div className="text-xs text-text-muted italic">This tool has no declared outputs.</div>
+          )}
+        </div>
+      </div>
+
+      {tool.requiresDatabase && <AnnotationConfigPanel nodeId={nodeId} data={data} />}
+
       {/* Parameters */}
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Parameters
         </h4>
-        <div className="flex flex-col gap-2">
-          {tool.params.map((p) => (
-            <ParamField
-              key={p.name}
-              param={p}
-              value={data.paramValues[p.name]}
-              onChange={(v) => setParam(p.name, v)}
-            />
-          ))}
-          {tool.params.length === 0 && (
-            <div className="text-xs text-text-muted italic">No parameters</div>
-          )}
-        </div>
+        {useFlagBuilder ? (
+          <FlagBuilder
+            nodeId={nodeId}
+            tool={tool}
+            nodeData={{ ...data, flagBlocks }}
+            snapshot={snapshot}
+            schemas={schemas}
+            refreshingSchemaPath={refreshingSchemaPath}
+            advancedExpanded={advancedExpanded}
+            onSetAdvancedExpanded={(expanded) => setAdvancedExpanded(data.toolId, expanded)}
+            onLoadSchema={loadSchemaForPath}
+            onChange={(blocks) => setFlagBlocks(blocks)}
+          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {commonParams.map((p) => {
+              const schema = p.columnRef
+                ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                : null
+              const inputPath = p.columnRef
+                ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                : null
+              return tool.id === 'custom.shell' && p.name === 'script'
+                ? (
+                    <ShellScriptField
+                      key={p.name}
+                      value={data.paramValues[p.name]}
+                      onChange={(v) => setParam(p.name, v)}
+                    />
+                  )
+                : p.columnRef
+                  ? (
+                      <ColumnParamField
+                        key={p.name}
+                        param={p}
+                        value={data.paramValues[p.name]}
+                        columns={schema?.columns ?? []}
+                        loading={Boolean(inputPath && !schema)}
+                        refreshing={refreshingSchemaPath === inputPath}
+                        onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                        onChange={(v) => setParam(p.name, v)}
+                      />
+                    )
+                : (
+                    <ParamField
+                      key={p.name}
+                      param={p}
+                      value={data.paramValues[p.name]}
+                      onChange={(v) => setParam(p.name, v)}
+                    />
+                  )
+            })}
+            {advancedParams.length > 0 && (
+              <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
+                  onClick={() => setAdvancedExpanded(data.toolId, !advancedExpanded)}
+                >
+                  <ChevronDown size={13} className={classNames('transition-transform', advancedExpanded ? 'rotate-180' : '')} />
+                  Advanced
+                  <span className="ml-auto text-[10px] text-text-muted">{advancedParams.length}</span>
+                </button>
+                {advancedExpanded && (
+                  <div className="flex flex-col gap-2 border-t border-border p-2">
+                    {advancedParams.map((p) => {
+                      const schema = p.columnRef
+                        ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                        : null
+                      const inputPath = p.columnRef
+                        ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                        : null
+                      return p.columnRef
+                        ? (
+                            <ColumnParamField
+                              key={p.name}
+                              param={p}
+                              value={data.paramValues[p.name]}
+                              columns={schema?.columns ?? []}
+                              loading={Boolean(inputPath && !schema)}
+                              refreshing={refreshingSchemaPath === inputPath}
+                              onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                              onChange={(v) => setParam(p.name, v)}
+                            />
+                          )
+                        : (
+                            <ParamField
+                              key={p.name}
+                              param={p}
+                              value={data.paramValues[p.name]}
+                              onChange={(v) => setParam(p.name, v)}
+                            />
+                          )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            {visibleParams.length === 0 && (
+              <div className="text-xs text-text-muted italic">No parameters</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Array over (fan-out control) */}
       {axedInputPorts.length > 0 && (
         <div>
           <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
-            Loop / Array
+            Split input behavior
           </h4>
+          <div className="mb-2 rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] leading-5 text-text-muted">
+            This tool receives at least one split input. BioFlow can submit one Slurm array task per accepted item,
+            passing that item's path into the selected input port.
+          </div>
           <div className="flex flex-col gap-1">
             <label className="text-text-secondary text-xs font-medium">
-              Array over input
+              Input that controls the array
             </label>
             <select
               value={data.arrayOver === null ? '__none__' : (data.arrayOver ?? '__auto__')}
@@ -214,31 +1544,103 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               }}
               className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
             >
-              <option value="__auto__">Auto (pick the only axed input)</option>
-              <option value="__none__">No array (single job)</option>
+              <option value="__auto__">Auto: use the only split input</option>
+              <option value="__none__">Single job: do not fan out</option>
               {axedInputPorts.map((p) => {
                 const port = tool.inputs.find((ip) => ip.id === p.portId)
                 return (
                   <option key={p.portId} value={p.portId}>
-                    {port?.label ?? p.portId} — axis "{p.axis}"
+                    {port?.label ?? p.portId}: one task per "{p.axis}" item
                   </option>
                 )
               })}
             </select>
             <p className="text-[10px] text-text-muted mt-1">
               {axedInputPorts.length === 1
-                ? 'Auto-fans out over the single axed input.'
-                : 'Multiple axed inputs detected — pick one to fan out over.'}
+                ? 'Auto will run this node once per accepted item from that split input.'
+                : 'Multiple split inputs are connected. Pick the one whose keys define the array tasks.'}
             </p>
           </div>
         </div>
       )}
+
+      {/* Output folder override */}
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Output folder
+        </h4>
+        <FolderPickerField
+          label=""
+          value={(data.outputDirOverride as string | undefined) ?? ''}
+          placeholder="(default — run's outputs folder)"
+          requesterLabel={`${data.label} output folder`}
+          onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
+        />
+        <p className="text-[10px] text-text-muted mt-1">
+          Absolute path or <code className="font-mono">~/…</code>. Applies to this node only.
+        </p>
+      </div>
 
       {/* Slurm resources */}
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Slurm Resources
         </h4>
+        <div className="mb-2 rounded-md border border-border bg-bg-tertiary p-2">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-xs font-medium text-text-primary">
+                {estimate
+                  ? `Suggested: ${estimate.cpus} CPU / ${estimate.memGB} GB / ${estimate.timeHours} h`
+                  : estimating ? 'Estimating resources...' : 'No resource suggestion yet'}
+              </div>
+              {estimate && (
+                <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] text-text-muted">
+                  <span>Confidence: {estimate.confidence}</span>
+                  <span>{estimate.source === 'learned' ? `Learned from ${estimate.learnedSampleCount} jobs` : 'Registry default'}</span>
+                  {estimate.source === 'learned' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && (
+                    <button
+                      type="button"
+                      className="underline hover:text-text-primary"
+                      onClick={() => {
+                        void window.api.cluster.resetLearnedResources(activeConnectionId, tool.id).then(() => {
+                          setLearnedEstimate(null)
+                        })
+                      }}
+                    >
+                      Reset learned values
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+            {estimate && (
+              <div className="flex gap-1 shrink-0">
+                <Button size="sm" variant="secondary" className="h-7 px-2 text-[11px]" onClick={applyEstimate}>
+                  Apply
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => {
+                    applyEstimate()
+                    setShowEstimateWhy(true)
+                  }}
+                >
+                  Apply + why
+                </Button>
+              </div>
+            )}
+          </div>
+          {estimate && showEstimateWhy && (
+            <ul className="mt-2 list-disc pl-4 text-[11px] text-text-secondary">
+              {estimate.rationale.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <Input
             label="CPUs"
@@ -246,6 +1648,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             min={1}
             value={slurm.cpus ?? ''}
             placeholder={String(tool.slurm?.cpus ?? 1)}
+            className={deviatesByTwo(slurm.cpus, estimate?.cpus) ? 'border-yellow-500' : undefined}
             onChange={(e) => setSlurm({ cpus: e.target.value ? Number(e.target.value) : undefined })}
           />
           <Input
@@ -254,6 +1657,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             min={1}
             value={slurm.memoryGB ?? ''}
             placeholder={String(tool.slurm?.memoryGB ?? 4)}
+            className={deviatesByTwo(slurm.memoryGB, estimate?.memGB) ? 'border-yellow-500' : undefined}
             onChange={(e) => setSlurm({ memoryGB: e.target.value ? Number(e.target.value) : undefined })}
           />
           <Input
@@ -263,6 +1667,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             step={0.5}
             value={slurm.timeHours ?? ''}
             placeholder={String(tool.slurm?.timeHours ?? 1)}
+            className={deviatesByTwo(slurm.timeHours, estimate?.timeHours) ? 'border-yellow-500' : undefined}
             onChange={(e) => setSlurm({ timeHours: e.target.value ? Number(e.target.value) : undefined })}
           />
           <Input
@@ -299,9 +1704,24 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
 function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
 
   const split = data.split
-
+  const outputParts = !data.isInput ? splitOutputPath(data) : null
+  const [uploading, setUploading] = useState(false)
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null)
+  const [preview, setPreview] = useState<{ items: FileNodeSplit['items']; missing: Set<string>; loading: boolean; error: string | null }>({
+    items: [],
+    missing: new Set(),
+    loading: false,
+    error: null,
+  })
+  const [splitFolder, setSplitFolder] = useState(() => data.path ? pathDirname(data.path) : '')
+  const [splitDetectMode, setSplitDetectMode] = useState<SplitDetectMode>('auto')
+  const [detectingSplit, setDetectingSplit] = useState(false)
+  const [detectMessage, setDetectMessage] = useState<string | null>(null)
+  const [rangeDraft, setRangeDraft] = useState('')
+  const [refreshNonce, setRefreshNonce] = useState(0)
   const setSplit = useCallback(
     (next: FileNodeSplit | undefined) => {
       updateNodeData(nodeId, { split: next })
@@ -314,7 +1734,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     setSplit({
       axis: split?.axis ?? 'chrom',
       items: [...items, { key: String(items.length + 1), path: '' }],
-      glob: split?.glob,
+      pattern: split?.pattern ?? { kind: 'manual' },
     })
   }, [split, setSplit])
 
@@ -335,59 +1755,153 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     [split, setSplit],
   )
 
-  const resolveGlob = useCallback(async () => {
+  const pattern = split?.pattern ?? (split?.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }) as SplitPattern
+
+  const setPattern = useCallback((next: SplitPattern) => {
     if (!split) return
-    const pattern = split.glob?.trim()
-    if (!pattern) {
-      alert('Set a glob pattern first, e.g. /path/to/chr{1..22}.pgen')
-      return
-    }
-    if (!activeConnectionId) {
-      alert('Connect to a host first')
-      return
-    }
+    setSplit({ ...split, pattern: next })
+  }, [split, setSplit])
 
-    const range = pattern.match(/^(.*)\{(\d+)\.\.(\d+)\}(.*)$/)
-    if (range) {
-      const [, prefix, startS, endS, suffix] = range
-      const start = Number(startS)
-      const end = Number(endS)
-      const items: FileNodeSplit['items'] = []
-      for (let k = start; k <= end; k++) {
-        items.push({ key: String(k), path: `${prefix}${k}${suffix}` })
+  const acceptedRange = useMemo(() => split ? rangeTextFromItems(split.items) : '', [split])
+
+  useEffect(() => {
+    setRangeDraft(acceptedRange)
+  }, [acceptedRange])
+
+  useEffect(() => {
+    if (!data.path || splitFolder) return
+    setSplitFolder(pathDirname(data.path))
+  }, [data.path, splitFolder])
+
+  const detectSplit = useCallback(async () => {
+    if (!split) return
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
+      setDetectMessage('Connect to a remote host before detecting split files.')
+      return
+    }
+    if (!splitFolder.trim()) {
+      setDetectMessage('Pick the folder containing the split files or split folders first.')
+      return
+    }
+    setDetectingSplit(true)
+    setDetectMessage(null)
+    try {
+      const detected = await detectSplitInFolder({
+        connectionId: activeConnectionId,
+        folder: splitFolder.trim(),
+        mode: splitDetectMode,
+        axis: split.axis || 'item',
+        fileType: data.fileType,
+        seedPath: data.path,
+      })
+      updateNodeData(nodeId, {
+        split: { ...split, items: detected.items, pattern: detected.pattern },
+        fileType: inferSplitFileType(detected.items, data.fileType),
+      })
+      setPreview({
+        items: detected.items,
+        missing: new Set(detected.missing),
+        loading: false,
+        error: null,
+      })
+      setDetectMessage(detected.summary)
+    } catch (err: any) {
+      setDetectMessage(err?.message ?? String(err))
+    } finally {
+      setDetectingSplit(false)
+    }
+  }, [activeConnectionId, data.fileType, data.path, nodeId, split, splitDetectMode, splitFolder, updateNodeData])
+
+  useEffect(() => {
+    if (!split) return
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      if (!activeConnectionId) {
+        setPreview({ items: [], missing: new Set(), loading: false, error: 'Connect to a host to preview files.' })
+        return
       }
-      setSplit({ ...split, items })
-      return
-    }
-
-    const starIdx = pattern.indexOf('*')
-    if (starIdx >= 0) {
-      const dir = pattern.slice(0, pattern.lastIndexOf('/'))
+      const currentPattern = split.pattern ?? (split.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }) as SplitPattern
+      const hasPattern =
+        currentPattern.kind === 'manual' ||
+        (currentPattern.kind === 'brace' && currentPattern.template.trim()) ||
+        (currentPattern.kind === 'glob' && currentPattern.template.trim()) ||
+        (currentPattern.kind === 'crossFolder' && currentPattern.parentDir.trim() && currentPattern.childGlob.trim() && currentPattern.file.trim())
+      if (!hasPattern) {
+        setPreview({ items: [], missing: new Set(), loading: false, error: null })
+        return
+      }
+      setPreview((prev) => ({ ...prev, loading: true, error: null }))
       try {
-        const entries = await window.api.sftp.ls(activeConnectionId, dir)
-        const re = new RegExp(
-          '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace('\\*', '(.+)') + '$',
-        )
-        const items: FileNodeSplit['items'] = []
-        for (const e of entries) {
-          const m = re.exec(e.path)
-          if (m) items.push({ key: m[1], path: e.path })
-        }
-        items.sort((a, b) => {
-          const na = Number(a.key)
-          const nb = Number(b.key)
-          if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
-          return a.key.localeCompare(b.key)
-        })
-        setSplit({ ...split, items })
+        const resolved = await window.api.fs.resolveSplit(activeConnectionId, currentPattern, split.items)
+        if (cancelled) return
+        setPreview({ items: resolved.items, missing: new Set(resolved.missing), loading: false, error: null })
       } catch (err: any) {
-        alert(`Could not list ${dir}: ${err?.message ?? err}`)
+        if (cancelled) return
+        setPreview({ items: [], missing: new Set(), loading: false, error: err?.message ?? String(err) })
       }
+    }, 300)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [activeConnectionId, refreshNonce, split])
+
+  const acceptPreview = useCallback(() => {
+    if (!split) return
+    setSplit({ ...split, items: preview.items, pattern })
+  }, [split, setSplit, preview.items, pattern])
+
+  const applyRange = useCallback(() => {
+    if (!split) return
+    const keys = parseRangeKeys(rangeDraft)
+    if (keys.length === 0) {
+      setDetectMessage('Enter keys like 1-22, 1..22, or 1,2,3.')
       return
     }
+    const existing = new Map(split.items.map((item) => [item.key, item]))
+    const nextItems = keys.map((key) => existing.get(key) ?? { key, path: pathForSplitKey(pattern, key) })
+    setSplit({ ...split, items: nextItems })
+    setDetectMessage(`Using ${nextItems.length} ${split.axis || 'items'}: ${rangeTextFromItems(nextItems)}.`)
+  }, [pattern, rangeDraft, setSplit, split])
 
-    alert('Pattern must contain {N..M} range or a * wildcard')
-  }, [split, setSplit, activeConnectionId])
+  const uploadLocalFile = useCallback(async () => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !data.path.trim()) return
+    setUploading(true)
+    setUploadMessage(null)
+    try {
+      await window.api.local.stat(data.path)
+      await uploadLocalFileForPath(activeConnectionId, data.path, settings.paths.uploadsSubfolder, nodeId, updateNodeData, setUploadMessage)
+    } catch (err: any) {
+      setUploadMessage(err?.message ?? String(err))
+    } finally {
+      setUploading(false)
+    }
+  }, [activeConnectionId, data.path, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
+
+  const acceptDroppedLocalFile = useCallback(async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const files = Array.from(event.dataTransfer.files ?? [])
+    const localPath = files[0] ? window.api.local.pathForFile(files[0]) : ''
+    if (!localPath) return
+    if (files.length > 1) {
+      setUploadMessage('Drop one file at a time for now.')
+      return
+    }
+    const stat = await window.api.local.stat(localPath)
+    if (stat.isDirectory) {
+      setUploadMessage('Dropping folders is not supported yet.')
+      return
+    }
+    updateNodeData(nodeId, {
+      source: 'local',
+      path: localPath,
+      fileType: inferFileType(localPath),
+    })
+    setUploadMessage(`Using ${pathBasename(localPath)}`)
+    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && window.confirm('Upload this file to the cluster now?')) {
+      await uploadLocalFileForPath(activeConnectionId, localPath, settings.paths.uploadsSubfolder, nodeId, updateNodeData, setUploadMessage)
+    }
+  }, [activeConnectionId, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
 
   return (
     <div className="flex flex-col gap-3">
@@ -396,33 +1910,108 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
         value={data.label}
         onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
       />
-      <div className="flex flex-col gap-1">
-        <label className="text-text-secondary text-xs font-medium">Remote path</label>
-        <div className="flex items-end gap-1.5">
-          <Input
-            value={data.path}
-            placeholder="/project/username/data/input.vcf.gz"
-            onChange={(e) => updateNodeData(nodeId, { path: e.target.value })}
-            className="flex-1"
-          />
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-8 px-2 shrink-0"
-            title="Pick a file from the sidebar"
-            onClick={() =>
-              useUIStore.getState().startFilePick({
-                nodeId,
-                requesterLabel: data.label,
-                accept: data.fileType !== 'any' ? [data.fileType] : undefined,
-              })
-            }
-          >
-            <Folder size={12} className="mr-1" />
-            Pick…
-          </Button>
+      {data.isInput ? (
+        <div className="flex flex-col gap-1">
+          <label className="text-text-secondary text-xs font-medium">Input file path</label>
+          <div className="flex rounded-md border border-border bg-bg-tertiary p-1">
+            {[
+              { value: 'remote', label: 'Remote' },
+              { value: 'local', label: 'Local' },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => updateNodeData(nodeId, { source: option.value as FileNodeData['source'] })}
+                className={classNames(
+                  'h-7 flex-1 rounded text-xs transition-colors',
+                  (data.source ?? 'remote') === option.value
+                    ? 'bg-accent text-white'
+                    : 'text-text-secondary hover:text-text-primary',
+                )}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <div
+            className="flex items-end gap-1.5"
+            onDragOver={(event) => {
+              if ((data.source ?? 'remote') === 'local') event.preventDefault()
+            }}
+            onDrop={(event) => {
+              if ((data.source ?? 'remote') === 'local') void acceptDroppedLocalFile(event)
+            }}
+	          >
+	            {(data.source ?? 'remote') === 'local' ? (
+	              <LocalPathField
+	                value={data.path}
+	                placeholder="/Users/you/data/phenotype.txt"
+	                onChange={(value) => updateNodeData(nodeId, { path: value })}
+	                className="flex-1"
+	                mode="file"
+	              />
+	            ) : (
+	              <RemotePathField
+	                value={data.path}
+	                placeholder="/project/username/data/input.vcf.gz"
+	                onChange={(value) => {
+	                  const inferred = inferFileType(value)
+	                  updateNodeData(nodeId, {
+	                    path: value,
+	                    fileType: data.fileType === 'plink' && inferred === 'bed' ? 'plink' : inferred,
+	                  })
+	                }}
+	                className="flex-1"
+	                title={`Choose file for ${data.label}`}
+	                mode="file"
+	                accept={data.fileType !== 'any' ? [data.fileType] : undefined}
+	              />
+	            )}
+	          </div>
+	          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="sm" className="h-7 text-[11px]" disabled={uploading} onClick={() => void uploadLocalFile()}>
+                {uploading ? 'Uploading...' : 'Upload to cluster'}
+              </Button>
+              {uploadMessage && <span className="truncate text-[10px] text-text-muted">{uploadMessage}</span>}
+            </div>
+          )}
         </div>
-      </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <Input
+            label="Output filename"
+            value={outputParts?.filename ?? ''}
+            placeholder="results.tsv"
+            onChange={(e) => {
+              const filename = e.target.value
+              const folder = outputParts?.folder ?? ''
+              updateNodeData(nodeId, {
+                outputFilename: filename,
+                outputDir: folder || undefined,
+                path: joinOutputPath(folder, filename),
+              })
+            }}
+          />
+          <FolderPickerField
+            label="Output folder"
+            value={outputParts?.folder ?? ''}
+            placeholder="(default — connected tool output folder)"
+            requesterLabel={`${data.label} output folder`}
+            onChange={(folder) => {
+              const filename = outputParts?.filename ?? ''
+              updateNodeData(nodeId, {
+                outputFilename: filename || undefined,
+                outputDir: folder || undefined,
+                path: joinOutputPath(folder, filename),
+              })
+            }}
+          />
+          <p className="text-[10px] text-text-muted">
+            Connect a tool output to this node to name where that output should be written. Leave folder blank to use the tool's output folder.
+          </p>
+        </div>
+      )}
       <div className="flex flex-col gap-1">
         <label className="text-text-secondary text-xs font-medium">File type</label>
         <select
@@ -448,9 +2037,14 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       {/* Split by axis (enables per-axis SLURM arrays downstream) */}
       <div className="border-t border-border pt-3 mt-1">
         <div className="flex items-center justify-between mb-2">
-          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
-            Split by axis
-          </h4>
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+              Split into per-item files
+            </h4>
+            <p className="mt-0.5 text-[10px] text-text-muted">
+              Use this when one logical input is really many files, such as one genotype file per chromosome.
+            </p>
+          </div>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
@@ -470,39 +2064,177 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
 
         {split && (
           <div className="flex flex-col gap-2">
+            <div className="rounded border border-accent/25 bg-accent/10 px-2 py-1.5 text-[11px] leading-5 text-text-secondary">
+              BioFlow creates one job per item. The <span className="font-medium text-text-primary">key</span> becomes the array label
+              and the <span className="font-medium text-text-primary">path</span> is the file used for that job.
+              Example: key <span className="font-mono text-text-primary">1</span> uses chromosome 1's path, key <span className="font-mono text-text-primary">2</span> uses chromosome 2's path.
+            </div>
             <Input
-              label="Axis name"
+              label="Axis name shown on edges"
               value={split.axis}
               placeholder="chrom"
               onChange={(e) => setSplit({ ...split, axis: e.target.value })}
             />
-            <div className="flex flex-col gap-1">
-              <label className="text-text-secondary text-xs font-medium">
-                Glob / range (optional helper)
-              </label>
-              <div className="flex gap-1">
-                <input
-                  type="text"
-                  value={split.glob ?? ''}
-                  placeholder="/path/chr{1..22}.pgen"
-                  onChange={(e) => setSplit({ ...split, glob: e.target.value })}
-                  className="h-8 flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent font-mono"
-                />
+            <div className="rounded border border-border bg-bg-primary p-2">
+              <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+                Detect from folder
+              </div>
+              <FolderPickerField
+                label="Data folder"
+                value={splitFolder}
+                placeholder="/scratch/project/genotypes"
+                requesterLabel={`${data.label} split folder`}
+                onChange={setSplitFolder}
+              />
+              <div className="mt-2 grid grid-cols-3 rounded border border-border bg-bg-tertiary p-0.5">
+                {([
+                  ['auto', 'Auto'],
+                  ['files', 'Files here'],
+                  ['folders', 'Folders here'],
+                ] as Array<[SplitDetectMode, string]>).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setSplitDetectMode(mode)}
+                    className={classNames(
+                      'rounded px-1.5 py-1 text-[10px]',
+                      splitDetectMode === mode ? 'bg-accent/15 text-text-primary' : 'text-text-muted hover:text-text-primary',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={resolveGlob}
-                  className="h-8 px-2 text-[11px]"
-                  title="Resolve glob to items"
+                  className="h-7 px-2 text-[11px]"
+                  disabled={detectingSplit || !splitFolder.trim()}
+                  onClick={() => void detectSplit()}
                 >
-                  <Folder size={12} />
+                  {detectingSplit ? 'Detecting...' : 'Detect split'}
+                </Button>
+                {detectMessage && (
+                  <span className={classNames(
+                    'min-w-0 flex-1 truncate text-[10px]',
+                    detectMessage.toLowerCase().includes('could not') || detectMessage.toLowerCase().includes('connect')
+                      ? 'text-error'
+                      : 'text-text-muted',
+                  )}>
+                    {detectMessage}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="text-[10px] uppercase tracking-wide text-text-muted">
+              Manual recipe
+            </div>
+            <div className="grid grid-cols-2 rounded border border-border bg-bg-primary p-0.5">
+              {(['manual', 'brace', 'glob', 'crossFolder'] as SplitPattern['kind'][]).map((kind) => (
+                <button
+                  key={kind}
+                  onClick={() => setPattern(defaultPattern(kind, pattern, data.path))}
+                  className={classNames(
+                    'rounded px-1.5 py-1 text-[10px]',
+                    pattern.kind === kind ? 'bg-accent/15 text-text-primary' : 'text-text-muted hover:text-text-primary',
+                  )}
+                >
+                  {splitPatternLabel(kind)}
+                </button>
+              ))}
+            </div>
+            <SplitPatternExplainer pattern={pattern} axis={split.axis} />
+
+            {pattern.kind === 'brace' && (
+              <BraceFormulaEditor
+                pattern={pattern}
+                axis={split.axis}
+                onChange={setPattern}
+              />
+            )}
+            {pattern.kind === 'glob' && (
+              <div className="grid grid-cols-1 gap-2">
+                <Input
+                  label="Path glob"
+                  value={pattern.template}
+                  placeholder="/scratch/project/chr*/geno.pgen"
+                  onChange={(e) => setPattern({ ...pattern, template: e.target.value })}
+                />
+                <Input
+                  label="Name for the first * match"
+                  value={pattern.capture}
+                  placeholder={split.axis || 'chrom'}
+                  onChange={(e) => setPattern({ ...pattern, capture: e.target.value })}
+                />
+              </div>
+            )}
+            {pattern.kind === 'crossFolder' && (
+              <div className="grid grid-cols-1 gap-2">
+                <FolderPickerField
+                  label="Parent directory containing the item folders"
+                  value={pattern.parentDir}
+                  placeholder="/scratch/project/genotypes"
+                  requesterLabel="split parent directory"
+                  onChange={(value) => setPattern({ ...pattern, parentDir: value })}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    label="Item folders"
+                    value={pattern.childGlob}
+                    placeholder="chr*"
+                    onChange={(e) => setPattern({ ...pattern, childGlob: e.target.value })}
+                  />
+                  <Input
+                    label="File inside each folder"
+                    value={pattern.file}
+                    placeholder="geno.pgen"
+                    onChange={(e) => setPattern({ ...pattern, file: e.target.value })}
+                  />
+                </div>
+                <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[10px] leading-4 text-text-muted">
+                  BioFlow lists the parent directory, keeps child folders matching <span className="font-mono text-text-secondary">{pattern.childGlob || 'chr*'}</span>,
+                  then appends <span className="font-mono text-text-secondary">{pattern.file || 'geno.pgen'}</span> inside each one.
+                  {pattern.parentDir && pattern.childGlob && pattern.file && (
+                    <div className="mt-1 font-mono text-text-secondary">
+                      {pattern.parentDir.replace(/\/+$/, '')}/{pattern.childGlob}/{pattern.file.replace(/^\/+/, '')}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="rounded border border-border bg-bg-primary p-2">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <label className="text-[10px] uppercase tracking-wide text-text-muted">
+                  Keys used for array jobs
+                </label>
+                {acceptedRange && (
+                  <span className="truncate text-[10px] font-mono text-text-secondary" title={acceptedRange}>
+                    {acceptedRange}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-end gap-2">
+                <Input
+                  label={`${split.axis || 'item'} range/list`}
+                  value={rangeDraft}
+                  placeholder="1-22 or 1,2,3,X,Y"
+                  onChange={(e) => setRangeDraft(e.target.value)}
+                  className="flex-1"
+                />
+                <Button variant="secondary" size="sm" className="h-8 px-2 text-[11px]" onClick={applyRange}>
+                  Apply
                 </Button>
               </div>
+              <p className="mt-1 text-[10px] text-text-muted">
+                Change this after auto-detect to add or remove array items without rebuilding the full path recipe.
+              </p>
             </div>
 
             <div className="flex items-center justify-between mt-1">
               <label className="text-text-secondary text-xs font-medium">
-                Items ({split.items.length})
+                Accepted items ({split.items.length})
               </label>
               <button
                 onClick={addRow}
@@ -513,22 +2245,26 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             </div>
             <div className="flex flex-col gap-1 max-h-56 overflow-y-auto">
               {split.items.map((row, i) => (
-                <div key={i} className="flex gap-1 items-center">
+                <div key={i} className="grid grid-cols-[56px_1fr_22px] gap-1 items-start">
                   <input
                     type="text"
                     value={row.key}
                     onChange={(e) => updateRow(i, { key: e.target.value })}
-                    className="h-7 w-14 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
-                    placeholder="key"
+                    className="h-7 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
+                    placeholder="1"
+                    title="Item key: this becomes the Slurm array item label."
                   />
-                  <input
-                    type="text"
+                  <RemotePathField
                     value={row.path}
-                    onChange={(e) => updateRow(i, { path: e.target.value })}
-                    className="h-7 flex-1 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
-                    placeholder="/path/chrN.pgen"
+                    onChange={(value) => updateRow(i, { path: value })}
+                    placeholder="/path/to/item/file"
+                    title={`Choose file for split item ${row.key || i + 1}`}
+                    mode="file"
+                    buttonLabel="Browse"
+                    className="min-w-0"
                   />
                   <button
+                    type="button"
                     onClick={() => removeRow(i)}
                     className="p-1 rounded hover:bg-error/20 text-text-muted hover:text-error transition-colors"
                     title="Remove"
@@ -539,18 +2275,623 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               ))}
               {split.items.length === 0 && (
                 <div className="text-[11px] text-text-muted italic px-1">
-                  No items — add rows or resolve a glob.
+                  No accepted items yet. Fill a recipe above, check the preview, then click Accept preview.
                 </div>
               )}
             </div>
+            <div className="rounded border border-border bg-bg-primary">
+              <div className="flex items-center justify-between border-b border-border px-2 py-1">
+                <div>
+                  <span className="text-[10px] uppercase tracking-wide text-text-muted">Preview before accepting</span>
+                  {!preview.loading && !preview.error && preview.items.length > 0 && (
+                    <span className="ml-2 text-[10px] text-text-muted">
+                      {preview.items.length} found, {preview.missing.size} missing
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-[10px]"
+                    disabled={preview.loading}
+                    onClick={() => setRefreshNonce((value) => value + 1)}
+                  >
+                    Refresh
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="h-6 px-2 text-[10px]"
+                    disabled={preview.loading || preview.items.length === 0}
+                    onClick={acceptPreview}
+                  >
+                    Accept preview
+                  </Button>
+                </div>
+              </div>
+              <div className="max-h-40 overflow-y-auto">
+                {preview.loading && <div className="px-2 py-2 text-[11px] text-text-muted">Checking files...</div>}
+                {preview.error && <div className="px-2 py-2 text-[11px] text-error">{preview.error}</div>}
+                {!preview.loading && !preview.error && preview.items.length === 0 && (
+                  <div className="px-2 py-2 text-[11px] text-text-muted">
+                    Enter a recipe above to see the exact key → path pairs that will be used.
+                  </div>
+                )}
+                {!preview.loading && !preview.error && preview.items.length > 0 && (
+                  <table className="w-full text-[10px]">
+                    <thead className="sticky top-0 bg-bg-tertiary text-text-muted">
+                      <tr>
+                        <th className="w-12 px-2 py-1 text-left font-medium">Key</th>
+                        <th className="px-2 py-1 text-left font-medium">Resolved path</th>
+                        <th className="w-14 px-2 py-1 text-right font-medium">Check</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preview.items.map((item) => {
+                        const missing = preview.missing.has(item.key)
+                        return (
+                          <tr key={`${item.key}:${item.path}`} className={missing ? 'bg-error/10 text-error' : 'text-text-secondary'}>
+                            <td className="w-12 px-2 py-1 font-mono">{item.key}</td>
+                            <td className="px-2 py-1 font-mono truncate" title={item.path}>{item.path}</td>
+                            <td className="w-14 px-2 py-1 text-right">{missing ? 'missing' : 'exists'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+            {isPlinkLikeSplit(split) && (
+              <div className="rounded border border-accent/25 bg-accent/10 p-2">
+                <div className="text-[11px] font-medium text-text-primary">PLINK2 prefix files detected</div>
+                <p className="mt-1 text-[10px] leading-4 text-text-muted">
+                  BioFlow checks the selected <span className="font-mono">.pgen</span> files exist, then runs PLINK2 with
+                  the fileset prefix, like <span className="font-mono">--pfile /path/chr1/output</span>.
+                  The matching <span className="font-mono">.pvar</span> and <span className="font-mono">.psam</span> stay implicit.
+                </p>
+              </div>
+            )}
             <p className="text-[10px] text-text-muted">
-              Downstream tools will auto-fan-out over axis "{split.axis || '?'}".
+              Downstream compatible tools will auto-run once per accepted item. Edges from this file show "{split.axis || '?'}×{split.items.length}" after items are accepted.
             </p>
           </div>
         )}
       </div>
     </div>
   )
+}
+
+async function uploadLocalFileForPath(
+  activeConnectionId: string,
+  localPath: string,
+  uploadsSubfolder: string,
+  nodeId: string,
+  updateNodeData: (nodeId: string, patch: Partial<FileNodeData>) => void,
+  setUploadMessage: (message: string | null) => void,
+) {
+  const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
+  const fileName = localPath.split('/').pop() || 'input'
+  const uploadDir = `${home}/${uploadsSubfolder.replace(/^\/+|\/+$/g, '')}`
+  const remotePath = `${uploadDir}/${fileName}`
+  await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
+  await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
+  updateNodeData(nodeId, { path: remotePath, source: 'remote' })
+  setUploadMessage(`Uploaded to ${remotePath}`)
+}
+
+function splitOutputPath(data: FileNodeData): { folder: string; filename: string } {
+  if (data.outputFilename || data.outputDir) {
+    return { folder: data.outputDir ?? '', filename: data.outputFilename ?? '' }
+  }
+  const path = data.path ?? ''
+  const idx = path.lastIndexOf('/')
+  if (idx < 0) return { folder: '', filename: path }
+  return { folder: path.slice(0, idx), filename: path.slice(idx + 1) }
+}
+
+function splitPatternLabel(kind: SplitPattern['kind']): string {
+  switch (kind) {
+    case 'manual': return 'Type rows'
+    case 'brace': return 'Number/list range'
+    case 'glob': return 'Match files'
+    case 'crossFolder': return 'Match folders'
+  }
+}
+
+function SplitPatternExplainer({ pattern, axis }: { pattern: SplitPattern; axis: string }) {
+  const axisLabel = axis.trim() || 'chrom'
+  const rows = splitPatternHelp(pattern, axisLabel)
+  return (
+    <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[10px] leading-4 text-text-muted">
+      <div className="font-medium text-text-secondary">{rows.title}</div>
+      <div>{rows.body}</div>
+      <div className="mt-1 grid grid-cols-[42px_1fr] gap-x-2 gap-y-0.5 font-mono">
+        {rows.examples.map((example) => (
+          <div key={`${example.key}:${example.path}`} className="contents">
+            <span className="text-text-secondary">{example.key}</span>
+            <span className="truncate" title={example.path}>{example.path}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function BraceFormulaEditor({
+  pattern,
+  axis,
+  onChange,
+}: {
+  pattern: Extract<SplitPattern, { kind: 'brace' }>
+  axis: string
+  onChange: (pattern: SplitPattern) => void
+}) {
+  const formula = parseBraceFormula(pattern.template)
+  const setFormula = (patch: Partial<typeof formula>) => {
+    const next = { ...formula, ...patch }
+    onChange({ kind: 'brace', template: `${joinFormulaPrefix(next.folder, next.prefix)}{${next.range}}${next.suffix}` })
+  }
+  const axisName = axis.trim() || 'variable'
+  return (
+    <div className="rounded border border-border bg-bg-primary p-2">
+      <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+        Path formula
+      </div>
+      <div className="grid grid-cols-1 gap-2">
+        <FolderPickerField
+          label="Folder/path"
+          value={formula.folder}
+          placeholder="/scratch/project/genotypes"
+          requesterLabel="split path formula"
+          onChange={(value) => setFormula({ folder: value })}
+        />
+        <Input
+          label="Filename or folder prefix before the changing value"
+          value={formula.prefix}
+          placeholder="chr"
+          onChange={(e) => setFormula({ prefix: e.target.value })}
+        />
+        <div className="grid grid-cols-[1fr_96px_1fr] gap-2">
+          <Input
+            label={`${axisName} values`}
+            value={formula.range}
+            placeholder="1..22"
+            onChange={(e) => setFormula({ range: e.target.value })}
+          />
+          <div className="flex flex-col gap-1">
+            <label className="text-text-secondary text-xs font-medium">Variable</label>
+            <div className="flex h-8 items-center justify-center rounded-md border border-border bg-bg-tertiary px-2 text-xs font-mono text-accent">
+              {axisName}
+            </div>
+          </div>
+          <Input
+            label="Suffix after the changing value"
+            value={formula.suffix}
+            placeholder="/geno.pgen"
+            onChange={(e) => setFormula({ suffix: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="mt-2 rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[10px] text-text-muted">
+        Formula:{' '}
+        <span className="font-mono text-text-secondary">
+          {joinFormulaPrefix(formula.folder, formula.prefix) || '<path-and-prefix>'}
+          {'{'}
+          {formula.range || '1..22'}
+          {'}'}
+          {formula.suffix || '<suffix>'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function splitPatternHelp(
+  pattern: SplitPattern,
+  axis: string,
+): { title: string; body: string; examples: Array<{ key: string; path: string }> } {
+  if (pattern.kind === 'manual') {
+    return {
+      title: 'Type rows manually',
+      body: `Use this when there are only a few ${axis} files or when names are irregular. Each row is one array task.`,
+      examples: [
+        { key: '1', path: '/scratch/project/chr1/genotypes.pgen' },
+        { key: '2', path: '/scratch/project/chr2/genotypes.pgen' },
+      ],
+    }
+  }
+  if (pattern.kind === 'brace') {
+    return {
+      title: 'Expand a number range or list inside braces',
+      body: 'The path template is expanded first, then BioFlow checks whether each resulting file exists.',
+      examples: [
+        { key: '1', path: '/scratch/project/chr1/genotypes.pgen' },
+        { key: '2', path: '/scratch/project/chr2/genotypes.pgen' },
+      ],
+    }
+  }
+  if (pattern.kind === 'glob') {
+    return {
+      title: 'Match files in one folder',
+      body: 'The first * becomes the item key. Use this when files differ by filename or by one folder segment.',
+      examples: [
+        { key: '1', path: '/scratch/project/genotypes.chr1.pgen' },
+        { key: '2', path: '/scratch/project/genotypes.chr2.pgen' },
+      ],
+    }
+  }
+  return {
+    title: 'Match folders, then append the same file name inside each folder',
+    body: 'Use this when every item lives in its own folder and the file has the same relative name in each folder.',
+    examples: [
+      { key: '1', path: '/scratch/project/genotypes/chr1/genotypes.pgen' },
+      { key: '2', path: '/scratch/project/genotypes/chr2/genotypes.pgen' },
+    ],
+  }
+}
+
+function parseBraceFormula(template: string): { folder: string; prefix: string; range: string; suffix: string } {
+  const match = template.match(/^(.*)\{([^{}]+)\}(.*)$/)
+  const rawPrefix = match ? match[1] : template
+  const slash = rawPrefix.lastIndexOf('/')
+  const folder = slash >= 0 ? rawPrefix.slice(0, slash) : ''
+  const prefix = slash >= 0 ? rawPrefix.slice(slash + 1) : rawPrefix
+  return { folder, prefix, range: match ? match[2] : '1..22', suffix: match ? match[3] : '' }
+}
+
+function joinFormulaPrefix(folder: string, prefix: string): string {
+  if (!folder.trim()) return prefix
+  if (!prefix.trim()) return folder.replace(/\/+$/, '')
+  return `${folder.replace(/\/+$/, '')}/${prefix}`
+}
+
+function joinOutputPath(folder: string, filename: string): string {
+  if (!folder.trim()) return filename.trim()
+  if (!filename.trim()) return folder.trim()
+  return `${folder.replace(/\/+$/, '')}/${filename.trim()}`
+}
+
+function defaultPattern(kind: SplitPattern['kind'], current: SplitPattern, seedPath = ''): SplitPattern {
+  if (kind === current.kind) return current
+  if (kind === 'manual') return { kind: 'manual' }
+  if (kind === 'brace') return { kind: 'brace', template: current.kind === 'glob' ? current.template : seedPath }
+  if (kind === 'glob') return { kind: 'glob', template: current.kind === 'brace' ? current.template : seedPath, capture: 'key' }
+  const seeded = crossFolderSeed(seedPath)
+  return { kind: 'crossFolder', parentDir: seeded.parentDir, childGlob: seeded.childGlob, file: seeded.file }
+}
+
+function crossFolderSeed(path: string): { parentDir: string; childGlob: string; file: string } {
+  const parts = path.split('/').filter(Boolean)
+  if (parts.length < 3) return { parentDir: '', childGlob: 'chr*', file: '' }
+  const file = parts[parts.length - 1]
+  const child = parts[parts.length - 2]
+  const parent = `/${parts.slice(0, -2).join('/')}`
+  return {
+    parentDir: parent,
+    childGlob: child.replace(/\d+$/, '*') || 'chr*',
+    file,
+  }
+}
+
+async function detectSplitInFolder({
+  connectionId,
+  folder,
+  mode,
+  axis,
+  fileType,
+  seedPath,
+}: {
+  connectionId: string
+  folder: string
+  mode: SplitDetectMode
+  axis: string
+  fileType: FileNodeData['fileType']
+  seedPath: string
+}): Promise<DetectedSplit> {
+  const entries = await window.api.sftp.ls(connectionId, folder)
+  const candidates: DetectedSplit[] = []
+  if (mode === 'auto' || mode === 'files') {
+    const files = detectFilesInFolder(folder, entries, fileType, axis)
+    if (files) candidates.push(files)
+  }
+  if (mode === 'auto' || mode === 'folders') {
+    const folders = await detectFoldersInFolder(connectionId, folder, entries, fileType, seedPath, axis)
+    if (folders) candidates.push(folders)
+  }
+  if (candidates.length === 0) {
+    throw new Error('Could not infer a split pattern in that folder. Use the manual recipe below.')
+  }
+  return candidates.sort((a, b) => b.quality - a.quality || b.items.length - a.items.length)[0]
+}
+
+function detectFilesInFolder(
+  folder: string,
+  entries: RemoteFileEntry[],
+  fileType: FileNodeData['fileType'],
+  axis = 'item',
+): DetectedSplit | null {
+  const files = preferredFiles(entries.filter((entry) => !entry.isDirectory), fileType)
+  const group = bestVariableGroup(files.map((entry) => ({ name: entry.name, path: entry.path })))
+  if (!group || group.items.length < 2) return null
+  const range = rangeTextFromItems(group.items)
+  return {
+    pattern: { kind: 'glob', template: `${folder.replace(/\/+$/, '')}/${group.prefix}*${group.suffix}`, capture: 'key' },
+    items: group.items,
+    missing: [],
+    summary: `Detected ${group.items.length} split files (${axis} ${range}).`,
+    quality: 60 + group.items.length + averageFileScore(group.items.map((item) => item.path), fileType),
+  }
+}
+
+async function detectFoldersInFolder(
+  connectionId: string,
+  folder: string,
+  entries: RemoteFileEntry[],
+  fileType: FileNodeData['fileType'],
+  seedPath: string,
+  axis = 'item',
+): Promise<DetectedSplit | null> {
+  const folders = entries.filter((entry) => entry.isDirectory)
+  const group = bestVariableGroup(folders.map((entry) => ({ name: entry.name, path: entry.path })))
+  if (!group || group.items.length < 2) return null
+
+  const folderEntries = folders
+    .filter((entry) => group.items.some((item) => item.path === entry.path))
+    .slice(0, 100)
+  const listings = await Promise.all(folderEntries.map(async (entry) => {
+    try {
+      return { folder: entry, entries: await window.api.sftp.ls(connectionId, entry.path) }
+    } catch {
+      return { folder: entry, entries: [] as RemoteFileEntry[] }
+    }
+  }))
+  const fileName = chooseCommonNestedFile(listings.map((listing) => listing.entries), fileType, pathBasename(seedPath))
+  if (!fileName) {
+    const fallbackItems = detectOneNestedFilePerFolder(listings, fileType)
+    if (fallbackItems.length < 2) return null
+    return {
+      pattern: { kind: 'manual' },
+      items: fallbackItems,
+      missing: [],
+      summary: `Detected ${fallbackItems.length} item folders (${axis} ${rangeTextFromItems(fallbackItems)}). The accepted rows are editable below.`,
+      quality: 45 + fallbackItems.length + averageFileScore(fallbackItems.map((item) => item.path), fileType),
+    }
+  }
+
+  const items = folderEntries.map((entry) => ({
+    key: captureKeyFromName(entry.name),
+    path: `${entry.path.replace(/\/+$/, '')}/${fileName}`,
+  }))
+  return {
+    pattern: {
+      kind: 'crossFolder',
+      parentDir: folder,
+      childGlob: `${group.prefix}*${group.suffix}`,
+      file: fileName,
+    },
+    items: sortSplitRows(items),
+    missing: [],
+    summary: `Detected ${items.length} item folders (${axis} ${rangeTextFromItems(items)}); each contains ${fileName}.`,
+    quality: 80 + items.length + dataFileScore(fileName, fileType, pathBasename(seedPath)),
+  }
+}
+
+function detectOneNestedFilePerFolder(
+  listings: Array<{ folder: RemoteFileEntry; entries: RemoteFileEntry[] }>,
+  fileType: FileNodeData['fileType'],
+): FileNodeSplit['items'] {
+  const items: FileNodeSplit['items'] = []
+  for (const listing of listings) {
+    const key = captureKeyFromName(listing.folder.name)
+    const files = preferredFiles(listing.entries.filter((entry) => !entry.isDirectory), fileType)
+    if (files.length === 0) continue
+    const picked =
+      files.find((file) => file.name.includes(key)) ??
+      files.find((file) => captureKeyFromName(file.name) === key) ??
+      files[0]
+    items.push({ key, path: picked.path })
+  }
+  return sortSplitRows(items)
+}
+
+function preferredFiles(files: RemoteFileEntry[], fileType: FileNodeData['fileType']): RemoteFileEntry[] {
+  const ranked = files
+    .map((file) => ({ file, score: dataFileScore(file.name, fileType) }))
+    .sort((a, b) => b.score - a.score || a.file.name.localeCompare(b.file.name))
+  const nonLog = ranked.filter((entry) => !isLogLikeFile(entry.file.name))
+  const matching = nonLog.filter((entry) => fileMatchesType(entry.file.name, fileType))
+  if (matching.length > 0) return matching.map((entry) => entry.file)
+  if (nonLog.length > 0) return nonLog.map((entry) => entry.file)
+  return ranked.map((entry) => entry.file)
+}
+
+function fileMatchesType(name: string, fileType: FileNodeData['fileType']): boolean {
+  if (fileType === 'any') return true
+  const lower = name.toLowerCase()
+  const extensions: Partial<Record<FileNodeData['fileType'], string[]>> = {
+    vcf: ['.vcf', '.vcf.gz'],
+    bcf: ['.bcf'],
+    fastq: ['.fastq', '.fastq.gz', '.fq', '.fq.gz'],
+    fasta: ['.fasta', '.fa', '.fna'],
+    bam: ['.bam'],
+    sam: ['.sam'],
+    cram: ['.cram'],
+    bed: ['.bed'],
+    gff: ['.gff', '.gff3'],
+    gtf: ['.gtf'],
+    plink: ['.bed', '.pgen'],
+    pgen: ['.pgen'],
+    bgen: ['.bgen'],
+    tsv: ['.tsv', '.tsv.gz', '.pheno', '.phen', '.covar', '.sample', '.psam', '.eigenvec', '.profile'],
+    csv: ['.csv'],
+    txt: ['.txt'],
+    json: ['.json'],
+    yaml: ['.yaml', '.yml'],
+  }
+  return (extensions[fileType] ?? []).some((ext) => lower.endsWith(ext))
+}
+
+function isLogLikeFile(name: string): boolean {
+  return /\.(log|out|err|stderr|stdout)$/i.test(name)
+}
+
+function dataFileScore(name: string, fileType: FileNodeData['fileType'], seedName = ''): number {
+  const lower = name.toLowerCase()
+  let score = seedName && name === seedName ? 30 : 0
+  if (isLogLikeFile(name)) score -= 500
+
+  if (lower.endsWith('.pgen')) score += fileType === 'pgen' || fileType === 'plink' || fileType === 'any' ? 120 : 60
+  else if (lower.endsWith('.bed')) score += fileType === 'bed' || fileType === 'plink' || fileType === 'any' ? 105 : 45
+  else if (lower.endsWith('.bgen')) score += fileType === 'bgen' || fileType === 'any' ? 100 : 45
+  else if (/\.(pvar|psam|bim|fam)$/i.test(lower)) score += fileType === 'plink' || fileType === 'pgen' || fileType === 'any' ? 55 : 20
+  else if (/\.(vcf\.gz|vcf|bcf)$/i.test(lower)) score += fileType === 'vcf' || fileType === 'bcf' || fileType === 'any' ? 95 : 35
+  else if (/\.(tsv|txt|csv|phen|pheno|covar|sample)$/i.test(lower)) score += fileType === 'tsv' || fileType === 'csv' || fileType === 'txt' || fileType === 'any' ? 75 : 25
+  else score += 10
+
+  if (fileMatchesType(name, fileType)) score += 30
+  return score
+}
+
+function averageFileScore(paths: string[], fileType: FileNodeData['fileType']): number {
+  if (paths.length === 0) return 0
+  return paths.reduce((sum, path) => sum + dataFileScore(pathBasename(path), fileType), 0) / paths.length
+}
+
+function bestVariableGroup(values: Array<{ name: string; path: string }>): { prefix: string; suffix: string; items: FileNodeSplit['items'] } | null {
+  const groups = new Map<string, { prefix: string; suffix: string; items: FileNodeSplit['items'] }>()
+  for (const value of values) {
+    const match = value.name.match(/^(.*?)(\d+)(.*)$/)
+    if (!match) continue
+    const [, prefix, key, suffix] = match
+    const id = `${prefix}\u0000${suffix}`
+    const group = groups.get(id) ?? { prefix, suffix, items: [] }
+    group.items.push({ key: normalizeSplitKey(key), path: value.path })
+    groups.set(id, group)
+  }
+  if (groups.size === 0) return null
+  const best = [...groups.values()].sort((a, b) => b.items.length - a.items.length)[0]
+  return { ...best, items: sortSplitRows(best.items) }
+}
+
+function chooseCommonNestedFile(
+  listings: RemoteFileEntry[][],
+  fileType: FileNodeData['fileType'],
+  seedName: string,
+): string | null {
+  const counts = new Map<string, number>()
+  for (const entries of listings) {
+    const names = new Set(entries.filter((entry) => !entry.isDirectory).map((entry) => entry.name))
+    for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  if (counts.size === 0) return null
+  const minCount = Math.min(2, listings.length)
+  const candidates = [...counts.entries()].filter(([, count]) => count >= minCount)
+  const nonLogCandidates = candidates.filter(([name]) => !isLogLikeFile(name))
+  const pool = nonLogCandidates.length > 0 ? nonLogCandidates : candidates
+  const matching = pool.filter(([name]) => fileMatchesType(name, fileType))
+  const ranked = (matching.length > 0 ? matching : pool)
+    .sort(([nameA, countA], [nameB, countB]) => {
+      const scoreA = dataFileScore(nameA, fileType, seedName)
+      const scoreB = dataFileScore(nameB, fileType, seedName)
+      return scoreB - scoreA || countB - countA || nameA.localeCompare(nameB)
+    })
+  if (ranked[0]) return ranked[0][0]
+  return candidates.sort(([nameA, countA], [nameB, countB]) =>
+    dataFileScore(nameB, fileType, seedName) - dataFileScore(nameA, fileType, seedName) ||
+    countB - countA ||
+    nameA.localeCompare(nameB),
+  )[0]?.[0] ?? null
+}
+
+function captureKeyFromName(name: string): string {
+  const numeric = name.match(/(\d+)/)
+  return numeric ? normalizeSplitKey(numeric[1]) : name
+}
+
+function normalizeSplitKey(key: string): string {
+  const numeric = Number(key)
+  return Number.isFinite(numeric) ? String(numeric) : key
+}
+
+function sortSplitRows(items: FileNodeSplit['items']): FileNodeSplit['items'] {
+  return [...items].sort((a, b) => {
+    const na = Number(a.key)
+    const nb = Number(b.key)
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
+    return a.key.localeCompare(b.key)
+  })
+}
+
+function rangeTextFromItems(items: FileNodeSplit['items']): string {
+  return rangeTextFromKeys(items.map((item) => item.key))
+}
+
+function rangeTextFromKeys(keys: string[]): string {
+  const numeric = keys
+    .filter((key) => /^\d+$/.test(key))
+    .map(Number)
+    .sort((a, b) => a - b)
+  const other = keys.filter((key) => !/^\d+$/.test(key)).sort((a, b) => a.localeCompare(b))
+  const parts: string[] = []
+  for (let i = 0; i < numeric.length; i++) {
+    const start = numeric[i]
+    let end = start
+    while (i + 1 < numeric.length && numeric[i + 1] === end + 1) {
+      end = numeric[i + 1]
+      i++
+    }
+    parts.push(start === end ? String(start) : `${start}-${end}`)
+  }
+  return [...parts, ...other].join(', ')
+}
+
+function parseRangeKeys(text: string): string[] {
+  const keys: string[] = []
+  for (const token of text.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean)) {
+    const range = token.match(/^(\d+)\s*(?:-|\.\.)\s*(\d+)$/)
+    if (range) {
+      const start = Number(range[1])
+      const end = Number(range[2])
+      const step = start <= end ? 1 : -1
+      for (let value = start; step > 0 ? value <= end : value >= end; value += step) {
+        keys.push(String(value))
+      }
+    } else {
+      keys.push(token)
+    }
+  }
+  return [...new Set(keys)]
+}
+
+function pathForSplitKey(pattern: SplitPattern, key: string): string {
+  if (pattern.kind === 'brace') return pattern.template.replace(/\{[^{}]*\}/, key)
+  if (pattern.kind === 'glob') return pattern.template.replace('*', key)
+  if (pattern.kind === 'crossFolder') {
+    const parent = pattern.parentDir.replace(/\/+$/, '')
+    const child = pattern.childGlob.replace('*', key).replace(/^\/+|\/+$/g, '')
+    const file = pattern.file.replace(/^\/+/, '')
+    return `${parent}/${child}/${file}`
+  }
+  return ''
+}
+
+function inferSplitFileType(items: FileNodeSplit['items'], current: FileNodeData['fileType']): FileNodeData['fileType'] {
+  if (items.length === 0) return current
+  const paths = items.map((item) => item.path.toLowerCase())
+  if (paths.every((path) => path.endsWith('.pgen'))) return 'pgen'
+  if (current !== 'any') return current
+  if (paths.every((path) => path.endsWith('.bgen'))) return 'bgen'
+  if (paths.every((path) => path.endsWith('.vcf') || path.endsWith('.vcf.gz'))) return 'vcf'
+  if (paths.every((path) => path.endsWith('.bcf'))) return 'bcf'
+  if (paths.every((path) => path.endsWith('.tsv') || path.endsWith('.txt'))) return 'tsv'
+  if (paths.every((path) => path.endsWith('.csv'))) return 'csv'
+  return current
+}
+
+function isPlinkLikeSplit(split: FileNodeSplit): boolean {
+  return split.items.some((item) => /\.pgen$/i.test(item.path))
 }
 
 const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] = [
@@ -584,11 +2925,36 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <p className="text-xs text-text-muted mt-2">
-          Collapses an axed edge (per-chrom, per-sample, ...) back into a single
-          file. Submitted as a single Slurm job with
-          <code className="px-1 font-mono text-[11px]">--dependency=afterok</code>
-          on the upstream array.
+          Combines many upstream outputs into one file. Use axed fan-in for
+          per-chromosome arrays, or parallel branches for independent branches
+          that should converge.
         </p>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Converge Mode
+        </h4>
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+          {[
+            { value: 'axed-fan-in', label: 'Axed fan-in' },
+            { value: 'parallel-branches', label: 'Parallel branches' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => updateNodeData(nodeId, { convergeMode: option.value as MergeNodeData['convergeMode'] })}
+              className={classNames(
+                'h-7 rounded text-xs transition-colors',
+                (data.convergeMode ?? 'axed-fan-in') === option.value
+                  ? 'bg-accent text-white'
+                  : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div>
@@ -607,6 +2973,31 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
         {selectedStrategy && (
           <p className="text-[10px] text-text-muted mt-1">{selectedStrategy.hint}</p>
         )}
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Output folder
+        </h4>
+        <FolderPickerField
+          label=""
+          value={(data.outputDirOverride as string | undefined) ?? ''}
+          placeholder="(default — run's outputs folder)"
+          requesterLabel={`${data.label} output folder`}
+          onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
+        />
+        <p className="text-[10px] text-text-muted mt-1">
+          Absolute path or <code className="font-mono">~/…</code>. Applies to this merge only.
+        </p>
+        <label className="mt-2 flex items-center gap-2 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={Boolean(data.outputIntermediate?.output)}
+            onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
+            className="accent-accent"
+          />
+          Mark merged output as intermediate
+        </label>
       </div>
 
       <div>
@@ -665,6 +3056,287 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+const TRANSFORM_FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
+  { value: 'contains', label: 'contains', needsValue: true },
+  { value: 'regex', label: 'matches regex', needsValue: true },
+  { value: 'equals', label: 'equals', needsValue: true },
+  { value: 'notEquals', label: 'does not equal', needsValue: true },
+  { value: 'gt', label: '>', needsValue: true },
+  { value: 'gte', label: '>=', needsValue: true },
+  { value: 'lt', label: '<', needsValue: true },
+  { value: 'lte', label: '<=', needsValue: true },
+  { value: 'notEmpty', label: 'is not empty', needsValue: false },
+]
+
+function makeTransformFilter(column: string): TransformFilterRule {
+  return {
+    id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    column,
+    join: 'and',
+    op: 'contains',
+    value: '',
+  }
+}
+
+function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformNodeData }) {
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
+  const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const schemas = useDataPreviewStore((s) => s.schemas)
+  const previewFilters = useDataPreviewStore((s) => s.filters)
+  const setSchema = useDataPreviewStore((s) => s.setSchema)
+  const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
+  const inputPath = connectedInputPath(snapshot, nodeId, 'input')
+  const schema = resolveUpstreamSchema(snapshot, nodeId, 'input', schemas)
+  const columns = schema?.columns ?? []
+  const selected = data.selectedColumns?.length ? data.selectedColumns : columns
+  const filters = data.filters ?? []
+  const renames = data.renames ?? []
+
+  useEffect(() => {
+    if (!activeConnectionId || !inputPath || schemas[inputPath]) return
+    let cancelled = false
+    async function loadSchema() {
+      try {
+        const text = await window.api.sftp.head(activeConnectionId!, inputPath!, 30)
+        if (cancelled) return
+        const parsed = parseHeader(text, inputPath!)
+        if (parsed.columns.length > 0) setSchema(inputPath!, { columns: parsed.columns, delimiter: parsed.delimiter })
+      } catch {
+        // A transform remains editable without schema; command generation will still run.
+      }
+    }
+    void loadSchema()
+    return () => { cancelled = true }
+  }, [activeConnectionId, inputPath, schemas, setSchema])
+
+  const setSlurm = useCallback(
+    (patch: Partial<NonNullable<TransformNodeData['slurmOverride']>>) => {
+      updateNodeData(nodeId, {
+        slurmOverride: { ...data.slurmOverride, ...patch },
+      })
+    },
+    [nodeId, data.slurmOverride, updateNodeData],
+  )
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <Input
+          label="Label"
+          value={data.label}
+          onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
+        />
+        <p className="text-xs text-text-muted mt-2">
+          Materializes preview-style row filters and column selection as a pipeline step.
+        </p>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Columns
+        </h4>
+        {columns.length > 0 ? (
+          <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
+            {columns.map((column) => {
+              const active = selected.includes(column)
+              return (
+                <button
+                  key={column}
+                  onClick={() => {
+                    const next = active
+                      ? selected.filter((value) => value !== column)
+                      : [...selected, column]
+                    updateNodeData(nodeId, { selectedColumns: next.length > 0 ? next : [column] })
+                  }}
+                  className={classNames(
+                    'rounded border px-1.5 py-0.5 text-[10px]',
+                    active
+                      ? 'border-accent/50 bg-accent/10 text-text-primary'
+                      : 'border-border bg-bg-primary text-text-muted hover:text-text-primary',
+                  )}
+                >
+                  {active ? '✓ ' : ''}{column}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="rounded-md border border-border bg-bg-primary px-2 py-2 text-[11px] text-text-muted">
+            Connect a tabular input to load column names. You can still run the transform with row filters that do not need column picks.
+          </div>
+        )}
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            className="text-[11px] text-accent hover:underline"
+            onClick={() => updateNodeData(nodeId, { selectedColumns: columns })}
+            disabled={columns.length === 0}
+          >
+            Select all
+          </button>
+          <button
+            className="text-[11px] text-text-muted hover:text-text-primary"
+            onClick={() => updateNodeData(nodeId, { selectedColumns: columns.slice(0, 8) })}
+            disabled={columns.length === 0}
+          >
+            First 8
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+            Row filters
+          </h4>
+          <button
+            className="text-[11px] text-accent hover:underline"
+            onClick={() => updateNodeData(nodeId, { filters: [...filters, makeTransformFilter(columns[0] ?? '')] })}
+          >
+            Add filter
+          </button>
+        </div>
+        <div className="flex flex-col gap-1">
+          {filters.map((rule) => {
+            const op = TRANSFORM_FILTER_OPS.find((candidate) => candidate.value === rule.op) ?? TRANSFORM_FILTER_OPS[0]
+            return (
+              <div key={rule.id} className="flex items-center gap-1">
+                <select
+                  value={rule.column}
+                  onChange={(e) => updateNodeData(nodeId, { filters: filters.map((r) => r.id === rule.id ? { ...r, column: e.target.value } : r) })}
+                  className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+                >
+                  {(columns.length > 0 ? columns : [rule.column]).map((column) => <option key={column} value={column}>{column || '(column)'}</option>)}
+                </select>
+                <select
+                  value={rule.op}
+                  onChange={(e) => {
+                    const nextOp = e.target.value as TransformFilterOp
+                    const nextMeta = TRANSFORM_FILTER_OPS.find((candidate) => candidate.value === nextOp)
+                    updateNodeData(nodeId, { filters: filters.map((r) => r.id === rule.id ? { ...r, op: nextOp, value: nextMeta?.needsValue === false ? undefined : (r.value ?? '') } : r) })
+                  }}
+                  className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+                >
+                  {TRANSFORM_FILTER_OPS.map((candidate) => <option key={candidate.value} value={candidate.value}>{candidate.label}</option>)}
+                </select>
+                {op.needsValue && (
+                  <input
+                    value={rule.value ?? ''}
+                    placeholder="value"
+                    onChange={(e) => updateNodeData(nodeId, { filters: filters.map((r) => r.id === rule.id ? { ...r, value: e.target.value } : r) })}
+                    className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+                  />
+                )}
+                <button
+                  onClick={() => updateNodeData(nodeId, { filters: filters.filter((r) => r.id !== rule.id) })}
+                  className="h-7 px-1.5 rounded text-text-muted hover:bg-error/10 hover:text-error"
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            )
+          })}
+          {filters.length === 0 && (
+            <div className="rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[11px] text-text-muted">
+              No row filters. All rows pass through.
+            </div>
+          )}
+        </div>
+        {inputPath && previewFilters[inputPath]?.length > 0 && (
+          <button
+            className="mt-2 text-[11px] text-accent hover:underline"
+            onClick={() => updateNodeData(nodeId, { filters: previewFilters[inputPath] })}
+          >
+            Copy filters from current preview
+          </button>
+        )}
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Rename columns
+        </h4>
+        <div className="flex flex-col gap-1">
+          {renames.map((rule, idx) => (
+            <div key={`${rule.from}-${idx}`} className="flex items-center gap-1">
+              <select
+                value={rule.from}
+                onChange={(e) => updateNodeData(nodeId, { renames: renames.map((r, i) => i === idx ? { ...r, from: e.target.value } : r) })}
+                className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+              >
+                {(columns.length > 0 ? columns : [rule.from]).map((column) => <option key={column} value={column}>{column || '(column)'}</option>)}
+              </select>
+              <input
+                value={rule.to}
+                placeholder="new name"
+                onChange={(e) => updateNodeData(nodeId, { renames: renames.map((r, i) => i === idx ? { ...r, to: e.target.value } : r) })}
+                className="h-7 min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary"
+              />
+              <button
+                onClick={() => updateNodeData(nodeId, { renames: renames.filter((_, i) => i !== idx) })}
+                className="h-7 px-1.5 rounded text-text-muted hover:bg-error/10 hover:text-error"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          className="mt-2 text-[11px] text-accent hover:underline"
+          onClick={() => updateNodeData(nodeId, { renames: [...renames, { from: columns[0] ?? '', to: '' }] })}
+        >
+          Add rename
+        </button>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Output
+        </h4>
+        <select
+          value={data.fileType}
+          onChange={(e) => updateNodeData(nodeId, { fileType: e.target.value as TransformNodeData['fileType'] })}
+          className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+        >
+          {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <div className="mt-2">
+          <FolderPickerField
+            label=""
+            value={(data.outputDirOverride as string | undefined) ?? ''}
+            placeholder="(default — run's outputs folder)"
+            requesterLabel={`${data.label} output folder`}
+            onChange={(v) => updateNodeData(nodeId, { outputDirOverride: v || undefined })}
+          />
+        </div>
+        <label className="mt-2 flex items-center gap-2 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={Boolean(data.outputIntermediate?.output)}
+            onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
+            className="accent-accent"
+          />
+          Mark filtered output as intermediate
+        </label>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Slurm Resources
+        </h4>
+        <div className="grid grid-cols-2 gap-2">
+          <Input label="CPUs" type="number" min={1} value={data.slurmOverride?.cpus ?? ''} placeholder="1" onChange={(e) => setSlurm({ cpus: e.target.value ? Number(e.target.value) : undefined })} />
+          <Input label="Memory (GB)" type="number" min={1} value={data.slurmOverride?.memoryGB ?? ''} placeholder="4" onChange={(e) => setSlurm({ memoryGB: e.target.value ? Number(e.target.value) : undefined })} />
+          <Input label="Time (hours)" type="number" min={0.1} step={0.5} value={data.slurmOverride?.timeHours ?? ''} placeholder="1" onChange={(e) => setSlurm({ timeHours: e.target.value ? Number(e.target.value) : undefined })} />
+          <Input label="Partition" type="text" value={data.slurmOverride?.partition ?? ''} placeholder="default" onChange={(e) => setSlurm({ partition: e.target.value || undefined })} />
+        </div>
+      </div>
     </div>
   )
 }
@@ -763,6 +3435,9 @@ export function NodeInspector() {
         )}
         {node.type === 'merge' && (
           <MergeInspector nodeId={node.id} data={node.data as MergeNodeData} />
+        )}
+        {node.type === 'transform' && (
+          <TransformInspector nodeId={node.id} data={node.data as TransformNodeData} />
         )}
         {node.type === 'note' && (
           <NoteInspector nodeId={node.id} data={node.data as NoteNodeData} />

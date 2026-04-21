@@ -48,7 +48,12 @@ function MergeNodeInner({ data, selected }: NodeProps) {
           <GitMerge size={14} className="text-indigo-400 shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="text-[10px] uppercase tracking-wide text-text-muted">merge</div>
-            <div className="text-xs font-semibold text-text-primary truncate">{nodeData.label}</div>
+            <div className="flex items-center gap-1.5">
+              <div className="truncate text-xs font-semibold text-text-primary">{nodeData.label}</div>
+              <span className="rounded bg-indigo-500/15 px-1 py-px text-[9px] text-indigo-200">
+                {(nodeData.convergeMode ?? 'axed-fan-in') === 'parallel-branches' ? 'branches' : 'axis'}
+              </span>
+            </div>
           </div>
         </div>
         <StatusBadge status={nodeData.status} />
@@ -66,6 +71,7 @@ function MergeNodeInner({ data, selected }: NodeProps) {
         style={{
           left: -8,
           top: '50%',
+          transform: 'translateY(-50%)',
           width: 10,
           height: 10,
           background: 'var(--color-accent)',
@@ -79,6 +85,7 @@ function MergeNodeInner({ data, selected }: NodeProps) {
         style={{
           right: -8,
           top: '50%',
+          transform: 'translateY(-50%)',
           width: 10,
           height: 10,
           background: 'var(--color-success, #10b981)',

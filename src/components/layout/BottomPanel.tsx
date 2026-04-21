@@ -4,6 +4,7 @@ import { useRunStore } from '@/stores/runStore'
 import { TerminalPanel } from '@/components/terminal/TerminalPanel'
 import { DataPreview } from '@/components/data-preview/DataPreview'
 import { JobsPanel } from '@/components/jobs/JobsPanel'
+import { QueuePanel } from '@/components/jobs/QueuePanel'
 
 interface BottomPanelProps {
   height: number
@@ -47,6 +48,11 @@ export function BottomPanel({ height }: BottomPanelProps) {
           onClick={() => setMode('jobs')}
           badge={runningCount > 0 ? runningCount : undefined}
         />
+        <TabButton
+          label="Queue"
+          active={mode === 'queue'}
+          onClick={() => setMode('queue')}
+        />
 
         <div className="flex-1" />
 
@@ -65,6 +71,7 @@ export function BottomPanel({ height }: BottomPanelProps) {
           {mode === 'terminal' && <TerminalPanel />}
           {mode === 'data' && <DataPreview />}
           {mode === 'jobs' && <JobsPanel />}
+          {mode === 'queue' && <QueuePanel />}
         </>
       )}
     </div>

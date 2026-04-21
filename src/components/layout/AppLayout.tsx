@@ -1,11 +1,15 @@
-import { useCallback, useRef, useEffect } from 'react'
+import { useCallback, useRef, useEffect, useState } from 'react'
 import { useUIStore } from '@/stores/uiStore'
 import { useRunStore } from '@/stores/runStore'
+import { useConnectionStore } from '@/stores/connectionStore'
+import { usePipelineStore } from '@/stores/pipelineStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { TopBar } from './TopBar'
 import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
 import { BottomPanel } from './BottomPanel'
 import { MfaPrompt } from '@/components/connection/MfaPrompt'
+import { LoginPolicyToast } from '@/components/connection/LoginPolicyToast'
 
 const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 480
@@ -13,12 +17,14 @@ const BOTTOM_MIN = 120
 const BOTTOM_MAX = 600
 
 export function AppLayout() {
+  const [windowDragActive, setWindowDragActive] = useState(false)
   const sidebarWidth = useUIStore((s) => s.sidebarWidth)
   const setSidebarWidth = useUIStore((s) => s.setSidebarWidth)
   const bottomPanelHeight = useUIStore((s) => s.bottomPanelHeight)
   const setBottomPanelHeight = useUIStore((s) => s.setBottomPanelHeight)
 
   const dragging = useRef<'sidebar' | 'bottom' | null>(null)
+  const dragDepth = useRef(0)
   const startPos = useRef(0)
   const startSize = useRef(0)
 
@@ -57,10 +63,145 @@ export function AppLayout() {
   // Subscribe to pipeline run events from the main process. This forwards
   // per-node status transitions into pipelineStore so canvas badges update
   // live, and mirrors run state into runStore for the Jobs panel / toolbar.
+  //
+  // Wrapped in try/catch: if the preload is stale and a listener function is
+  // missing, we'd throw synchronously from the effect body. React 18 would
+  // unmount the tree and the user would see a blank window. Swallow the error
+  // (runStore.subscribeToEvents already guards each listener individually;
+  // this is belt-and-suspenders for the refreshRuns call and any future ones).
   useEffect(() => {
-    const unsubscribe = useRunStore.getState().subscribeToEvents()
-    void useRunStore.getState().refreshRuns()
-    return unsubscribe
+    let unsubscribe: (() => void) | undefined
+    try {
+      unsubscribe = useRunStore.getState().subscribeToEvents()
+      void useRunStore.getState().refreshRuns().catch((err) => {
+        console.error('[AppLayout] refreshRuns failed:', err)
+      })
+    } catch (err) {
+      console.error('[AppLayout] subscribeToEvents failed:', err)
+    }
+    // Re-populate the connection store from whatever ssh2 Clients the main
+    // process is still holding. After a renderer reload, the UI would
+    // otherwise show "not connected" even though the SSH session is alive.
+    void useConnectionStore.getState().hydrateFromMain().catch((err) => {
+      console.error('[AppLayout] hydrateFromMain failed:', err)
+    })
+    void useSettingsStore.getState().load().then(() => {
+      const pipeline = usePipelineStore.getState()
+      const settings = useSettingsStore.getState().settings
+      if (!pipeline.dirty && pipeline.nodes.length === 0) {
+        usePipelineStore.setState({
+          arrayChainMode: settings.arrayChainMode,
+          fileLifecyclePolicy: settings.fileLifecyclePolicy,
+        })
+      }
+    }).catch((err) => {
+      console.error('[AppLayout] load settings failed:', err)
+    })
+    void useUIStore.getState().loadAdvancedExpanded().catch((err) => {
+      console.error('[AppLayout] load advanced params state failed:', err)
+    })
+    return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    void window.api.store.get<any>('pipeline:autosave:latest').then((snapshot) => {
+      if (disposed || !snapshot || snapshot.version !== 1) return
+      const state = usePipelineStore.getState()
+      if (!state.dirty && state.nodes.length === 0) state.loadSnapshot(snapshot)
+    }).catch((err) => console.error('[AppLayout] autosave restore failed:', err))
+
+    const runAutosave = async () => {
+      const settings = useSettingsStore.getState().settings
+      const state = usePipelineStore.getState()
+      if (!settings.autosaveEnabled || !state.dirty) return
+      const snapshot = state.exportSnapshot()
+      await savePipelineSnapshot(snapshot)
+      usePipelineStore.getState().markSaved()
+    }
+    const startTimer = () => {
+      const seconds = Math.max(5, useSettingsStore.getState().settings.autosaveIntervalSeconds || 15)
+      return window.setInterval(() => {
+        void runAutosave().catch((err) => console.error('[AppLayout] autosave write failed:', err))
+      }, seconds * 1000)
+    }
+    let timer = startTimer()
+    const unsubscribeSettings = useSettingsStore.subscribe(() => {
+      window.clearInterval(timer)
+      timer = startTimer()
+    })
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      unsubscribeSettings()
+    }
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const inEditable = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return
+      event.preventDefault()
+      if (inEditable && !event.shiftKey) {
+        // Preserve the shortcut, but don't interfere with the field value.
+      }
+      window.dispatchEvent(new CustomEvent('bioflow:menu-command', {
+        detail: { command: event.shiftKey ? 'saveAs' : 'save' },
+      }))
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  useEffect(() => {
+    if (!window.api.app?.onMenuCommand) return
+    return window.api.app.onMenuCommand((data) => {
+      window.dispatchEvent(new CustomEvent('bioflow:menu-command', { detail: data }))
+    })
+  }, [])
+
+  useEffect(() => {
+    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepth.current = Math.max(1, dragDepth.current)
+      setWindowDragActive(true)
+    }
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      dragDepth.current += 1
+      setWindowDragActive(true)
+    }
+    const onDragLeave = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      dragDepth.current = Math.max(0, dragDepth.current - 1)
+      if (dragDepth.current === 0) setWindowDragActive(false)
+    }
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepth.current = 0
+      setWindowDragActive(false)
+      const paths = Array.from(event.dataTransfer?.files ?? [])
+        .map((file) => window.api.local.pathForFile(file))
+        .filter(Boolean)
+      if (paths.length === 0) return
+      window.dispatchEvent(new CustomEvent('bioflow:global-file-drop', {
+        detail: { clientX: event.clientX, clientY: event.clientY, paths },
+      }))
+    }
+    window.addEventListener('dragenter', onDragEnter)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
   }, [])
 
   const startSidebarDrag = useCallback(
@@ -89,6 +230,14 @@ export function AppLayout() {
     <div className="flex flex-col h-screen w-screen bg-bg-primary text-text-primary overflow-hidden">
       <TopBar />
       <MfaPrompt />
+      <LoginPolicyToast />
+      {windowDragActive && (
+        <div className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-accent/10 backdrop-blur-[1px]">
+          <div className="rounded-2xl border border-accent/30 bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">
+            Drop file here to add it to the pipeline
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}

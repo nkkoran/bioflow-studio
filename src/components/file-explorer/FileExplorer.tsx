@@ -9,14 +9,15 @@ import {
   AlertCircle,
   FolderOpen,
   ServerOff,
+  Upload,
 } from 'lucide-react'
 import { useFileStore } from '@/stores/fileStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
-import { isTabularFile, pathBasename } from '@/lib/utils'
 import { inferFileType } from '@/lib/fileTypeInference'
+import { classifyPreview } from '@/lib/filePreviewClassifier'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { Breadcrumb } from './Breadcrumb'
@@ -58,10 +59,13 @@ export function FileExplorer() {
   const filePickMode = useUIStore((s) => s.filePickMode)
   const resolveFilePick = useUIStore((s) => s.resolveFilePick)
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
+  const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
   const [sortDropdownOpen, setSortDropdownOpen] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null)
 
   // Context menu state
   const [contextEntry, setContextEntry] = useState<RemoteFileEntry | null>(null)
@@ -143,20 +147,17 @@ export function FileExplorer() {
 
   const handlePreview = useCallback(
     (entry: RemoteFileEntry) => {
-      // File-picker hand-off takes priority over preview: if a node is waiting
-      // for a file pick, resolve it with the clicked entry and exit pick mode.
-      if (filePickMode.active && !entry.isDirectory) {
+      // File-pick hand-off: take priority over preview when we're in a file-pick
+      // and the user clicked a file. Directory-pick mode intentionally ignores
+      // file clicks — the user selects via the banner's "Select this folder".
+      if (filePickMode.active && filePickMode.target === 'file' && !entry.isDirectory) {
         resolveFilePick(entry.path, inferFileType(entry.name))
         return
       }
-      if (isTabularFile(entry.extension)) {
-        openPreview(entry.path, entry.name)
-      } else {
-        clearSelection()
-        selectFile(entry.path)
-      }
+      openPreview(entry.path, entry.name, classifyPreview(entry.name || entry.path))
+      setBottomPanelMode('data')
     },
-    [filePickMode.active, resolveFilePick, openPreview, clearSelection, selectFile],
+    [filePickMode.active, filePickMode.target, resolveFilePick, openPreview, setBottomPanelMode],
   )
 
   // Escape cancels an active pick.
@@ -187,6 +188,27 @@ export function FileExplorer() {
   }, [])
 
   const isCurrentBookmarked = bookmarks.includes(cwd)
+  const canUploadLocal = Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
+
+  const uploadLocalFile = useCallback(async () => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+    const localPath = await window.api.dialog.openFile()
+    if (!localPath) return
+    const name = localPath.split('/').pop() || 'upload'
+    const remotePath = `${cwd.replace(/\/+$/, '')}/${name}`
+    setUploading(true)
+    setUploadMessage(null)
+    try {
+      await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
+      setUploadMessage(`Uploaded ${name}`)
+      await refresh()
+    } catch (err) {
+      setUploadMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setUploading(false)
+      window.setTimeout(() => setUploadMessage(null), 4000)
+    }
+  }, [activeConnectionId, cwd, refresh])
 
   // Not connected state
   if (!isConnected) {
@@ -202,12 +224,22 @@ export function FileExplorer() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Pick-mode banner — shown when a pipeline node is waiting for a file. */}
+      {/* Pick-mode banner — file or directory. */}
       {filePickMode.active && (
         <div className="border-b border-accent bg-accent/10 px-3 py-1.5 flex items-center gap-2">
           <span className="text-xs text-text-primary flex-1 truncate">
-            Click a file to use for {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
+            {filePickMode.target === 'directory' ? 'Navigate to a folder and click Select for ' : 'Click a file to use for '}
+            {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
           </span>
+          {filePickMode.target === 'directory' && (
+            <button
+              onClick={() => resolveFilePick(cwd)}
+              className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
+              title="Use the current folder"
+            >
+              Select this folder
+            </button>
+          )}
           <button
             onClick={cancelFilePick}
             className="text-[10px] text-text-secondary hover:text-text-primary underline"
@@ -250,6 +282,21 @@ export function FileExplorer() {
           />
         </Tooltip>
 
+        {canUploadLocal && (
+          <Tooltip content="Upload a file from this computer to the current folder">
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Upload className={`h-3.5 w-3.5 ${uploading ? 'animate-pulse' : ''}`} />}
+              onClick={() => void uploadLocalFile()}
+              disabled={uploading}
+              title="Upload local file"
+            >
+              <span className="text-xs">Upload</span>
+            </Button>
+          </Tooltip>
+        )}
+
         {/* Sort dropdown */}
         <div className="relative ml-auto">
           <Button
@@ -289,6 +336,12 @@ export function FileExplorer() {
           )}
         </div>
       </div>
+
+      {uploadMessage && (
+        <div className="border-b border-border px-3 py-1 text-[10px] text-text-muted">
+          {uploadMessage}
+        </div>
+      )}
 
       {/* Bookmarks section */}
       {bookmarks.length > 0 && (

@@ -1,6 +1,7 @@
 import type { SFTPWrapper, FileEntry as SshFileEntry } from 'ssh2'
 import { SshManager } from './SshManager'
 import type { RemoteFileEntry, FileStat } from './types'
+import { createReadStream } from 'fs'
 
 interface PoolEntry {
   available: SFTPWrapper[]
@@ -12,7 +13,11 @@ interface CacheEntry {
   timestamp: number
 }
 
-const MAX_PER_CONNECTION = 3
+// HPC login nodes can have low SSH channel/session limits. Keep SFTP
+// conservative so ordinary exec calls (script preview, mkdir, sbatch) still
+// have room to open a channel on the same SSH connection.
+const MAX_PER_CONNECTION = 1
+const MAX_IDLE_PER_CONNECTION = 1
 const CACHE_TTL = 30_000
 
 export class SftpPool {
@@ -80,6 +85,11 @@ export class SftpPool {
       return
     }
 
+    if (entry.available.length >= MAX_IDLE_PER_CONNECTION) {
+      try { sftp.end() } catch { /* ignore */ }
+      return
+    }
+
     entry.available.push(sftp)
   }
 
@@ -126,24 +136,44 @@ export class SftpPool {
         })
       })
 
-      const entries: RemoteFileEntry[] = list.map((item) => {
-        const isDirectory = (item.attrs.mode & 0o40000) !== 0
+      const entries: RemoteFileEntry[] = await Promise.all(list.map(async (item) => {
+        const fullPath = remotePath.endsWith('/')
+          ? `${remotePath}${item.filename}`
+          : `${remotePath}/${item.filename}`
+        const mode = item.attrs.mode ?? 0
+        const typeBits = mode & 0o170000
+        const longname = typeof (item as { longname?: unknown }).longname === 'string'
+          ? String((item as { longname?: string }).longname)
+          : ''
+        const symlinkLike = typeBits === 0o120000 || longname.startsWith('l')
+        let isDirectory = typeBits === 0o040000 || longname.startsWith('d')
+        if (symlinkLike) {
+          try {
+            const attrs = await new Promise<{ mode: number }>((resolve, reject) => {
+              sftp.stat(fullPath, (err, stats) => {
+                if (err) reject(err)
+                else resolve(stats as { mode: number })
+              })
+            })
+            isDirectory = ((attrs.mode ?? 0) & 0o170000) === 0o040000
+          } catch {
+            isDirectory = false
+          }
+        }
         const name = item.filename
         const dotIndex = name.lastIndexOf('.')
         const extension = !isDirectory && dotIndex > 0 ? name.slice(dotIndex + 1) : ''
 
         return {
           name,
-          path: remotePath.endsWith('/')
-            ? `${remotePath}${name}`
-            : `${remotePath}/${name}`,
+          path: fullPath,
           isDirectory,
           size: item.attrs.size,
           modified: item.attrs.mtime * 1000,
           permissions: modeToPermissions(item.attrs.mode),
           extension,
         }
-      })
+      }))
 
       // Sort: directories first, then alphabetical by name
       entries.sort((a, b) => {
@@ -187,9 +217,29 @@ export class SftpPool {
     offset?: number,
     length?: number,
   ): Promise<string> {
+    const buffer = await this.readBuffer(connectionId, remotePath, offset, length)
+    return buffer.toString('utf-8')
+  }
+
+  async readBase64(
+    connectionId: string,
+    remotePath: string,
+    offset?: number,
+    length?: number,
+  ): Promise<string> {
+    const buffer = await this.readBuffer(connectionId, remotePath, offset, length)
+    return buffer.toString('base64')
+  }
+
+  private async readBuffer(
+    connectionId: string,
+    remotePath: string,
+    offset?: number,
+    length?: number,
+  ): Promise<Buffer> {
     const sftp = await this.acquire(connectionId)
     try {
-      return await new Promise<string>((resolve, reject) => {
+      return await new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
         const readStream = sftp.createReadStream(remotePath, {
           start: offset,
@@ -201,7 +251,7 @@ export class SftpPool {
         })
 
         readStream.on('end', () => {
-          resolve(Buffer.concat(chunks).toString('utf-8'))
+          resolve(Buffer.concat(chunks))
         })
 
         readStream.on('error', reject)
@@ -305,6 +355,23 @@ export class SftpPool {
         writeStream.on('error', reject)
         writeStream.on('close', () => resolve())
         writeStream.end(Buffer.from(content, 'utf-8'))
+      })
+      this.invalidateCache(connectionId, parentDir(remotePath))
+    } finally {
+      this.release(connectionId, sftp)
+    }
+  }
+
+  async upload(connectionId: string, localPath: string, remotePath: string): Promise<void> {
+    const sftp = await this.acquire(connectionId)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const readStream = createReadStream(localPath)
+        const writeStream = sftp.createWriteStream(remotePath)
+        readStream.on('error', reject)
+        writeStream.on('error', reject)
+        writeStream.on('finish', resolve)
+        readStream.pipe(writeStream)
       })
       this.invalidateCache(connectionId, parentDir(remotePath))
     } finally {

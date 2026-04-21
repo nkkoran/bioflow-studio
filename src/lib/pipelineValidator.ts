@@ -12,8 +12,11 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransformNodeData,
 } from '@/types/pipeline'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { blockHasValue, getFlagDef, toolUsesFlagBuilder } from '@/lib/flagRegistry'
+import { connectedInputSchema, toolColumnWarnings, transformInputWarnings, type SchemaCache } from '@/lib/schemaResolver'
 
 export type ValidationSeverity = 'error' | 'warning' | 'info'
 
@@ -38,12 +41,21 @@ export interface ValidationResult {
   infoCount: number
 }
 
-export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
+export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
+  schemas?: SchemaCache
+  annotationDefaults?: {
+    annovarDbPath?: string
+    annovarScriptsPath?: string
+    vepCachePath?: string
+    vepPath?: string
+  }
+}): ValidationResult {
   const issues: ValidationIssue[] = []
   const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
+  const schemas = opts?.schemas ?? {}
 
   // ---------- Pipeline-level ----------
-  const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge')
+  const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
   if (runnable.length === 0) {
     issues.push({
       severity: 'error',
@@ -137,6 +149,14 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
           }
         }
       } else {
+        if (d.source === 'local') {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'LOCAL_FILE_NOT_UPLOADED',
+            message: `Input file "${d.label}" is still local and must be uploaded before running.`,
+            suggestion: 'Open the file node inspector and use "Upload to cluster".',
+          })
+        }
         if (d.isInput && !d.path.trim()) {
           issues.push({
             severity: 'error', nodeId: node.id,
@@ -170,7 +190,8 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
       // Required inputs
       for (const port of tool.inputs) {
         const edges = inMap.get(port.id)
-        if (port.required && (!edges || edges.length === 0)) {
+        const satisfiesFileBlock = toolUsesFlagBuilder(d.toolId) && blockProvidesInput(d, port.id, Boolean(edges?.length))
+        if (port.required && (!edges || edges.length === 0) && !satisfiesFileBlock) {
           issues.push({
             severity: 'error', nodeId: node.id, portId: port.id,
             code: 'MISSING_INPUT',
@@ -180,6 +201,14 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
         }
         // Type compatibility — defensive; canvas usually blocks this.
         if (edges) {
+          if (edges.length > 1 && !port.multi) {
+            issues.push({
+              severity: 'error', nodeId: node.id, portId: port.id,
+              code: 'MULTI_INPUT_NO_CONVERGE',
+              message: `Input "${port.label}" has multiple upstream files but is not a merge input.`,
+              suggestion: 'Connect those branches to a Merge node first, or use a multi-input tool port.',
+            })
+          }
           for (const e of edges) {
             const srcNode = nodeById.get(e.source)
             if (!srcNode) continue
@@ -191,6 +220,51 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
                 message: `Edge into "${port.label}" expects ${port.fileType} but receives ${srcType}.`,
               })
             }
+          }
+        }
+      }
+
+      if (toolUsesFlagBuilder(d.toolId) && (d.flagBlocks?.length ?? 0) > 0) {
+        for (const block of d.flagBlocks ?? []) {
+          const def = getFlagDef(d.toolId, block.flagId)
+          if (!def || !block.enabled) continue
+          if (def.requiredValue && !blockHasValue(block.value)) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'FLAG_VALUE_MISSING',
+              message: `Flag "${def.label}" on "${d.label}" needs a value.`,
+              suggestion: 'Fill in the block value or disable the block.',
+            })
+          }
+          for (const requiredFlagId of def.requires ?? []) {
+            const requiredBlock = d.flagBlocks?.find((candidate) => candidate.flagId === requiredFlagId && candidate.enabled)
+            if (!requiredBlock || !blockHasValue(requiredBlock.value)) {
+              issues.push({
+                severity: 'error', nodeId: node.id,
+                code: 'FLAG_REQUIRED',
+                message: `Flag "${def.label}" on "${d.label}" requires "${getFlagDef(d.toolId, requiredFlagId)?.label ?? requiredFlagId}".`,
+                suggestion: 'Enable the required flag block and provide a value.',
+              })
+            }
+          }
+          for (const conflictFlagId of def.conflicts ?? []) {
+            const conflict = d.flagBlocks?.find((candidate) => candidate.flagId === conflictFlagId && candidate.enabled)
+            if (conflict) {
+              issues.push({
+                severity: 'error', nodeId: node.id,
+                code: 'FLAG_CONFLICT',
+                message: `Flag "${def.label}" on "${d.label}" conflicts with "${getFlagDef(d.toolId, conflictFlagId)?.label ?? conflictFlagId}".`,
+                suggestion: 'Disable one of the conflicting flag blocks.',
+              })
+            }
+          }
+          if (def.kind === 'fileInput' && !blockHasFileSource(block, Boolean(inMap.get(def.sourcePortId ?? 'input')?.length))) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'FLAG_VALUE_MISSING',
+              message: `Flag "${def.label}" on "${d.label}" does not have a connected or typed file source.`,
+              suggestion: 'Connect an upstream file or enter a path in the block.',
+            })
           }
         }
       }
@@ -210,6 +284,57 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
         }
       }
 
+      for (const warning of toolColumnWarnings(snapshot, node.id, schemas)) {
+        const param = tool.params.find((p) => p.name === warning.paramName)
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'SCHEMA_COLUMN_MISMATCH',
+          message: `Parameter "${param?.label ?? warning.paramName}" references missing column${warning.missing.length === 1 ? '' : 's'}: ${warning.missing.join(', ')}.`,
+          suggestion: 'Pick from the connected input columns or update the upstream transform.',
+        })
+      }
+
+      if (tool.requiresDatabase) {
+        const defaultPath = d.toolId === 'annovar.table_annovar'
+          ? opts?.annotationDefaults?.annovarDbPath
+          : d.toolId === 'vep'
+            ? opts?.annotationDefaults?.vepCachePath
+            : ''
+        const dbPath = String(d.paramValues?.annotationDbPath ?? defaultPath ?? '').trim()
+        if (!dbPath) {
+          issues.push({
+            severity: 'warning', nodeId: node.id,
+            code: 'ANNOT_DATABASE_MISSING',
+            message: `${tool.name} needs ${tool.requiresDatabase.name}, but no database path is set.`,
+            suggestion: 'Open the dataset guide from the node inspector, download the database, then set the database path.',
+          })
+        }
+      }
+
+      if (d.toolId === 'annovar.table_annovar') {
+        const toolPath = String(d.paramValues?.annovarPath ?? d.paramValues?.toolPath ?? opts?.annotationDefaults?.annovarScriptsPath ?? '').trim()
+        if (!toolPath) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'ANNOVAR_PATH_MISSING',
+            message: 'ANNOVAR needs the folder containing table_annovar.pl before it can run.',
+            suggestion: 'Set the ANNOVAR scripts folder in Settings or on this node, or use the setup button to install it under your tools folder.',
+          })
+        }
+      }
+
+      if (d.toolId === 'vep') {
+        const toolPath = String(d.paramValues?.vepPath ?? d.paramValues?.toolPath ?? opts?.annotationDefaults?.vepPath ?? '').trim()
+        if (!toolPath && !tool.module) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'VEP_PATH_MISSING',
+            message: 'VEP needs either a module or the path to a VEP executable before it can run.',
+            suggestion: 'Set the VEP executable path in Settings or on this node, or use the setup button to install it under your tools folder.',
+          })
+        }
+      }
+
       // Overprovisioned Slurm — informational
       const defCpus = tool.slurm?.cpus ?? 1
       const defMem = tool.slurm?.memoryGB ?? 4
@@ -224,8 +349,30 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
         })
       }
 
+      const effectiveCpus = d.slurmOverride?.cpus ?? tool.slurm?.cpus ?? 1
+      const effectiveMem = d.slurmOverride?.memoryGB ?? tool.slurm?.memoryGB ?? 4
+      if (d.executionMode === 'login' && (effectiveCpus > 4 || effectiveMem > 16 || hasAxedInput(snapshot, node.id))) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'LOGIN_NODE_HEAVY',
+          message: 'Running an array or heavy job on the login node will likely be killed by cluster admins. Consider sbatch.',
+          suggestion: 'Switch this node back to Slurm job unless it is a quick command.',
+        })
+      }
+
       // Orphan outputs — warning
       for (const port of tool.outputs) {
+        const mergeConfig = d.outputMerge?.[port.id]
+        const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
+        const mergeStrategy = mergeConfig?.strategy ?? port.autoMergeDefault
+        if (autoMergeEnabled && !mergeStrategy) {
+          issues.push({
+            severity: 'error', nodeId: node.id, portId: port.id,
+            code: 'AUTO_MERGE_STRATEGY_MISSING',
+            message: `Output "${port.label}" on "${d.label}" is set to auto-merge but no merge strategy is defined.`,
+            suggestion: 'Pick a merge strategy or switch the output back to fan-out.',
+          })
+        }
         if (!hasOutgoing.has(`${node.id}:${port.id}`)) {
           issues.push({
             severity: 'warning', nodeId: node.id, portId: port.id,
@@ -234,6 +381,67 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
             suggestion: 'Results will still land on disk, but nothing consumes them.',
           })
         }
+      }
+      continue
+    }
+
+    // TRANSFORM
+    if (node.type === 'transform') {
+      const d = node.data as TransformNodeData
+      labelCounts.set(d.label, (labelCounts.get(d.label) ?? 0) + 1)
+      const inMap = incomingByPort.get(node.id)!
+      const edges = inMap.get('input')
+      if (!edges || edges.length === 0) {
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'TRANSFORM_NO_INPUT',
+          message: `Transform "${d.label}" has no input connected.`,
+          suggestion: 'Connect a tabular file or upstream transform to its input.',
+        })
+      }
+      if (edges && edges.length > 0) {
+        const fileTypes = edges
+          .map((edge) => {
+            const source = nodeById.get(edge.source)
+            return source ? sourcePortType(source, edge.sourceHandle ?? 'output') : null
+          })
+          .filter(Boolean) as string[]
+        const uniqueTypes = new Set(fileTypes.filter((type) => type !== 'any'))
+        if (uniqueTypes.size > 1) {
+          issues.push({
+            severity: 'warning', nodeId: node.id,
+            code: 'TRANSFORM_MIXED_INPUT_TYPES',
+            message: `Transform "${d.label}" receives multiple input file types: ${[...uniqueTypes].join(', ')}.`,
+            suggestion: 'Transforms work best on one consistent tabular schema; align upstream outputs if this looks accidental.',
+          })
+        }
+      }
+      if (!hasOutgoing.has(`${node.id}:output`)) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'ORPHAN_OUTPUT',
+          message: `Transform "${d.label}" output is not connected downstream.`,
+          suggestion: 'The transformed file will still be written to disk.',
+        })
+      }
+      const schema = connectedInputSchema(snapshot, node.id, 'input', schemas)
+      if (schema) {
+        const missing = transformInputWarnings(snapshot, node.id, schemas)
+        if (missing.length > 0) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'TRANSFORM_UNKNOWN_COLUMN',
+            message: `Transform "${d.label}" references missing column${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.`,
+            suggestion: 'Update selected columns, filters, or rename rules from the inspector.',
+          })
+        }
+      } else if (edges && edges.length > 0 && ((d.selectedColumns?.length ?? 0) > 0 || (d.filters?.length ?? 0) > 0 || (d.renames?.length ?? 0) > 0)) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'SCHEMA_NOT_LOADED',
+          message: `Transform "${d.label}" has column rules, but the upstream header is not loaded yet.`,
+          suggestion: 'Open the input in Data Preview or keep the typed column names if you are sure.',
+        })
       }
       continue
     }
@@ -275,6 +483,71 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
     }
   }
 
+  for (const group of snapshot.groups ?? []) {
+    if (group.kind === 'visual') continue
+    const groupNodeIds = new Set(group.nodeIds)
+    const members = group.nodeIds.map((id) => nodeById.get(id)).filter(Boolean) as PipelineSnapshot['nodes']
+    if (members.length !== group.nodeIds.length || members.length < 2) {
+      issues.push({
+        severity: 'error',
+        code: 'GROUP_NON_LINEAR',
+        message: `Group "${group.label}" must contain at least two existing nodes.`,
+      })
+      continue
+    }
+    const nonRunnable = members.find((node) => node.type === 'file' || node.type === 'note')
+    if (nonRunnable) {
+      issues.push({
+        severity: 'error',
+        nodeId: nonRunnable.id,
+        code: 'GROUP_NON_LINEAR',
+        message: `Group "${group.label}" contains a non-runnable node.`,
+        suggestion: 'Only tool, transform, and merge nodes can be grouped into one sbatch.',
+      })
+      continue
+    }
+    const loginMember = members.find((node) => node.type === 'tool' && (node.data as ToolNodeData).executionMode === 'login')
+    if (loginMember) {
+      issues.push({
+        severity: 'error',
+        nodeId: loginMember.id,
+        code: 'GROUP_MIXED_EXECUTION',
+        message: `Group "${group.label}" contains a login-node tool.`,
+        suggestion: 'Login-node tools cannot be merged into one sbatch group.',
+      })
+      continue
+    }
+
+    const internalEdges = snapshot.edges.filter((edge) => groupNodeIds.has(edge.source) && groupNodeIds.has(edge.target))
+    const counts = new Map<string, { in: number; out: number }>()
+    for (const id of group.nodeIds) counts.set(id, { in: 0, out: 0 })
+    for (const edge of internalEdges) {
+      counts.get(edge.source)!.out++
+      counts.get(edge.target)!.in++
+    }
+    const starts = [...counts.values()].filter((count) => count.in === 0 && count.out === 1).length
+    const ends = [...counts.values()].filter((count) => count.in === 1 && count.out === 0).length
+    const middlesOk = [...counts.values()].every((count) => count.in <= 1 && count.out <= 1)
+    if (internalEdges.length !== members.length - 1 || starts !== 1 || ends !== 1 || !middlesOk) {
+      issues.push({
+        severity: 'error',
+        code: 'GROUP_NON_LINEAR',
+        message: `Group "${group.label}" is not a single connected linear chain.`,
+        suggestion: 'Remove branches, fan-in, or disconnected nodes before grouping.',
+      })
+    }
+
+    const axes = new Set(members.map((node) => axisForNode(snapshot, node.id)).filter((axis) => axis !== undefined))
+    if (axes.size > 1) {
+      issues.push({
+        severity: 'error',
+        code: 'GROUP_DIFFERENT_AXIS',
+        message: `Group "${group.label}" mixes nodes with different axes.`,
+        suggestion: 'Group only nodes that run over the same split, or only non-axed nodes.',
+      })
+    }
+  }
+
   const errorCount = issues.filter((i) => i.severity === 'error').length
   const warningCount = issues.filter((i) => i.severity === 'warning').length
   const infoCount = issues.filter((i) => i.severity === 'info').length
@@ -285,6 +558,35 @@ export function validatePipeline(snapshot: PipelineSnapshot): ValidationResult {
     warningCount,
     infoCount,
   }
+}
+
+function axisForNode(snapshot: PipelineSnapshot, nodeId: string, seen = new Set<string>()): string | undefined {
+  if (seen.has(nodeId)) return undefined
+  seen.add(nodeId)
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node) return undefined
+  if (node.type === 'file') {
+    const split = (node.data as FileNodeData).split
+    return split?.axis || undefined
+  }
+  if (node.type === 'merge') return undefined
+  const incoming = snapshot.edges.filter((edge) => edge.target === nodeId)
+  const axes = new Set<string>()
+  for (const edge of incoming) {
+    const axis = axisForNode(snapshot, edge.source, seen)
+    if (axis) axes.add(axis)
+  }
+  if (axes.size === 0) return undefined
+  if (axes.size === 1) return [...axes][0]
+  return '__mixed__'
+}
+
+function hasAxedInput(snapshot: PipelineSnapshot, nodeId: string): boolean {
+  return snapshot.edges.some((edge) => {
+    if (edge.target !== nodeId) return false
+    const source = snapshot.nodes.find((node) => node.id === edge.source)
+    return source?.type === 'file' && Boolean((source.data as FileNodeData).split?.items.length)
+  })
 }
 
 /**
@@ -309,7 +611,33 @@ function sourcePortType(
     // know it here without walking the graph, so skip strict checking.
     return 'any'
   }
+  if (node.type === 'transform') {
+    return (node.data as TransformNodeData).fileType
+  }
   return null
+}
+
+function mergeStrategyCompatible(strategy: MergeNodeData['strategy'], fileType: string): boolean {
+  if (strategy === 'auto' || strategy === 'cat') return true
+  if (strategy === 'tsv-concat-header') return fileType === 'tsv' || fileType === 'csv' || fileType === 'txt'
+  if (strategy === 'bcftools-concat') return fileType === 'vcf' || fileType === 'bcf'
+  if (strategy === 'plink-pmerge-list') return fileType === 'plink' || fileType === 'pgen'
+  return true
+}
+
+function blockProvidesInput(data: ToolNodeData, portId: string, hasConnectedEdge: boolean): boolean {
+  const block = data.flagBlocks?.find((candidate) => {
+    const def = getFlagDef(data.toolId, candidate.flagId)
+    return def?.kind === 'fileInput' && def.sourcePortId === portId && candidate.enabled
+  })
+  if (!block) return false
+  return blockHasFileSource(block, hasConnectedEdge)
+}
+
+function blockHasFileSource(block: NonNullable<ToolNodeData['flagBlocks']>[number], hasConnectedEdge: boolean): boolean {
+  const value = block.value as { kind?: string; value?: string } | undefined
+  if (value?.kind === 'upstream-file') return hasConnectedEdge
+  return blockHasValue(block.value)
 }
 
 /** Filter a validation result down to issues attached to one node. */

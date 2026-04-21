@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react'
 import { useRunStore } from '@/stores/runStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import type { RunState, NodeRunState } from '@/types/pipeline'
+import { iconForNodeType, iconForTool } from '@/lib/toolIcons'
 import { Loader2, CheckCircle2, XCircle, Clock, CircleSlash, CirclePause } from 'lucide-react'
 
 interface Props { run: RunState }
@@ -23,7 +24,15 @@ export function NodeRunList({ run }: Props) {
     if (!n) return nodeId
     if (n.type === 'tool') return (n.data as { label: string }).label
     if (n.type === 'merge') return (n.data as { label: string }).label
+    if (n.type === 'transform') return (n.data as { label: string }).label
     return nodeId
+  }
+
+  const iconFor = (nodeId: string) => {
+    const n = pipelineNodes.find((x) => x.id === nodeId)
+    if (!n) return iconForNodeType('tool')
+    if (n.type === 'tool') return iconForTool((n.data as { toolId: string }).toolId)
+    return iconForNodeType(n.type ?? 'tool')
   }
 
   // 1s ticker so live durations actually update without hammering zustand.
@@ -52,10 +61,20 @@ export function NodeRunList({ run }: Props) {
 
   return (
     <div className="py-1">
-      {rows.map((ns) => (
+      {rows.map((ns) => {
+        const NodeIcon = iconFor(ns.nodeId)
+        const label = labelFor(ns.nodeId)
+        return (
         <button
           key={ns.nodeId}
           onClick={() => setSelectedNode(ns.nodeId)}
+          title={[
+            label,
+            ns.jobId ? `job ${ns.jobId}` : null,
+            ns.isArray ? `array size ${ns.arraySize ?? '?'}` : null,
+            ns.outputDir ? `outputs ${ns.outputDir}` : null,
+            ns.error ? `error ${ns.error}` : null,
+          ].filter(Boolean).join('\n')}
           className={`w-full text-left px-3 py-2 flex items-center gap-2 text-xs border-l-2 transition-colors ${
             selectedNodeId === ns.nodeId
               ? 'bg-bg-hover border-accent'
@@ -63,8 +82,9 @@ export function NodeRunList({ run }: Props) {
           }`}
         >
           <StatusIcon status={ns.status} />
+          <NodeIcon size={13} className="shrink-0 text-text-muted" />
           <div className="flex-1 min-w-0">
-            <div className="text-text-primary truncate font-medium">{labelFor(ns.nodeId)}</div>
+            <div className="text-text-primary truncate font-medium">{label}</div>
             <div className="text-[10px] text-text-muted truncate">
               {ns.jobId ? `job ${ns.jobId}${ns.isArray ? ` [${ns.arraySize}]` : ''}` : '—'}
               {ns.exitCode !== undefined && ns.exitCode !== 0 && (
@@ -76,7 +96,8 @@ export function NodeRunList({ run }: Props) {
             {formatDuration(ns)}
           </div>
         </button>
-      ))}
+        )
+      })}
     </div>
   )
 }

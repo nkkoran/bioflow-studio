@@ -7,6 +7,9 @@ export interface ConnectionConfig {
   privateKeyPath?: string
   passphrase?: string
   password?: string
+  rememberPassword?: boolean
+  generatedKeyPath?: string
+  setupNote?: string
   defaultDirectory?: string
 }
 
@@ -14,6 +17,14 @@ export interface ConnectionResult {
   id: string
   host: string
   username: string
+  reused?: boolean
+}
+
+export interface LoginPolicy {
+  hostname: string
+  cpuTimeLimitSeconds: number | null
+  memLimitMB: number | null
+  source: 'ulimit' | 'unknown'
 }
 
 export interface ConnectionStatus {
@@ -44,4 +55,23 @@ export interface FileStat {
   modified: number
   isDirectory: boolean
   permissions: string
+}
+
+export interface SshKeySetupRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  comment?: string
+  overwrite?: boolean
+  addToAgent?: boolean
+  addToKeychain?: boolean
+}
+
+export interface SshKeySetupResult {
+  keyPath: string
+  publicKeyPath: string
+  agentAdded: boolean
+  keychainAdded: boolean
+  note?: string
 }

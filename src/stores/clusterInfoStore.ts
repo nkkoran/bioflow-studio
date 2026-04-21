@@ -1,0 +1,89 @@
+import { create } from 'zustand'
+import type { ClusterAccountsResult, ClusterModulesResult } from '@/types/ssh'
+
+const ACCOUNT_TTL_MS = 10 * 60 * 1000
+const MODULE_TTL_MS = 10 * 60 * 1000
+
+interface ClusterInfoState {
+  accountsByConnection: Record<string, ClusterAccountsResult>
+  modulesByConnection: Record<string, ClusterModulesResult>
+  loadingAccounts: Record<string, boolean>
+  loadingModules: Record<string, boolean>
+  errorByConnection: Record<string, string | undefined>
+  loadAccounts: (connectionId: string, options?: { force?: boolean }) => Promise<ClusterAccountsResult>
+  loadModules: (connectionId: string, query?: string, options?: { force?: boolean }) => Promise<ClusterModulesResult>
+}
+
+export const useClusterInfoStore = create<ClusterInfoState>((set, get) => ({
+  accountsByConnection: {},
+  modulesByConnection: {},
+  loadingAccounts: {},
+  loadingModules: {},
+  errorByConnection: {},
+
+  loadAccounts: async (connectionId, options) => {
+    const cached = get().accountsByConnection[connectionId]
+    if (!options?.force && cached && Date.now() - cached.cachedAt < ACCOUNT_TTL_MS) {
+      return cached
+    }
+
+    set((state) => ({
+      loadingAccounts: { ...state.loadingAccounts, [connectionId]: true },
+      errorByConnection: { ...state.errorByConnection, [connectionId]: undefined },
+    }))
+    try {
+      const result = await window.api.cluster.listAccounts(connectionId)
+      set((state) => ({
+        accountsByConnection: { ...state.accountsByConnection, [connectionId]: result },
+        loadingAccounts: { ...state.loadingAccounts, [connectionId]: false },
+      }))
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      set((state) => ({
+        loadingAccounts: { ...state.loadingAccounts, [connectionId]: false },
+        errorByConnection: { ...state.errorByConnection, [connectionId]: message },
+      }))
+      throw err
+    }
+  },
+
+  loadModules: async (connectionId, query, options) => {
+    const needle = String(query ?? '').trim().toLowerCase()
+    const cached = get().modulesByConnection[connectionId]
+    if (!options?.force && cached && !needle && Date.now() - cached.cachedAt < MODULE_TTL_MS) {
+      return needle
+        ? { ...cached, modules: cached.modules.filter((entry) => `${entry.name} ${entry.versions.join(' ')}`.toLowerCase().includes(needle)) }
+        : cached
+    }
+    if (!options?.force && cached && needle && cached.modules.length > 0 && Date.now() - cached.cachedAt < MODULE_TTL_MS) {
+      return {
+        ...cached,
+        modules: cached.modules.filter((entry) => `${entry.name} ${entry.versions.join(' ')}`.toLowerCase().includes(needle)),
+      }
+    }
+
+    set((state) => ({
+      loadingModules: { ...state.loadingModules, [connectionId]: true },
+      errorByConnection: { ...state.errorByConnection, [connectionId]: undefined },
+    }))
+    try {
+      const result = await window.api.cluster.listModules(connectionId, query)
+      set((state) => ({
+        modulesByConnection: {
+          ...state.modulesByConnection,
+          [connectionId]: needle ? (state.modulesByConnection[connectionId] ?? { ...result, modules: [] }) : result,
+        },
+        loadingModules: { ...state.loadingModules, [connectionId]: false },
+      }))
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      set((state) => ({
+        loadingModules: { ...state.loadingModules, [connectionId]: false },
+        errorByConnection: { ...state.errorByConnection, [connectionId]: message },
+      }))
+      throw err
+    }
+  },
+}))

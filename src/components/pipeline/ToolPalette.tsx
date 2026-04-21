@@ -7,21 +7,56 @@
  * MIME type carrying the tool id.
  */
 import { useState, useMemo } from 'react'
-import { ChevronRight, Search, FileText, StickyNote, GitMerge } from 'lucide-react'
+import { ChevronRight, Search } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { classNames } from '@/lib/utils'
 import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
-import type { ToolDef } from '@/types/pipeline'
+import { TOOL_BUNDLES } from '@/lib/toolBundles'
+import { iconForBundle, iconForCategory, iconForNodeType } from '@/lib/toolIcons'
+import type { ToolCategory, ToolDef } from '@/types/pipeline'
+import type { ToolBundle } from '@/lib/toolBundles'
+import { ToolHoverCard } from './ToolHoverCard'
 
 export const DRAG_MIME = 'application/bioflow-tool'
+export const BUNDLE_DRAG_MIME = 'application/bioflow-bundle'
 
 interface PaletteItemProps {
   tool: ToolDef
 }
 
 function PaletteItem({ tool }: PaletteItemProps) {
+  const Icon = iconForCategory(tool.category)
   const onDragStart = (event: React.DragEvent) => {
     event.dataTransfer.setData(DRAG_MIME, tool.id)
+    event.dataTransfer.effectAllowed = 'copy'
+  }
+
+  return (
+    <ToolHoverCard tool={tool}>
+      <div
+        draggable
+        onDragStart={onDragStart}
+        className={classNames(
+          'px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
+          'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
+          'transition-colors select-none',
+        )}
+        title={tool.description}
+      >
+        <div className="flex items-center gap-1.5 font-medium text-text-primary">
+          <Icon size={11} className="shrink-0 text-text-muted" />
+          <span className="truncate">{tool.name}</span>
+        </div>
+        <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
+      </div>
+    </ToolHoverCard>
+  )
+}
+
+function BundleItem({ bundle }: { bundle: ToolBundle }) {
+  const Icon = iconForBundle()
+  const onDragStart = (event: React.DragEvent) => {
+    event.dataTransfer.setData(BUNDLE_DRAG_MIME, bundle.id)
     event.dataTransfer.effectAllowed = 'copy'
   }
 
@@ -34,16 +69,19 @@ function PaletteItem({ tool }: PaletteItemProps) {
         'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
         'transition-colors select-none',
       )}
-      title={tool.description}
+      title={bundle.description}
     >
-      <div className="font-medium text-text-primary truncate">{tool.name}</div>
-      <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
+      <div className="flex items-center gap-1.5 font-medium text-text-primary">
+        <Icon size={11} className="shrink-0 text-text-muted" />
+        <span className="truncate">{bundle.label}</span>
+      </div>
+      <div className="text-[10px] text-text-muted truncate">{bundle.description}</div>
     </div>
   )
 }
 
 interface SpecialItemProps {
-  type: 'file-input' | 'file-output' | 'note' | 'merge'
+  type: 'file-input' | 'file-output' | 'note' | 'merge' | 'transform'
   label: string
   icon: React.ReactNode
 }
@@ -73,6 +111,11 @@ function SpecialItem({ type, label, icon }: SpecialItemProps) {
 export function ToolPalette() {
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const FileIcon = iconForNodeType('file')
+  const TransformIcon = iconForNodeType('transform')
+  const MergeIcon = iconForNodeType('merge')
+  const NoteIcon = iconForNodeType('note')
+  const BundleIcon = iconForBundle()
 
   const groups = useMemo(() => {
     if (!search.trim()) return getToolsByCategory()
@@ -90,6 +133,16 @@ export function ToolPalette() {
       groupMap.get(t.category)!.push(t)
     }
     return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
+  }, [search])
+
+  const bundles = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return TOOL_BUNDLES
+    return TOOL_BUNDLES.filter((bundle) =>
+      bundle.label.toLowerCase().includes(q) ||
+      bundle.description.toLowerCase().includes(q) ||
+      bundle.id.toLowerCase().includes(q),
+    )
   }, [search])
 
   const toggleGroup = (cat: string) => {
@@ -116,19 +169,35 @@ export function ToolPalette() {
 
       {/* Special items */}
       <div className="p-2 flex flex-col gap-0.5 border-b border-border">
-        <SpecialItem type="file-input" label="Input File" icon={<FileText size={12} className="text-amber-400" />} />
-        <SpecialItem type="file-output" label="Output File" icon={<FileText size={12} className="text-amber-400" />} />
-        <SpecialItem type="merge" label="Merge (fan-in)" icon={<GitMerge size={12} className="text-indigo-400" />} />
-        <SpecialItem type="note" label="Note" icon={<StickyNote size={12} className="text-amber-400" />} />
+        <SpecialItem type="file-input" label="Input File" icon={<FileIcon size={12} className="text-amber-400" />} />
+        <SpecialItem type="file-output" label="Output File" icon={<FileIcon size={12} className="text-amber-400" />} />
+        <SpecialItem type="transform" label="Transform" icon={<TransformIcon size={12} className="text-teal-400" />} />
+        <SpecialItem type="merge" label="Merge (fan-in)" icon={<MergeIcon size={12} className="text-indigo-400" />} />
+        <SpecialItem type="note" label="Note" icon={<NoteIcon size={12} className="text-amber-400" />} />
       </div>
 
       {/* Tools grouped by category */}
       <div className="flex-1 overflow-y-auto py-1">
-        {groups.length === 0 && (
+        {bundles.length > 0 && (
+          <div className="mb-1">
+            <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+              <BundleIcon size={10} />
+              Bundles
+              <span className="ml-auto text-text-muted">{bundles.length}</span>
+            </div>
+            <div className="px-2 flex flex-col gap-0.5">
+              {bundles.map((bundle) => (
+                <BundleItem key={bundle.id} bundle={bundle} />
+              ))}
+            </div>
+          </div>
+        )}
+        {groups.length === 0 && bundles.length === 0 && (
           <div className="px-3 py-4 text-xs text-text-muted text-center">No matching tools</div>
         )}
         {groups.map(({ category, tools }) => {
           const isCollapsed = collapsed.has(category)
+          const CategoryIcon = iconForCategory(category as ToolCategory)
           return (
             <div key={category} className="mb-1">
               <button
@@ -139,6 +208,7 @@ export function ToolPalette() {
                   size={10}
                   className={classNames('transition-transform', isCollapsed ? '' : 'rotate-90')}
                 />
+                <CategoryIcon size={10} />
                 {CATEGORY_LABELS[category] ?? category}
                 <span className="ml-auto text-text-muted">{tools.length}</span>
               </button>

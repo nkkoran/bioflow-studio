@@ -10,6 +10,7 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransformNodeData,
   ToolDef,
   FileType,
   MergeStrategy,
@@ -19,13 +20,13 @@ import { topoSort } from './topoSort'
 export type AxedValue =
   | { kind: 'single'; path: string }
   | { kind: 'multi'; paths: string[] }
-  | { kind: 'array'; axis: string; keys: string[]; paths: string[] }
+  | { kind: 'array'; axis: string; keys: string[]; paths: string[]; pathTemplate?: string }
 
-export type NodeMode = 'single' | 'array' | 'fanIn' | 'skip'
+export type NodeMode = 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
 
 export interface AxisPlan {
   nodeId: string
-  nodeType: 'tool' | 'merge' | 'file' | 'note'
+  nodeType: 'tool' | 'merge' | 'transform' | 'file' | 'note'
   mode: NodeMode
   /** For 'array': the axis being looped over. */
   axis?: string
@@ -35,6 +36,8 @@ export interface AxisPlan {
   arrayPortId?: string
   /** Upstream array producers whose jobIds we depend on (afterok). */
   dependsOnArrayNodeIds: string[]
+  /** Upstream runnable producers whose final jobIds this node should depend on. */
+  dependsOnNodeIds?: string[]
   /** Resolved input paths per port (keyed by portId). */
   inputs: Record<string, AxedValue>
   /** What downstream consumers see for each output port. */
@@ -43,6 +46,13 @@ export interface AxisPlan {
   upstreamFileType?: FileType
   /** For merge nodes: the strategy resolved from `auto`. */
   resolvedMergeStrategy?: Exclude<MergeStrategy, 'auto'>
+  /** Synthetic merge jobs attached to array outputs on this node. */
+  implicitMerges?: Record<string, {
+    strategy: Exclude<MergeStrategy, 'auto'>
+    outputPath: string
+    input: Extract<AxedValue, { kind: 'array' }>
+    upstreamFileType: FileType
+  }>
 }
 
 export class AxisPlanError extends Error {
@@ -78,11 +88,117 @@ function extForFileType(ft: string): string {
   }
 }
 
+/**
+ * Resolve the per-node output directory. When an override is set, the node's
+ * files land at `<override>/<slug>` so concurrent nodes don't collide on
+ * shared names. Leading `~` / `~/` is expanded against the passed home so
+ * downstream SFTP writes (which do NOT shell-expand) still work.
+ */
+export function resolveNodeOutputDir(
+  override: string | undefined,
+  defaultOutputRoot: string,
+  slug: string,
+  homeDir?: string,
+): string {
+  if (override && override.trim()) {
+    const raw = override.trim().replace(/\/+$/, '')
+    const absolute =
+      homeDir && raw === '~' ? homeDir :
+      homeDir && raw.startsWith('~/') ? `${homeDir}/${raw.slice(2)}` :
+      raw
+    return `${absolute}/${slug}`
+  }
+  return `${defaultOutputRoot}/${slug}`
+}
+
 /** Output path convention: <outputDir>/<slug>.<portId>[.<key>]<ext>. */
 function outputPath(outputDir: string, slug: string, portId: string, key: string | null, ft: string): string {
   const ext = extForFileType(ft)
   const keyPart = key !== null ? `.${key}` : ''
   return `${outputDir}/${slug}.${portId}${keyPart}${ext}`
+}
+
+function outputPathFromTemplate(template: string, key: string | null): string {
+  if (key === null) return template
+  const slashIdx = template.lastIndexOf('/')
+  const dotIdx = template.lastIndexOf('.')
+  const insertIdx = dotIdx > slashIdx ? dotIdx : template.length
+  return `${template.slice(0, insertIdx)}.${key}${template.slice(insertIdx)}`
+}
+
+function splitPathTemplate(split: NonNullable<FileNodeData['split']>): string | undefined {
+  const pattern = split.pattern
+  if (!pattern) return undefined
+  if (pattern.kind === 'brace') {
+    return pattern.template.replace(/\{[^{}]*\}/, '${KEY}')
+  }
+  if (pattern.kind === 'glob') {
+    return pattern.template.includes('*') ? pattern.template.replace('*', '${KEY}') : undefined
+  }
+  if (pattern.kind === 'crossFolder') {
+    if (!pattern.parentDir.trim() || !pattern.childGlob.trim() || !pattern.file.trim()) return undefined
+    const child = pattern.childGlob.replace('*', '${KEY}').replace(/^\/+|\/+$/g, '')
+    const file = pattern.file.replace(/^\/+/, '')
+    return `${pattern.parentDir.replace(/\/+$/, '')}/${child}/${file}`
+  }
+  return undefined
+}
+
+function connectedOutputSink(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  portId: string,
+): FileNodeData | null {
+  const edge = snapshot.edges.find(
+    (e) => e.source === nodeId && (e.sourceHandle ?? 'output') === portId,
+  )
+  if (!edge) return null
+  const target = snapshot.nodes.find((n) => n.id === edge.target)
+  if (!target || target.type !== 'file') return null
+  const data = target.data as FileNodeData
+  if (data.isInput) return null
+  return data
+}
+
+function resolveSinkPath(sink: FileNodeData | null, fallbackDir: string, fallbackPath: string, homeDir?: string): string {
+  if (!sink) return fallbackPath
+  const legacyPath = sink.path?.trim() ?? ''
+  const filename = sink.outputFilename?.trim() || pathBasename(legacyPath) || pathBasename(fallbackPath)
+  const rawFolder = (sink.outputDir?.trim() || pathDirname(legacyPath) || fallbackDir).replace(/\/+$/, '')
+  const folder =
+    homeDir && rawFolder === '~' ? homeDir :
+    homeDir && rawFolder.startsWith('~/') ? `${homeDir}/${rawFolder.slice(2)}` :
+    rawFolder
+  return `${folder}/${filename}`
+}
+
+function pathDirname(path: string): string {
+  const idx = path.lastIndexOf('/')
+  if (idx <= 0) return ''
+  return path.slice(0, idx)
+}
+
+function pathBasename(path: string): string {
+  const idx = path.lastIndexOf('/')
+  return idx === -1 ? path : path.slice(idx + 1)
+}
+
+function outputMergeMode(
+  data: ToolNodeData | TransformNodeData,
+  portId: string,
+  autoMergeDefault?: MergeStrategy,
+): { enabled: boolean; strategy?: MergeStrategy } {
+  const explicit = data.outputMerge?.[portId]
+  if (explicit) {
+    return {
+      enabled: explicit.mode === 'auto-merge',
+      strategy: explicit.strategy ?? autoMergeDefault,
+    }
+  }
+  return {
+    enabled: Boolean(autoMergeDefault),
+    strategy: autoMergeDefault,
+  }
 }
 
 export interface PlannerContext {
@@ -96,6 +212,11 @@ export interface PlannerContext {
    * "node_abc12345"). If omitted, nodeId is used as-is.
    */
   nodeSlug?: (nodeId: string) => string
+  /**
+   * Resolved `$HOME` on the remote. Used to expand `~` / `~/…` in user-provided
+   * outputDirOverride values before they cross the SFTP boundary.
+   */
+  homeDir?: string
 }
 
 export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<string, AxisPlan> {
@@ -139,6 +260,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           axis: data.split.axis,
           keys: data.split.items.map((i) => i.key),
           paths: data.split.items.map((i) => i.path),
+          pathTemplate: splitPathTemplate(data.split),
         }
       } else if (data.split && data.split.items.length === 0) {
         throw new AxisPlanError('EMPTY_SPLIT', nodeId, `File node "${data.label}" has split with zero items`)
@@ -149,8 +271,9 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       continue
     }
 
-    // ----- tool or merge -----
+    // ----- runnable node (tool, transform, or merge) -----
     const dependsOnArrayNodeIds = new Set<string>()
+    const dependsOnNodeIds = new Set<string>()
     const resolvedInputs: Record<string, AxedValue> = {}
 
     // Helper — collapse one upstream AxedValue into a list of paths.
@@ -186,6 +309,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         resolvedInputs[portId] = u.val
         // Track dependency if upstream produced an array from this port
         if (u.val.kind === 'array') dependsOnArrayNodeIds.add(u.source)
+        else if (u.upstreamPlan.implicitMerges?.[u.sourceHandle]) dependsOnNodeIds.add(u.source)
       } else {
         // Multi port — flatten all upstreams into a single list. Any array upstream is collapsed.
         const allPaths: string[] = []
@@ -196,6 +320,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           } else if (u.val.kind === 'multi') {
             allPaths.push(...u.val.paths)
           } else {
+            if (u.upstreamPlan.implicitMerges?.[u.sourceHandle]) dependsOnNodeIds.add(u.source)
             allPaths.push(u.val.path)
           }
         }
@@ -204,21 +329,107 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     }
 
     // Decide mode based on resolved inputs
+    if (node.type === 'transform') {
+      const data = node.data as TransformNodeData
+      const input = resolvedInputs.input
+      const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
+      const outputDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const sink = connectedOutputSink(snapshot, nodeId, 'output')
+      const fallbackOut = outputPath(outputDir, slug, 'output', null, data.fileType)
+      if (input?.kind === 'array') {
+        const mergeMode = outputMergeMode(data, 'output')
+        const implicitMerges = mergeMode.enabled && mergeMode.strategy
+          ? {
+              output: {
+                strategy: resolveMergeStrategyStatic(mergeMode.strategy, data.fileType),
+                outputPath: resolveSinkPath(
+                  sink,
+                  outputDir,
+                  `${outputDir}/${slug}.output.merged${mergeOutputExt(resolveMergeStrategyStatic(mergeMode.strategy, data.fileType))}`,
+                  ctx.homeDir,
+                ),
+                input,
+                upstreamFileType: data.fileType,
+              },
+            }
+          : undefined
+        plans.set(nodeId, {
+          nodeId,
+          nodeType: 'transform',
+          mode: 'array',
+          axis: input.axis,
+          keys: input.keys,
+          arrayPortId: 'input',
+          dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+          dependsOnNodeIds: [...dependsOnNodeIds],
+          inputs: resolvedInputs,
+          outputs: {
+            output: implicitMerges?.output
+              ? { kind: 'single', path: implicitMerges.output.outputPath }
+              : {
+                  kind: 'array',
+                  axis: input.axis,
+                  keys: input.keys,
+                  paths: input.keys.map((key) =>
+                    outputPathFromTemplate(resolveSinkPath(sink, outputDir, fallbackOut, ctx.homeDir), key),
+                  ),
+                },
+          },
+          implicitMerges,
+        })
+      } else {
+        plans.set(nodeId, {
+          nodeId,
+          nodeType: 'transform',
+          mode: dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single',
+          dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+          dependsOnNodeIds: [...dependsOnNodeIds],
+          inputs: resolvedInputs,
+          outputs: {
+            output: {
+              kind: 'single',
+              path: resolveSinkPath(sink, outputDir, fallbackOut, ctx.homeDir),
+            },
+          },
+        })
+      }
+      continue
+    }
+
     if (node.type === 'merge') {
       // Merge always collapses. If its input port is kind 'array', it's a fanIn.
       // Otherwise it's a trivial single job.
       const data = node.data as MergeNodeData
-      const mode: NodeMode = dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single'
+      const convergeMode = data.convergeMode ?? 'axed-fan-in'
+      const directRunnableDeps = new Set<string>()
+      for (const dependencyId of dependsOnNodeIds) directRunnableDeps.add(dependencyId)
+      if (convergeMode === 'parallel-branches') {
+        for (const edge of snapshot.edges) {
+          if (edge.target !== nodeId) continue
+          const source = nodeById.get(edge.source)
+          if (source?.type === 'tool' || source?.type === 'merge' || source?.type === 'transform') {
+            directRunnableDeps.add(edge.source)
+          }
+        }
+      }
+      const mode: NodeMode =
+        convergeMode === 'parallel-branches'
+          ? 'branchFanIn'
+          : dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single'
       const upstreamFt = (inferMergeOutputType(node, resolvedInputs, snapshot, ctx) ?? 'any') as FileType
       const resolvedStrategy = resolveMergeStrategyStatic(data.strategy, upstreamFt)
       const outExt = mergeOutputExt(resolvedStrategy)
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-      const outPath = `${ctx.outputRoot}/${slug}/${slug}.output${outExt}`
+      const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const sink = connectedOutputSink(snapshot, nodeId, 'output')
+      const fallbackOut = `${mergeOutDir}/${slug}.output${outExt}`
+      const outPath = resolveSinkPath(sink, mergeOutDir, fallbackOut, ctx.homeDir)
       plans.set(nodeId, {
         nodeId,
         nodeType: 'merge',
         mode,
         dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+        dependsOnNodeIds: [...directRunnableDeps],
         inputs: resolvedInputs,
         outputs: { output: { kind: 'single', path: outPath } },
         upstreamFileType: upstreamFt,
@@ -296,20 +507,46 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
 
     // Compute outputs
     const outputs: Record<string, AxedValue> = {}
+    const implicitMerges: NonNullable<AxisPlan['implicitMerges']> = {}
     const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-    const perNodeOutputDir = `${ctx.outputRoot}/${slug}`
+    const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
+      const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
+      const fallbackOut = outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType)
+      const mergeMode = outputMergeMode(toolData, outPort.id, outPort.autoMergeDefault)
       if (mode === 'array' && keys) {
-        outputs[outPort.id] = {
+        const arrayValue: Extract<AxedValue, { kind: 'array' }> = {
           kind: 'array',
           axis: axis!,
           keys,
-          paths: keys.map((k) => outputPath(perNodeOutputDir, slug, outPort.id, k, outPort.fileType)),
+          paths: keys.map((k) =>
+            outputPathFromTemplate(resolveSinkPath(sink, perNodeOutputDir, fallbackOut, ctx.homeDir), k),
+          ),
+        }
+        const strategy = mergeMode.enabled && mergeMode.strategy
+          ? resolveMergeStrategyStatic(mergeMode.strategy, outPort.fileType)
+          : null
+        if (strategy) {
+          const mergedPath = resolveSinkPath(
+            sink,
+            perNodeOutputDir,
+            `${perNodeOutputDir}/${slug}.${outPort.id}.merged${mergeOutputExt(strategy)}`,
+            ctx.homeDir,
+          )
+          outputs[outPort.id] = { kind: 'single', path: mergedPath }
+          implicitMerges[outPort.id] = {
+            strategy,
+            outputPath: mergedPath,
+            input: arrayValue,
+            upstreamFileType: outPort.fileType,
+          }
+        } else {
+          outputs[outPort.id] = arrayValue
         }
       } else {
         outputs[outPort.id] = {
           kind: 'single',
-          path: outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType),
+          path: resolveSinkPath(sink, perNodeOutputDir, fallbackOut, ctx.homeDir),
         }
       }
     }
@@ -322,8 +559,10 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       keys,
       arrayPortId,
       dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+      dependsOnNodeIds: [...dependsOnNodeIds],
       inputs: resolvedInputs,
       outputs,
+      implicitMerges: Object.keys(implicitMerges).length > 0 ? implicitMerges : undefined,
     })
   }
 
@@ -344,6 +583,9 @@ function portIsMulti(
     const tool = ctx.getTool(toolData.toolId)
     const portDef = tool?.inputs.find((p) => p.id === portId)
     return Boolean(portDef?.multi)
+  }
+  if (node.type === 'transform') {
+    return false
   }
   return false
 }
@@ -383,6 +625,9 @@ function inferMergeOutputType(
     const tool = ctx.getTool((srcNode.data as ToolNodeData).toolId)
     const port = tool?.outputs.find((p) => p.id === (incomingEdge.sourceHandle ?? 'output'))
     return port?.fileType ?? null
+  }
+  if (srcNode.type === 'transform') {
+    return (srcNode.data as TransformNodeData).fileType
   }
   return null
 }

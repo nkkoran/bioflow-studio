@@ -5,6 +5,10 @@ import { registerStoreHandlers } from './storeHandlers'
 import { registerDialogHandlers } from './dialogHandlers'
 import { registerLocalFileHandlers } from './localFileHandlers'
 import { registerPipelineHandlers } from './pipelineHandlers'
+import { registerSlurmHandlers } from './slurmHandlers'
+import { registerFsHandlers } from './fsHandlers'
+import { registerClusterHandlers } from './clusterHandlers'
+import { registerAnnovarHandlers } from './annovarHandlers'
 
 export function registerAllHandlers(): void {
   registerSshHandlers()
@@ -14,4 +18,8 @@ export function registerAllHandlers(): void {
   registerDialogHandlers()
   registerLocalFileHandlers()
   registerPipelineHandlers()
+  registerSlurmHandlers()
+  registerFsHandlers()
+  registerClusterHandlers()
+  registerAnnovarHandlers()
 }

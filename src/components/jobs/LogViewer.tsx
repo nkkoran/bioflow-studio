@@ -1,18 +1,36 @@
 /**
  * Log viewer — right pane of the Jobs panel.
  *
- * Reads stdout / stderr files from the remote host via SFTP. Not truly live
- * yet — we auto-refresh every 5s while the selected node is running, and
- * provide a manual Refresh button. True `tail -F` streaming is a planned
- * follow-up (needs a streaming exec channel on SshManager).
+ * Non-array jobs: content comes from the runStore ring buffer, which is
+ * populated by `pipeline:job-log` streaming events (tail -F over SSH).
+ * The display updates live as new chunks arrive — no polling needed.
+ *
+ * Array jobs: no per-task streaming (22+ tail -F channels would be
+ * expensive), so we fall back to SFTP reads with a 5s auto-refresh while
+ * the job is running.
+ *
+ * The Refresh button always re-reads from SFTP and replaces the buffer,
+ * which is useful for seeing the full file after the job finishes or for
+ * recovering if streaming missed content.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRunStore } from '@/stores/runStore'
 import type { RunState, NodeRunState } from '@/types/pipeline'
 import { Button } from '@/components/ui/Button'
 import { RefreshCw } from 'lucide-react'
 
 type Stream = 'stdout' | 'stderr'
+
+/**
+ * Stable empty-array reference used as a fallback in the Zustand selector.
+ *
+ * Without this, `s.logs[nodeId]?.[stream] ?? []` would allocate a fresh `[]`
+ * every render. Zustand's default equality is reference comparison, so a new
+ * `[]` each time means the selector reports a change on every render, which
+ * re-renders the component, which re-runs the selector — an infinite loop
+ * that trips React's "Maximum update depth exceeded" guard.
+ */
+const EMPTY_LINES: readonly string[] = Object.freeze([])
 
 interface Props {
   run: RunState
@@ -21,41 +39,55 @@ interface Props {
 
 export function LogViewer({ run, connectionId }: Props) {
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
+  const setLog = useRunStore((s) => s.setLog)
+  const replaceLog = useRunStore((s) => s.replaceLog)
   const ns = selectedNodeId ? run.nodes[selectedNodeId] : null
+
   const [stream, setStream] = useState<Stream>('stdout')
   const [taskIdx, setTaskIdx] = useState(0)
-  const [content, setContent] = useState<string>('')
   const [loading, setLoading] = useState(false)
+  const [diagnosing, setDiagnosing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [diagnostic, setDiagnostic] = useState<string | null>(null)
+
   const scrollRef = useRef<HTMLPreElement>(null)
   const autoScrollRef = useRef(true)
 
-  // Resolve the actual log path for this stream/task. For arrays, the runner
-  // stored `%a` as a placeholder — we substitute the real task index.
+  // Subscribe to the ring buffer. Use the module-level EMPTY_LINES constant so
+  // the selector returns a stable reference when empty — a fresh `[]` here
+  // causes an infinite re-render loop under Zustand's reference equality.
+  const logLines = useRunStore((s) =>
+    ns ? (s.logs[ns.nodeId]?.[stream] ?? EMPTY_LINES) : EMPTY_LINES,
+  ) as readonly string[]
+  const stdoutLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stdout?.length ?? 0) : 0)
+  const stderrLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stderr?.length ?? 0) : 0)
+
+  // The concrete log file path (null when not yet known or array-with-placeholder).
   const resolvedPath = ns ? resolveLogPath(ns, stream, taskIdx) : null
 
-  const refresh = useCallback(async () => {
-    if (!resolvedPath) { setContent(''); return }
+  // ── SFTP read ────────────────────────────────────────────────────────────
+  // Used for: array jobs (all reads), non-array jobs (manual Refresh only).
+
+  const sftpRefresh = useCallback(async () => {
+    if (!ns) return
+    if (!resolvedPath) {
+      // Refresh pressed before the runner has reported stdoutPath/stderrPath.
+      // Surface it so the user knows why nothing happened.
+      setError('Log path not known yet — wait for the job to be submitted.')
+      return
+    }
     setLoading(true)
     setError(null)
     try {
-      // Tail the last ~200 lines via a remote `tail` — avoids pulling megabytes
-      // when a job has been running a while. window.api.sftp.head only reads
-      // from the start; we use the raw file read with no offset for now.
-      // (When we wire a streaming exec channel later this becomes proper tail.)
       const text = await window.api.sftp.read(connectionId, resolvedPath)
-      setContent(text ?? '')
-      // Scroll to bottom on fresh load if auto-scroll is engaged.
-      setTimeout(() => {
-        if (autoScrollRef.current && scrollRef.current) {
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-        }
-      }, 0)
+      const lines = text.length === 0 ? [] : text.split('\n')
+      // Array jobs: each task has its own file — switching tasks must replace,
+      // not merge, or the previous task's output bleeds in.
+      if (ns.isArray) replaceLog(ns.nodeId, stream, lines)
+      else setLog(ns.nodeId, stream, lines)
     } catch (err: any) {
       const msg = String(err?.message ?? err)
-      // File doesn't exist yet — common while the job is still queued.
       if (msg.includes('No such file') || msg.includes('code 2')) {
-        setContent('')
         setError('Log file not available yet (job still queued?).')
       } else {
         setError(msg)
@@ -63,27 +95,66 @@ export function LogViewer({ run, connectionId }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [connectionId, resolvedPath])
+  }, [connectionId, resolvedPath, ns, stream, setLog, replaceLog])
 
-  // Fetch on selection or stream/task change.
-  useEffect(() => { void refresh() }, [refresh])
+  // Clear the buffer instantly when the user switches array tasks so the
+  // prior task's output isn't visible while the SFTP fetch is in flight.
+  useEffect(() => {
+    if (ns?.isArray) replaceLog(ns.nodeId, stream, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdx, ns?.nodeId, stream])
 
-  // Auto-refresh every 5s while the selected node is running. Stops on
-  // terminal states so we don't hammer the cluster after jobs finish.
+  // Load via SFTP on initial selection AND when a non-array job transitions
+  // into a terminal state — streaming (tail -F) may have ended before the
+  // final bytes flushed, so we always do one last SFTP pull.
   useEffect(() => {
     if (!ns) return
-    if (ns.status !== 'running' && ns.status !== 'queued') return
-    const t = setInterval(() => { void refresh() }, 5000)
-    return () => clearInterval(t)
-  }, [ns, refresh])
+    const isTerminal = ns.status === 'done' || ns.status === 'failed' || ns.status === 'cancelled'
+    if (ns.isArray || isTerminal) {
+      void sftpRefresh()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ns?.nodeId, ns?.status, stream, taskIdx])
 
-  // Track whether the user has scrolled up — if so, disable auto-scroll.
+  // Array jobs: auto-refresh while running.
+  useEffect(() => {
+    if (!ns?.isArray) return
+    if (ns.status !== 'running' && ns.status !== 'queued') return
+    const t = setInterval(() => { void sftpRefresh() }, 5000)
+    return () => clearInterval(t)
+  }, [ns?.isArray, ns?.status, sftpRefresh])
+
+  // Auto-scroll to bottom when new log content arrives (if user hasn't scrolled up).
+  useEffect(() => {
+    if (!autoScrollRef.current || !scrollRef.current) return
+    scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [logLines])
+
   const onScroll = () => {
     const el = scrollRef.current
     if (!el) return
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20
-    autoScrollRef.current = atBottom
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 20
   }
+
+  const diagnoseFailure = useCallback(async () => {
+    if (!ns?.jobId || ns.jobId.startsWith('login-')) return
+    setDiagnosing(true)
+    setDiagnostic(null)
+    try {
+      const jobId = ns.jobId.replace(/[^0-9_.-]/g, '')
+      const result = await window.api.ssh.exec(
+        connectionId,
+        `sacct -j ${jobId} --format=JobID,State,ExitCode,Elapsed,MaxRSS,ReqMem,NodeList,Reason -P 2>/dev/null | head -n 20`,
+      )
+      setDiagnostic((result.stdout || result.stderr || `sacct exited ${result.exitCode}`).trim())
+    } catch (err: any) {
+      setDiagnostic(err?.message ?? String(err))
+    } finally {
+      setDiagnosing(false)
+    }
+  }, [connectionId, ns])
+
+  // ── Render ───────────────────────────────────────────────────────────────
 
   if (!ns) {
     return (
@@ -93,14 +164,15 @@ export function LogViewer({ run, connectionId }: Props) {
     )
   }
 
-  const isArray = ns.isArray && (ns.arraySize ?? 0) > 0
+  const isArray = !!ns.isArray && (ns.arraySize ?? 0) > 0
+  const displayContent = logLines.join('\n')
 
   return (
     <div className="h-full flex flex-col min-h-0">
-      {/* Header: stream tabs + task selector + refresh */}
+      {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-light shrink-0">
-        <StreamTab label="stdout" active={stream === 'stdout'} onClick={() => setStream('stdout')} />
-        <StreamTab label="stderr" active={stream === 'stderr'} onClick={() => setStream('stderr')} />
+        <StreamTab label="stdout" count={stdoutLineCount} active={stream === 'stdout'} onClick={() => setStream('stdout')} />
+        <StreamTab label="stderr" count={stderrLineCount} active={stream === 'stderr'} onClick={() => setStream('stderr')} />
 
         {isArray && (
           <>
@@ -119,7 +191,11 @@ export function LogViewer({ run, connectionId }: Props) {
 
         <div className="flex-1" />
 
-        <span className="text-[10px] text-text-muted font-mono truncate max-w-[60%]" title={resolvedPath ?? ''}>
+        <span className="rounded bg-bg-hover px-1.5 py-0.5 text-[10px] text-text-muted">
+          {logLines.length} line{logLines.length === 1 ? '' : 's'}
+        </span>
+
+        <span className="text-[10px] text-text-muted font-mono truncate max-w-[55%]" title={resolvedPath ?? ''}>
           {resolvedPath}
         </span>
 
@@ -127,12 +203,23 @@ export function LogViewer({ run, connectionId }: Props) {
           variant="ghost"
           size="sm"
           icon={<RefreshCw size={11} className={loading ? 'animate-spin' : ''} />}
-          onClick={() => void refresh()}
+          onClick={() => void sftpRefresh()}
           disabled={loading}
           className="h-6 px-2 text-[10px]"
         >
           Refresh
         </Button>
+        {ns.status === 'failed' && ns.jobId && !ns.jobId.startsWith('login-') && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void diagnoseFailure()}
+            disabled={diagnosing}
+            className="h-6 px-2 text-[10px]"
+          >
+            {diagnosing ? 'Checking...' : 'Diagnose'}
+          </Button>
+        )}
       </div>
 
       {/* Log body */}
@@ -142,34 +229,37 @@ export function LogViewer({ run, connectionId }: Props) {
         className="flex-1 overflow-auto m-0 px-3 py-2 text-[11px] leading-relaxed font-mono bg-bg-primary text-text-primary whitespace-pre-wrap break-all"
       >
         {error && <div className="text-warning italic">{error}</div>}
-        {!error && content.length === 0 && !loading && (
-          <div className="text-text-muted italic">— empty —</div>
+        {diagnostic && <div className="mb-2 whitespace-pre-wrap rounded border border-warning/40 bg-warning/10 p-2 text-warning">{diagnostic}</div>}
+        {!error && displayContent.length === 0 && !loading && (
+          <div className="text-text-muted italic">
+            {ns.status === 'queued' ? 'Waiting for job to start…' : '— empty —'}
+          </div>
         )}
-        {content}
+        {displayContent}
       </pre>
     </div>
   )
 }
 
-function StreamTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function StreamTab({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className={`px-2 py-0.5 text-[10px] font-mono rounded ${
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono rounded ${
         active
           ? 'bg-bg-hover text-text-primary'
           : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
       }`}
     >
       {label}
+      <span className="rounded bg-bg-primary px-1 text-[9px] text-text-muted">{count}</span>
     </button>
   )
 }
 
 /**
- * Turn the stored `%a` placeholder into a concrete task index for arrays.
- * Non-array jobs: path is already concrete (stored with the real job id at
- * submission time), so we just return it unchanged.
+ * Resolve the `%a` placeholder in array log paths to a concrete task index.
+ * Non-array paths are returned unchanged.
  */
 function resolveLogPath(ns: NodeRunState, stream: Stream, taskIdx: number): string | null {
   const raw = stream === 'stdout' ? ns.stdoutPath : ns.stderrPath

@@ -20,11 +20,31 @@ export function registerPipelineHandlers(): void {
     return runner.cancelNode(args.runId, args.nodeId)
   })
 
+  ipcMain.handle('pipeline:cancel-job', async (_event, args: { connectionId: string; jobId: string }) => {
+    return runner.cancelJobId(args.connectionId, args.jobId)
+  })
+
+  ipcMain.handle('pipeline:rerun-node', async (_event, args: { runId: string; nodeId: string; snapshot: PipelineSnapshot }) => {
+    return runner.rerunNode(args.runId, args.nodeId, args.snapshot)
+  })
+
   ipcMain.handle('pipeline:list-runs', async () => {
+    await runner.reattachPersistedJobs()
     return runner.listRuns()
   })
 
   ipcMain.handle('pipeline:get-run', async (_event, runId: string) => {
     return runner.getRun(runId)
+  })
+
+  ipcMain.handle('pipeline:list-outputs', async (_event, args: { runId: string; nodeId: string }) => {
+    return runner.listNodeOutputs(args.runId, args.nodeId)
+  })
+
+  ipcMain.handle('pipeline:generate-scripts-dry', async (
+    _event,
+    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string },
+  ) => {
+    return runner.generateScriptsDry(args)
   })
 }

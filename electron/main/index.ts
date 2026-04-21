@@ -1,9 +1,61 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
 import { registerAllHandlers } from '../ipc/registerAll'
 
 // Check if dev: use electron-vite's environment
 const isDev = !app.isPackaged
+
+function sendMenuCommand(command: 'new' | 'open' | 'save' | 'saveAs'): void {
+  BrowserWindow.getFocusedWindow()?.webContents.send('app:menu-command', { command })
+}
+
+function buildMenu(): Menu {
+  return Menu.buildFromTemplate([
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New Pipeline', accelerator: 'CmdOrCtrl+N', click: () => sendMenuCommand('new') },
+        { label: 'Open Pipeline', accelerator: 'CmdOrCtrl+O', click: () => sendMenuCommand('open') },
+        { type: 'separator' },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => sendMenuCommand('save') },
+        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => sendMenuCommand('saveAs') },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(process.platform === 'darwin' ? [{ type: 'separator' as const }, { role: 'front' as const }] : []),
+      ],
+    },
+  ])
+}
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -42,6 +94,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   registerAllHandlers()
+  Menu.setApplicationMenu(buildMenu())
   createWindow()
 
   app.on('activate', () => {

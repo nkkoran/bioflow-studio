@@ -8,7 +8,9 @@ interface PromptRequest {
   promptId: string
   title: string
   message: string
+  detail?: string
   isPassword: boolean
+  placeholder?: string
 }
 
 /**
@@ -16,7 +18,7 @@ interface PromptRequest {
  *
  * Listens for `ssh:prompt` events from the main process (triggered during
  * keyboard-interactive auth, e.g., Compute Canada MFA). Shows a dialog
- * asking the user for their verification code, then sends the response back.
+ * asking the user for their MFA response, then sends the response back.
  */
 export function MfaPrompt() {
   const [request, setRequest] = useState<PromptRequest | null>(null)
@@ -88,10 +90,15 @@ export function MfaPrompt() {
           <ShieldCheck size={24} className="text-accent shrink-0" />
           <p className="text-sm">{request.message}</p>
         </div>
+        {request.detail && (
+          <div className="rounded-md border border-border bg-bg-primary/70 px-3 py-2 text-xs whitespace-pre-wrap text-text-secondary">
+            {request.detail}
+          </div>
+        )}
         <Input
           ref={inputRef}
           type={request.isPassword ? 'password' : 'text'}
-          placeholder="Enter code..."
+          placeholder={request.placeholder ?? 'Enter response...'}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -99,9 +106,9 @@ export function MfaPrompt() {
         />
         <p className="text-xs text-text-muted">
           Your server requires multi-factor authentication.
-          {request.message.toLowerCase().includes('password')
-            ? ' Despite the "Password" prompt, Compute Canada / Alliance clusters typically want your TOTP code from your authenticator app (e.g., Google Authenticator, Duo Mobile).'
-            : ' Enter the verification code from your authenticator app.'}
+          {`${request.message} ${request.detail ?? ''}`.toLowerCase().match(/duo|push|option|1\./)
+            ? ' If your cluster offers Duo choices, enter 1 for a push notification or type a passcode.'
+            : ' Enter the authenticator code, passcode, or menu choice requested by the cluster.'}
         </p>
       </div>
     </Dialog>
