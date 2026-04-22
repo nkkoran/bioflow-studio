@@ -61,6 +61,7 @@ interface DataPreviewStore {
   setDelimiterOverride: (filePath: string, delimiter: DelimiterOverride) => void
   setScrollOffset: (filePath: string, offset: number) => void
   setSchema: (filePath: string, schema: { columns: string[]; delimiter: string; modified?: number }) => void
+  clearSchemas: (filePath?: string) => void
   saveView: (filePath: string, name: string) => Promise<SavedPreviewView | null>
   applySavedView: (filePath: string, viewId: string) => void
   resetFreshView: (filePath: string) => void
@@ -230,6 +231,13 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
         },
       },
     })),
+
+  clearSchemas: (filePath) =>
+    set((state) => {
+      if (!filePath) return { schemas: {} }
+      const { [filePath]: _removed, ...schemas } = state.schemas
+      return { schemas }
+    }),
 
   saveView: async (filePath, name) => {
     const trimmed = name.trim()

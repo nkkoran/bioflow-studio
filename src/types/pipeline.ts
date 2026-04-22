@@ -24,6 +24,8 @@ export interface ToolParam {
   label: string             // display label
   description?: string
   docUrl?: string
+  section?: 'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime'
+  core?: boolean
   advanced?: boolean
   type: 'string' | 'number' | 'boolean' | 'file' | 'select' | 'multi-select'
   default?: string | number | boolean
@@ -113,6 +115,7 @@ export interface ToolDef {
   name: string              // display name (e.g., "PLINK2 Association")
   category: ToolCategory
   description: string
+  docUrl?: string
   command: string           // binary name (e.g., "plink2")
   module?: string           // HPC module to load (e.g., "plink/2.00a3")
   inputs: ToolPort[]

@@ -28,6 +28,9 @@ export interface ConnectionDefaults {
   annovarDbPath?: string
   vepPath?: string
   vepCachePath?: string
+  shellCapabilities?: {
+    awk: boolean
+  }
 }
 
 export interface ToolScriptOpts {
@@ -832,6 +835,134 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
     lines.push('OUT="${OUTPUTS[0]}"')
   }
   lines.push('')
+  if (canUseAwkTransformFastPath(transformData, inputPaths, connectionDefaults)) {
+    lines.push(...renderTransformAwkScript(transformData))
+  } else {
+    lines.push(...renderTransformPythonScript(transformData))
+  }
+  lines.push('')
+  return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+}
+
+function canUseAwkTransformFastPath(
+  transformData: TransformNodeData,
+  inputPaths: string[],
+  connectionDefaults?: ConnectionDefaults,
+): boolean {
+  if (!connectionDefaults?.shellCapabilities?.awk) return false
+  if (transformData.fileType === 'csv') return false
+  if (inputPaths.some((path) => path.toLowerCase().endsWith('.csv'))) return false
+  return (transformData.filters ?? []).every((rule) => rule.op !== 'regex')
+}
+
+function renderTransformAwkScript(transformData: TransformNodeData): string[] {
+  const selectedColumns = transformData.selectedColumns ?? []
+  const filters = transformData.filters ?? []
+  const renames = transformData.renames ?? []
+
+  const lines: string[] = []
+  lines.push('# Fast path: awk handles simple TSV/TXT projection and filtering.')
+  lines.push(`awk -F '\\t' -v OFS='\\t' -f - "$IN" > "$OUT" <<'AWK'`)
+  lines.push('BEGIN {')
+  lines.push(`  selectedCount = ${selectedColumns.length}`)
+  selectedColumns.forEach((column, idx) => {
+    lines.push(`  selectedNames[${idx + 1}] = ${awkStringLiteral(column)}`)
+  })
+  lines.push(`  renameCount = ${renames.length}`)
+  renames.forEach((rename, idx) => {
+    lines.push(`  renameFrom[${idx + 1}] = ${awkStringLiteral(rename.from)}`)
+    lines.push(`  renameTo[${idx + 1}] = ${awkStringLiteral(rename.to || rename.from)}`)
+  })
+  lines.push(`  filterCount = ${filters.length}`)
+  filters.forEach((filter, idx) => {
+    lines.push(`  filterColumn[${idx + 1}] = ${awkStringLiteral(filter.column)}`)
+    lines.push(`  filterOp[${idx + 1}] = ${awkStringLiteral(filter.op)}`)
+    lines.push(`  filterValue[${idx + 1}] = ${awkStringLiteral(filter.value ?? '')}`)
+    lines.push(`  filterJoin[${idx + 1}] = ${awkStringLiteral(filter.join ?? 'and')}`)
+  })
+  lines.push('}')
+  lines.push('function trim(value) {')
+  lines.push('  gsub(/^[ \\t\\r\\n]+|[ \\t\\r\\n]+$/, "", value)')
+  lines.push('  return value')
+  lines.push('}')
+  lines.push('function is_number(value) {')
+  lines.push('  return value ~ /^[-+]?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))([eE][-+]?[0-9]+)?$/')
+  lines.push('}')
+  lines.push('function matches_rule(raw, op, value, lhs, rhs) {')
+  lines.push('  if (op == "contains") return index(tolower(raw), tolower(value)) > 0')
+  lines.push('  if (op == "equals") return raw == value')
+  lines.push('  if (op == "notEquals") return raw != value')
+  lines.push('  if (op == "notEmpty") return trim(raw) != ""')
+  lines.push('  if (!is_number(raw) || !is_number(value)) return 0')
+  lines.push('  lhs = raw + 0')
+  lines.push('  rhs = value + 0')
+  lines.push('  if (op == "gt") return lhs > rhs')
+  lines.push('  if (op == "gte") return lhs >= rhs')
+  lines.push('  if (op == "lt") return lhs < rhs')
+  lines.push('  if (op == "lte") return lhs <= rhs')
+  lines.push('  return 0')
+  lines.push('}')
+  lines.push('function row_matches(   idx, raw, current, result, joiner, i) {')
+  lines.push('  if (filterCount == 0) return 1')
+  lines.push('  idx = colIndex[filterColumn[1]]')
+  lines.push('  raw = (idx > 0 && idx <= NF) ? $idx : ""')
+  lines.push('  result = matches_rule(raw, filterOp[1], filterValue[1])')
+  lines.push('  for (i = 2; i <= filterCount; i++) {')
+  lines.push('    idx = colIndex[filterColumn[i]]')
+  lines.push('    raw = (idx > 0 && idx <= NF) ? $idx : ""')
+  lines.push('    current = matches_rule(raw, filterOp[i], filterValue[i])')
+  lines.push('    joiner = filterJoin[i]')
+  lines.push('    if (joiner == "or") result = result || current')
+  lines.push('    else result = result && current')
+  lines.push('  }')
+  lines.push('  return result')
+  lines.push('}')
+  lines.push('NR == 1 {')
+  lines.push('  sourceCount = NF')
+  lines.push('  for (i = 1; i <= NF; i++) {')
+  lines.push('    sourceField[i] = $i')
+  lines.push('    colIndex[$i] = i')
+  lines.push('  }')
+  lines.push('  for (i = 1; i <= renameCount; i++) renameMap[renameFrom[i]] = renameTo[i]')
+  lines.push('  activeCount = 0')
+  lines.push('  if (selectedCount > 0) {')
+  lines.push('    for (i = 1; i <= selectedCount; i++) {')
+  lines.push('      idx = colIndex[selectedNames[i]]')
+  lines.push('      if (idx > 0) {')
+  lines.push('        activeCount++')
+  lines.push('        activeIndex[activeCount] = idx')
+  lines.push('        activeName[activeCount] = selectedNames[i]')
+  lines.push('      }')
+  lines.push('    }')
+  lines.push('  }')
+  lines.push('  if (activeCount == 0) {')
+  lines.push('    for (i = 1; i <= sourceCount; i++) {')
+  lines.push('      activeCount++')
+  lines.push('      activeIndex[activeCount] = i')
+  lines.push('      activeName[activeCount] = sourceField[i]')
+  lines.push('    }')
+  lines.push('  }')
+  lines.push('  for (i = 1; i <= activeCount; i++) {')
+  lines.push('    header = activeName[i]')
+  lines.push('    outName = (header in renameMap) ? renameMap[header] : header')
+  lines.push('    printf "%s%s", outName, (i < activeCount ? OFS : ORS)')
+  lines.push('  }')
+  lines.push('  next')
+  lines.push('}')
+  lines.push('{')
+  lines.push('  if (!row_matches()) next')
+  lines.push('  for (i = 1; i <= activeCount; i++) {')
+  lines.push('    idx = activeIndex[i]')
+  lines.push('    value = (idx > 0 && idx <= NF) ? $idx : ""')
+  lines.push('    printf "%s%s", value, (i < activeCount ? OFS : ORS)')
+  lines.push('  }')
+  lines.push('}')
+  lines.push('AWK')
+  return lines
+}
+
+function renderTransformPythonScript(transformData: TransformNodeData): string[] {
+  const lines: string[] = []
   lines.push(`python3 - <<'PY' "$IN" "$OUT"`)
   lines.push('import csv, json, re, sys')
   lines.push('in_path, out_path = sys.argv[1], sys.argv[2]')
@@ -885,8 +1016,7 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   lines.push('        if matches_filters(row, config.get("filters", [])):')
   lines.push('            writer.writerow({rename.get(c, c): row.get(c, "") for c in fields})')
   lines.push('PY')
-  lines.push('')
-  return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  return lines
 }
 
 export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
@@ -982,6 +1112,15 @@ function shellQuote(s: string): string {
 
 function shellArg(s: string): string {
   return shellQuote(s)
+}
+
+function awkStringLiteral(value: string): string {
+  return `"${value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\t/g, '\\t')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')}"`
 }
 
 function stripExt(p: string): string {

@@ -68,6 +68,7 @@ Status as of 2026-04-21:
 - `D-4` Long-path truncation + hover reveal: implemented on primary node path/output rows with bounded node widths and middle-ellipsis rendering.
 - `D-5` Cmd/Ctrl+S save + Cmd/Ctrl+Shift+S save-as: implemented.
 - `D-6` Data preview draft/apply filters + export/materialize: implemented with draft filter buffers, explicit Apply/Revert, and one-click export into a reusable filtered-file pipeline chain.
+- `E` App-wide consistency / efficiency audit: completed. `AUDIT_PHASE7.md` is checked in, dead duplicate files were removed, cache refresh/debug plumbing was added, node-data load migrations were widened, renderer axis/output preview consistency gaps were fixed, and the larger follow-ups were pushed into Phase 8.
 
 Audit follow-up on 2026-04-21:
 
@@ -79,7 +80,7 @@ Audit follow-up on 2026-04-21:
 - `D-5` File menu parity is now present alongside the keyboard shortcuts (`New`, `Open`, `Save`, `Save As`).
 - Validator audit: transform-node validation was corrected to stop using merge-specific branch logic/messages.
 
-Track E is intentionally deferred until the rest of Phase 7 is in place.
+Track E is complete as of 2026-04-21; the remaining larger refactors are called out in `AUDIT_PHASE7.md` as Phase 8 follow-ups.
 
 ---
 

@@ -1,6 +1,6 @@
 import { Client } from 'ssh2'
 import type { ClientChannel, ConnectConfig } from 'ssh2'
-import { readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { resolve as resolvePath } from 'path'
@@ -257,6 +257,62 @@ function slugifySegment(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'host'
 }
 
+function sanitizeHostAlias(value: string): string {
+  return value.trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'bioflow'
+}
+
+function defaultAliasForRequest(request: SshKeySetupRequest): string {
+  const preferred = request.alias?.trim()
+  if (preferred) return sanitizeHostAlias(preferred)
+  const nameLikeAlias = sanitizeHostAlias(request.host.split('.')[0] || request.username || request.host)
+  return nameLikeAlias || `${slugifySegment(request.username)}-${slugifySegment(request.host)}`
+}
+
+function ensureBioflowSshConfig(request: SshKeySetupRequest & { keyPath: string }): { alias: string; configPath: string } {
+  const sshDir = resolvePath(homedir(), '.ssh')
+  const configDir = resolvePath(sshDir, 'config.d', 'bioflow')
+  const configPath = resolvePath(configDir, `${defaultAliasForRequest(request)}.conf`)
+  const includeLine = 'Include ~/.ssh/config.d/bioflow/*.conf'
+  const rootConfigPath = resolvePath(sshDir, 'config')
+  const alias = defaultAliasForRequest(request)
+  const controlPersist = `${Math.max(1, Math.round(request.controlPersistHours ?? 8))}h`
+  const serverAliveInterval = Math.max(15, Math.round(request.serverAliveIntervalSeconds ?? 60))
+
+  mkdirSync(configDir, { recursive: true })
+  mkdirSync(resolvePath(sshDir, 'controlmasters'), { recursive: true })
+
+  const hostBlock = [
+    '# Managed by BioFlow Studio',
+    `Host ${alias}`,
+    `  HostName ${request.host}`,
+    `  User ${request.username}`,
+    `  Port ${request.port}`,
+    `  IdentityFile ${request.keyPath}`,
+    '  IdentitiesOnly yes',
+    '  PreferredAuthentications publickey,keyboard-interactive',
+    '  ControlMaster auto',
+    '  ControlPath ~/.ssh/controlmasters/%C',
+    `  ControlPersist ${controlPersist}`,
+    `  ServerAliveInterval ${serverAliveInterval}`,
+    process.platform === 'darwin' ? '  UseKeychain yes' : '',
+    process.platform === 'darwin' ? '  AddKeysToAgent yes' : '',
+    '',
+  ].filter(Boolean).join('\n')
+  writeFileSync(configPath, hostBlock, { encoding: 'utf8', mode: 0o600 })
+
+  if (!existsSync(rootConfigPath)) {
+    writeFileSync(rootConfigPath, `${includeLine}\n`, { encoding: 'utf8', mode: 0o600 })
+  } else {
+    const current = readFileSync(rootConfigPath, 'utf8')
+    if (!current.includes(includeLine)) {
+      const suffix = current.endsWith('\n') ? '' : '\n'
+      appendFileSync(rootConfigPath, `${suffix}${includeLine}\n`, { encoding: 'utf8' })
+    }
+  }
+
+  return { alias, configPath }
+}
+
 function execFilePromise(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(command, args, { encoding: 'utf8' }, (error, stdout, stderr) => {
@@ -435,12 +491,29 @@ export class SshManager {
       keychainAdded = true
     }
 
+    let alias: string | undefined
+    let configPath: string | undefined
+    if (request.writeConfig !== false) {
+      const configResult = ensureBioflowSshConfig({ ...request, keyPath })
+      alias = configResult.alias
+      configPath = configResult.configPath
+    }
+
+    const noteParts = [
+      `Key installation succeeded at ${keyPath}.`,
+      alias ? `OpenSSH alias ready: ssh ${alias}` : '',
+      configPath ? `BioFlow wrote ${configPath}.` : '',
+      'Some clusters may still prompt for a TOTP code even with key-based auth.',
+    ].filter(Boolean)
+
     return {
       keyPath,
       publicKeyPath,
       agentAdded,
       keychainAdded,
-      note: 'Key installation succeeded. Some clusters may still prompt for a TOTP code even with key-based auth.',
+      alias,
+      configPath,
+      note: noteParts.join(' '),
     }
   }
 
@@ -608,6 +681,11 @@ export class SshManager {
     this.loginPolicies.delete(id)
     this.loginPolicyPromises.delete(id)
     this.sendStatusChange(id, false)
+  }
+
+  clearCachedState(id: string): void {
+    this.loginPolicies.delete(id)
+    this.loginPolicyPromises.delete(id)
   }
 
   getStatus(id: string): ConnectionStatus | null {

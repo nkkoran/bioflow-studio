@@ -35,11 +35,12 @@ function StatusBadge({ status = 'idle' }: StatusBadgeProps) {
 
 function MergeNodeInner({ data, selected }: NodeProps) {
   const nodeData = data as MergeNodeData
+  const convergeLabel = (nodeData.convergeMode ?? 'axed-fan-in') === 'parallel-branches' ? 'branches' : 'axis'
 
   return (
     <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[200px] transition-all',
+        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[200px] max-w-[320px] transition-all',
         selected ? 'border-accent ring-2 ring-accent/30' : 'border-indigo-500/40',
       )}
     >
@@ -49,9 +50,9 @@ function MergeNodeInner({ data, selected }: NodeProps) {
           <div className="flex-1 min-w-0">
             <div className="text-[10px] uppercase tracking-wide text-text-muted">merge</div>
             <div className="flex items-center gap-1.5">
-              <div className="truncate text-xs font-semibold text-text-primary">{nodeData.label}</div>
+              <div className="truncate text-xs font-semibold text-text-primary" title={nodeData.label}>{nodeData.label}</div>
               <span className="rounded bg-indigo-500/15 px-1 py-px text-[9px] text-indigo-200">
-                {(nodeData.convergeMode ?? 'axed-fan-in') === 'parallel-branches' ? 'branches' : 'axis'}
+                {convergeLabel}
               </span>
             </div>
           </div>
@@ -61,7 +62,7 @@ function MergeNodeInner({ data, selected }: NodeProps) {
 
       <div className="px-3 py-2 text-[11px] text-text-secondary">
         <span className="text-text-muted">strategy: </span>
-        <span className="font-mono">{nodeData.strategy}</span>
+        <span className="font-mono truncate" title={nodeData.strategy}>{nodeData.strategy}</span>
       </div>
 
       <Handle
@@ -94,12 +95,12 @@ function MergeNodeInner({ data, selected }: NodeProps) {
       />
 
       {nodeData.error && (
-        <div className="px-3 py-1.5 border-t border-error/20 bg-error/5 text-[10px] text-error truncate">
+        <div className="px-3 py-1.5 border-t border-error/20 bg-error/5 text-[10px] text-error truncate" title={nodeData.error}>
           {nodeData.error}
         </div>
       )}
       {nodeData.jobId && (
-        <div className="px-3 py-1 border-t border-border text-[10px] text-text-muted font-mono">
+        <div className="px-3 py-1 border-t border-border text-[10px] text-text-muted font-mono truncate" title={nodeData.jobId}>
           job: {nodeData.jobId}
         </div>
       )}

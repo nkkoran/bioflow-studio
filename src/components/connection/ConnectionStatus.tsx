@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useUIStore } from '@/stores/uiStore'
 import { useClusterInfoStore } from '@/stores/clusterInfoStore'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useFileSizeStore } from '@/stores/fileSizeStore'
 import { ConnectionLogDrawer } from './ConnectionLogDrawer'
 
 interface ConnectionStatusProps {
@@ -18,9 +20,13 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
   const [dialogOpen, setDialogOpen] = useState(false)
   const [slurmOpen, setSlurmOpen] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
+  const [cacheRefreshing, setCacheRefreshing] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const { connections, activeConnectionId, disconnect, connectLocal } = useConnectionStore()
+  const clearClusterInfo = useClusterInfoStore((s) => s.clearConnection)
+  const clearSchemas = useDataPreviewStore((s) => s.clearSchemas)
+  const clearFileSizes = useFileSizeStore((s) => s.clear)
   const activeEntry = activeConnectionId ? connections[activeConnectionId] : null
   const status = activeEntry?.status ?? 'disconnected'
   const isLocal = activeConnectionId === LOCAL_CONNECTION_ID
@@ -67,6 +73,23 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
       setDropdownOpen(false)
     }
   }
+
+  const handleRefreshClusterCaches = useCallback(async () => {
+    if (!activeConnectionId || isLocal) return
+    setCacheRefreshing(true)
+    try {
+      await window.api.cluster.clearCaches(activeConnectionId)
+      clearClusterInfo(activeConnectionId)
+      clearFileSizes(activeConnectionId)
+      clearSchemas()
+      await Promise.allSettled([
+        useClusterInfoStore.getState().loadAccounts(activeConnectionId, { force: true }),
+        useClusterInfoStore.getState().loadModules(activeConnectionId, undefined, { force: true }),
+      ])
+    } finally {
+      setCacheRefreshing(false)
+    }
+  }, [activeConnectionId, clearClusterInfo, clearFileSizes, clearSchemas, isLocal])
 
   return (
     <>
@@ -185,6 +208,15 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
               )}
             </div>
             <div className="p-2 flex flex-col gap-1">
+              {!isLocal && (
+                <button
+                  onClick={() => void handleRefreshClusterCaches()}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
+                >
+                  <RefreshCcw size={14} className={cacheRefreshing ? 'animate-spin' : ''} />
+                  Refresh cached cluster info
+                </button>
+              )}
               {!isLocal && (
                 <button
                   onClick={() => setLogOpen(true)}

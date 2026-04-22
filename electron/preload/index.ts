@@ -15,6 +15,10 @@ export interface ConnectionConfig {
   rememberPassword?: boolean
   generatedKeyPath?: string
   setupNote?: string
+  alias?: string
+  writeConfig?: boolean
+  controlPersistHours?: number
+  serverAliveIntervalSeconds?: number
   defaultDirectory?: string
 }
 
@@ -71,6 +75,10 @@ export interface SshKeySetupRequest {
   overwrite?: boolean
   addToAgent?: boolean
   addToKeychain?: boolean
+  alias?: string
+  writeConfig?: boolean
+  controlPersistHours?: number
+  serverAliveIntervalSeconds?: number
 }
 
 export interface SshKeySetupResult {
@@ -78,6 +86,8 @@ export interface SshKeySetupResult {
   publicKeyPath: string
   agentAdded: boolean
   keychainAdded: boolean
+  alias?: string
+  configPath?: string
   note?: string
 }
 
@@ -296,6 +306,8 @@ const api = {
       ipcRenderer.invoke('cluster:getLearnedResources', connectionId, toolId, options),
     resetLearnedResources: (connectionId: string, toolId: string) =>
       ipcRenderer.invoke('cluster:resetLearnedResources', connectionId, toolId),
+    clearCaches: (connectionId: string) =>
+      ipcRenderer.invoke('cluster:clearCaches', connectionId),
   },
   annovar: {
     status: (connectionId: string, humandbPath: string, buildver: string, databases: string[]): Promise<AnnovarStatusResult> =>

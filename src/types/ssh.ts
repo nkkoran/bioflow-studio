@@ -10,6 +10,10 @@ export interface ConnectionConfig {
   rememberPassword?: boolean
   generatedKeyPath?: string
   setupNote?: string
+  alias?: string
+  writeConfig?: boolean
+  controlPersistHours?: number
+  serverAliveIntervalSeconds?: number
   defaultDirectory?: string
 }
 
@@ -87,6 +91,10 @@ export interface SshKeySetupRequest {
   overwrite?: boolean
   addToAgent?: boolean
   addToKeychain?: boolean
+  alias?: string
+  writeConfig?: boolean
+  controlPersistHours?: number
+  serverAliveIntervalSeconds?: number
 }
 
 export interface SshKeySetupResult {
@@ -94,5 +102,7 @@ export interface SshKeySetupResult {
   publicKeyPath: string
   agentAdded: boolean
   keychainAdded: boolean
+  alias?: string
+  configPath?: string
   note?: string
 }

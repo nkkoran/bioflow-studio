@@ -19,6 +19,7 @@ import {
   useReactFlow,
   type Connection,
   type EdgeTypes,
+  type FinalConnectionState,
   type NodeTypes,
   type OnSelectionChangeParams,
 } from '@xyflow/react'
@@ -70,6 +71,7 @@ function CanvasInner() {
   const onNodesChange = usePipelineStore((s) => s.onNodesChange)
   const onEdgesChange = usePipelineStore((s) => s.onEdgesChange)
   const onConnect = usePipelineStore((s) => s.onConnect)
+  const reconnectEdge = usePipelineStore((s) => s.reconnectEdge)
   const addToolNode = usePipelineStore((s) => s.addToolNode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
   const addNoteNode = usePipelineStore((s) => s.addNoteNode)
@@ -85,6 +87,7 @@ function CanvasInner() {
   const createGroup = usePipelineStore((s) => s.createGroup)
   const updateGroup = usePipelineStore((s) => s.updateGroup)
   const deleteGroup = usePipelineStore((s) => s.deleteGroup)
+  const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const uploadsSubfolder = useSettingsStore((s) => s.settings.paths.uploadsSubfolder)
 
@@ -442,6 +445,20 @@ function CanvasInner() {
     [],
   )
 
+  const handleReconnect = useCallback((oldEdge: typeof edges[number], connection: Connection) => {
+    reconnectEdge(oldEdge.id, connection)
+  }, [reconnectEdge])
+
+  const handleReconnectEnd = useCallback((
+    _event: MouseEvent | TouchEvent,
+    edge: typeof edges[number],
+    _handleType: 'source' | 'target',
+    connectionState: FinalConnectionState,
+  ) => {
+    if (connectionState.isValid === true) return
+    deleteEdge(edge.id)
+  }, [deleteEdge])
+
   return (
     <div ref={wrapperRef} className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
       <ReactFlow
@@ -452,10 +469,13 @@ function CanvasInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onReconnect={handleReconnect}
+        onReconnectEnd={handleReconnectEnd}
         onSelectionChange={onSelectionChange}
         onNodeContextMenu={onNodeContextMenu}
         isValidConnection={isValidConnection}
         defaultEdgeOptions={defaultEdgeOptions}
+        edgesReconnectable
         proOptions={proOptions}
         fitView
         fitViewOptions={{ padding: 0.25, maxZoom: 1 }}

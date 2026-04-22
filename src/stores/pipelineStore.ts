@@ -6,7 +6,7 @@
  */
 import { create } from 'zustand'
 import type { Node, Edge, NodeChange, EdgeChange, Connection } from '@xyflow/react'
-import { applyNodeChanges, applyEdgeChanges, addEdge } from '@xyflow/react'
+import { applyNodeChanges, applyEdgeChanges, addEdge, reconnectEdge as reconnectFlowEdge } from '@xyflow/react'
 import type {
   BioflowNodeType,
   FileNodeData,
@@ -75,6 +75,7 @@ interface PipelineState {
   onNodesChange: (changes: NodeChange[]) => void
   onEdgesChange: (changes: EdgeChange[]) => void
   onConnect: (connection: Connection) => void
+  reconnectEdge: (edgeId: string, connection: Connection) => void
 
   addToolNode: (toolId: string, position: { x: number; y: number }) => string
   addFileNode: (position: { x: number; y: number }, data?: Partial<FileNodeData>) => string
@@ -159,6 +160,35 @@ function migrateToolNodeData(data: ToolNodeData): ToolNodeData {
   }
 }
 
+function migrateFileNodeData(data: FileNodeData): FileNodeData {
+  if (!data.split) return data
+  return {
+    ...data,
+    split: {
+      ...data.split,
+      axis: data.split.axis || 'item',
+      pattern: data.split.pattern ?? (data.split.glob ? { kind: 'brace', template: data.split.glob } : { kind: 'manual' }),
+    },
+  }
+}
+
+function migrateMergeNodeData(data: MergeNodeData): MergeNodeData {
+  return {
+    ...data,
+    convergeMode: data.convergeMode ?? 'axed-fan-in',
+  }
+}
+
+function migrateTransformNodeData(data: TransformNodeData): TransformNodeData {
+  return {
+    ...data,
+    filters: (data.filters ?? []).map((filter, index) => ({
+      ...filter,
+      join: index === 0 ? 'and' : (filter.join ?? 'and'),
+    })),
+  }
+}
+
 function executionDefaults(): Pick<PipelineState, 'arrayChainMode' | 'fileLifecyclePolicy'> {
   const settings = useSettingsStore.getState().settings
   return {
@@ -231,6 +261,18 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       ...pushHistory(state),
       dirty: true,
     }))
+  },
+
+  reconnectEdge: (edgeId, connection) => {
+    set((state) => {
+      const current = state.edges.find((edge) => edge.id === edgeId)
+      if (!current) return state
+      return {
+        edges: reconnectFlowEdge(current, { ...connection, animated: false }, state.edges),
+        ...pushHistory(state),
+        dirty: true,
+      }
+    })
   },
 
   addToolNode: (toolId, position) => {
@@ -601,9 +643,17 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       id: n.id,
       type: n.type,
       position: n.position,
-      data: (n.type === 'tool'
-        ? migrateToolNodeData(n.data as ToolNodeData)
-        : n.data) as BioflowNode['data'],
+      data: (
+        n.type === 'tool'
+          ? migrateToolNodeData(n.data as ToolNodeData)
+          : n.type === 'file'
+            ? migrateFileNodeData(n.data as FileNodeData)
+            : n.type === 'merge'
+              ? migrateMergeNodeData(n.data as MergeNodeData)
+              : n.type === 'transform'
+                ? migrateTransformNodeData(n.data as TransformNodeData)
+                : n.data
+      ) as BioflowNode['data'],
     }))
     set((state) => {
       // Stash the outgoing pipeline's history, then restore the incoming one's

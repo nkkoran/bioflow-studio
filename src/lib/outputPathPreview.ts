@@ -1,6 +1,7 @@
 import type { FileNodeData, FileType, PipelineSnapshot, ToolNodeData, TransformNodeData } from '@/types/pipeline'
 import type { PathSettings } from '@/stores/settingsStore'
 import { getTool } from '@/lib/toolRegistry'
+import { joinRemotePath, pathBasename, pathDirname, trimTrailingSlash } from '@/lib/remotePath'
 
 export function computeNodeOutputPreview(
   nodeId: string,
@@ -12,27 +13,29 @@ export function computeNodeOutputPreview(
   const slug = buildNodeSlugs(snapshot).get(nodeId) ?? nodeId
   const runDir = pathSettings.runFolderTemplate || 'runs/{pipelineSlug}-{timestamp}'
   const outputRoot = pathSettings.createSubfolders
-    ? `${runDir.replace(/\/+$/, '')}/${cleanSegment(pathSettings.outputsSubfolder || 'outputs')}`
-    : runDir.replace(/\/+$/, '')
-  const outputDir = `${outputRoot}/${slug}`
+    ? joinRemotePath(trimTrailingSlash(runDir), cleanSegment(pathSettings.outputsSubfolder || 'outputs'))
+    : trimTrailingSlash(runDir)
 
   if (node.type === 'tool') {
     const data = node.data as ToolNodeData
     const tool = getTool(data.toolId)
     const port = tool?.outputs[0]
     if (!port) return null
+    const outputDir = previewOutputDir(data.outputDirOverride, outputRoot, slug)
     const sink = connectedOutputSink(snapshot, nodeId, port.id)
     return sink ? sinkPath(sink, outputDir, defaultOutputPath(outputDir, slug, port.id, port.fileType)) : defaultOutputPath(outputDir, slug, port.id, port.fileType)
   }
 
   if (node.type === 'transform') {
     const data = node.data as TransformNodeData
+    const outputDir = previewOutputDir(data.outputDirOverride, outputRoot, slug)
     const sink = connectedOutputSink(snapshot, nodeId, 'output')
     const fallback = defaultOutputPath(outputDir, slug, 'output', data.fileType)
     return sink ? sinkPath(sink, outputDir, fallback) : fallback
   }
 
   if (node.type === 'merge') {
+    const outputDir = previewOutputDir((node.data as { outputDirOverride?: string }).outputDirOverride, outputRoot, slug)
     const sink = connectedOutputSink(snapshot, nodeId, 'output')
     const fallback = `${outputDir}/${slug}.output`
     return sink ? sinkPath(sink, outputDir, fallback) : fallback
@@ -50,7 +53,7 @@ export function computeFileOutputPreview(
   if (!node || node.type !== 'file') return null
   const data = node.data as FileNodeData
   if (data.isInput) return null
-  if (data.outputDir && data.outputFilename) return `${data.outputDir.replace(/\/+$/, '')}/${data.outputFilename}`
+  if (data.outputDir && data.outputFilename) return joinRemotePath(trimTrailingSlash(data.outputDir), data.outputFilename)
   if (data.path) return data.path
   const edge = snapshot.edges.find((candidate) => candidate.target === nodeId)
   if (!edge) return null
@@ -58,7 +61,7 @@ export function computeFileOutputPreview(
 }
 
 function defaultOutputPath(outputDir: string, slug: string, portId: string, fileType: FileType): string {
-  return `${outputDir}/${slug}.${portId}${extForFileType(fileType)}`
+  return joinRemotePath(outputDir, `${slug}.${portId}${extForFileType(fileType)}`)
 }
 
 function connectedOutputSink(snapshot: PipelineSnapshot, nodeId: string, portId: string): FileNodeData | null {
@@ -72,25 +75,17 @@ function connectedOutputSink(snapshot: PipelineSnapshot, nodeId: string, portId:
 
 function sinkPath(sink: FileNodeData, fallbackDir: string, fallbackPath: string): string {
   const filename = sink.outputFilename?.trim() || pathBasename(sink.path) || pathBasename(fallbackPath)
-  const folder = (sink.outputDir?.trim() || pathDirname(sink.path) || fallbackDir).replace(/\/+$/, '')
-  return `${folder}/${filename}`
+  const folder = trimTrailingSlash(sink.outputDir?.trim() || pathDirname(sink.path) || fallbackDir)
+  return joinRemotePath(folder, filename)
+}
+
+function previewOutputDir(override: string | undefined, outputRoot: string, slug: string): string {
+  if (override?.trim()) return joinRemotePath(trimTrailingSlash(override.trim()), slug)
+  return joinRemotePath(outputRoot, slug)
 }
 
 function cleanSegment(value: string): string {
   return value.trim().replace(/^\/+|\/+$/g, '') || 'outputs'
-}
-
-function pathDirname(path: string | undefined): string {
-  if (!path) return ''
-  const idx = path.lastIndexOf('/')
-  if (idx <= 0) return ''
-  return path.slice(0, idx)
-}
-
-function pathBasename(path: string | undefined): string {
-  if (!path) return ''
-  const idx = path.lastIndexOf('/')
-  return idx === -1 ? path : path.slice(idx + 1)
 }
 
 function extForFileType(ft: FileType): string {

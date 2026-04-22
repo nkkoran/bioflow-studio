@@ -467,6 +467,10 @@ function ParamLabel({ param }: { param: ToolParam }) {
   )
 }
 
+function toolParamSection(param: ToolParam): 'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime' {
+  return param.section ?? 'Analysis'
+}
+
 /**
  * Folder picker. Renders a text input + "Browse…" button that opens the
  * FileExplorer directory-pick banner and writes the chosen path back via
@@ -618,6 +622,7 @@ function ToolInputRow({
   connections: PipelineSnapshot['edges']
   snapshot: PipelineSnapshot
 }) {
+  const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const missingRequired = port.required && connections.length === 0
 
   return (
@@ -644,13 +649,23 @@ function ToolInputRow({
           if (!source) return null
           const detail = inputConnectionDetail(source, edge.sourceHandle ?? 'output')
           return (
-            <div key={edge.id} className="min-w-0 text-text-secondary">
-              <span className="text-success">Connected</span>
-              {' to '}
-              <span className="text-text-primary" title={inspectorNodeLabel(source)}>
-                <MiddleEllipsis value={inspectorNodeLabel(source)} max={28} />
-              </span>
-              <span className="text-text-muted" title={detail}> · <MiddleEllipsis value={detail} max={54} /></span>
+            <div key={edge.id} className="flex items-start justify-between gap-2 text-text-secondary">
+              <div className="min-w-0">
+                <span className="text-success">Connected</span>
+                {' to '}
+                <span className="text-text-primary" title={inspectorNodeLabel(source)}>
+                  <MiddleEllipsis value={inspectorNodeLabel(source)} max={28} />
+                </span>
+                <span className="text-text-muted" title={detail}> · <MiddleEllipsis value={detail} max={54} /></span>
+              </div>
+              <button
+                type="button"
+                onClick={() => deleteEdge(edge.id)}
+                className="shrink-0 rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-primary"
+                title="Disconnect"
+              >
+                Disconnect
+              </button>
             </div>
           )
         })}
@@ -666,6 +681,7 @@ function ToolOutputRow({
   data,
   updateNodeData,
   showMergeBehavior,
+  snapshot,
 }: {
   port: ToolPort
   consumers: PipelineSnapshot['edges']
@@ -673,7 +689,9 @@ function ToolOutputRow({
   data: ToolNodeData
   updateNodeData: (nodeId: string, patch: Partial<ToolNodeData>) => void
   showMergeBehavior: boolean
+  snapshot: PipelineSnapshot
 }) {
+  const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const mergeConfig = data.outputMerge?.[port.id]
   const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
   const intermediate = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
@@ -691,6 +709,33 @@ function ToolOutputRow({
           ? `${consumers.length} downstream connection${consumers.length === 1 ? '' : 's'}`
           : 'Not connected downstream; the file is still written when the node runs.'}
       </div>
+      {consumers.length > 0 && (
+        <div className="mt-1.5 flex flex-col gap-1">
+          {consumers.map((edge) => {
+            const target = snapshot.nodes.find((node) => node.id === edge.target)
+            if (!target) return null
+            return (
+              <div key={edge.id} className="flex items-start justify-between gap-2 text-[11px] text-text-secondary">
+                <div className="min-w-0">
+                  Downstream:
+                  {' '}
+                  <span className="text-text-primary" title={inspectorNodeLabel(target)}>
+                    <MiddleEllipsis value={inspectorNodeLabel(target)} max={32} />
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => deleteEdge(edge.id)}
+                  className="shrink-0 rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-primary"
+                  title="Disconnect"
+                >
+                  Disconnect
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {showMergeBehavior && (
           <div className="flex items-center gap-1">
@@ -1282,6 +1327,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     : tool.params
   const commonParams = visibleParams.filter((param) => !param.advanced)
   const advancedParams = visibleParams.filter((param) => param.advanced)
+  const paramSections: Array<'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime'> = ['Inputs', 'Analysis', 'Filters', 'Output', 'Runtime']
   const applyEstimate = () => {
     if (!estimate) return
     updateNodeData(nodeId, {
@@ -1319,6 +1365,15 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           {tool.module && <div>Module: <span className="font-mono text-text-secondary">{tool.module}</span></div>}
         </div>
         <p className="text-xs text-text-muted mt-2">{tool.description}</p>
+        {tool.docUrl && (
+          <button
+            type="button"
+            className="mt-2 text-[11px] text-accent underline"
+            onClick={() => window.open(tool.docUrl!, '_blank', 'noopener,noreferrer')}
+          >
+            Open official docs
+          </button>
+        )}
       </div>
 
       <div>
@@ -1402,6 +1457,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               data={data}
               updateNodeData={updateNodeData}
               showMergeBehavior={axedInputPorts.length > 0}
+              snapshot={snapshot}
             />
           ))}
           {tool.outputs.length === 0 && (
@@ -1432,42 +1488,53 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           />
         ) : (
           <div className="flex flex-col gap-2">
-            {commonParams.map((p) => {
-              const schema = p.columnRef
-                ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                : null
-              const inputPath = p.columnRef
-                ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                : null
-              return tool.id === 'custom.shell' && p.name === 'script'
-                ? (
-                    <ShellScriptField
-                      key={p.name}
-                      value={data.paramValues[p.name]}
-                      onChange={(v) => setParam(p.name, v)}
-                    />
-                  )
-                : p.columnRef
-                  ? (
-                      <ColumnParamField
-                        key={p.name}
-                        param={p}
-                        value={data.paramValues[p.name]}
-                        columns={schema?.columns ?? []}
-                        loading={Boolean(inputPath && !schema)}
-                        refreshing={refreshingSchemaPath === inputPath}
-                        onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                        onChange={(v) => setParam(p.name, v)}
-                      />
-                    )
-                : (
-                    <ParamField
-                      key={p.name}
-                      param={p}
-                      value={data.paramValues[p.name]}
-                      onChange={(v) => setParam(p.name, v)}
-                    />
-                  )
+            {paramSections.map((section) => {
+              const sectionParams = commonParams.filter((param) => toolParamSection(param) === section)
+              if (sectionParams.length === 0) return null
+              return (
+                <div key={section} className="rounded-md border border-border bg-bg-tertiary/40 p-2">
+                  <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">{section}</div>
+                  <div className="flex flex-col gap-2">
+                    {sectionParams.map((p) => {
+                      const schema = p.columnRef
+                        ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                        : null
+                      const inputPath = p.columnRef
+                        ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                        : null
+                      return tool.id === 'custom.shell' && p.name === 'script'
+                        ? (
+                            <ShellScriptField
+                              key={p.name}
+                              value={data.paramValues[p.name]}
+                              onChange={(v) => setParam(p.name, v)}
+                            />
+                          )
+                        : p.columnRef
+                          ? (
+                              <ColumnParamField
+                                key={p.name}
+                                param={p}
+                                value={data.paramValues[p.name]}
+                                columns={schema?.columns ?? []}
+                                loading={Boolean(inputPath && !schema)}
+                                refreshing={refreshingSchemaPath === inputPath}
+                                onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                                onChange={(v) => setParam(p.name, v)}
+                              />
+                            )
+                          : (
+                              <ParamField
+                                key={p.name}
+                                param={p}
+                                value={data.paramValues[p.name]}
+                                onChange={(v) => setParam(p.name, v)}
+                              />
+                            )
+                    })}
+                  </div>
+                </div>
+              )
             })}
             {advancedParams.length > 0 && (
               <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
@@ -1482,34 +1549,43 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                 </button>
                 {advancedExpanded && (
                   <div className="flex flex-col gap-2 border-t border-border p-2">
-                    {advancedParams.map((p) => {
-                      const schema = p.columnRef
-                        ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                        : null
-                      const inputPath = p.columnRef
-                        ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                        : null
-                      return p.columnRef
-                        ? (
-                            <ColumnParamField
-                              key={p.name}
-                              param={p}
-                              value={data.paramValues[p.name]}
-                              columns={schema?.columns ?? []}
-                              loading={Boolean(inputPath && !schema)}
-                              refreshing={refreshingSchemaPath === inputPath}
-                              onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                              onChange={(v) => setParam(p.name, v)}
-                            />
-                          )
-                        : (
-                            <ParamField
-                              key={p.name}
-                              param={p}
-                              value={data.paramValues[p.name]}
-                              onChange={(v) => setParam(p.name, v)}
-                            />
-                          )
+                    {paramSections.map((section) => {
+                      const sectionParams = advancedParams.filter((param) => toolParamSection(param) === section)
+                      if (sectionParams.length === 0) return null
+                      return (
+                        <div key={section} className="flex flex-col gap-2">
+                          <div className="text-[10px] uppercase tracking-wide text-text-muted">{section}</div>
+                          {sectionParams.map((p) => {
+                            const schema = p.columnRef
+                              ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
+                              : null
+                            const inputPath = p.columnRef
+                              ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
+                              : null
+                            return p.columnRef
+                              ? (
+                                  <ColumnParamField
+                                    key={p.name}
+                                    param={p}
+                                    value={data.paramValues[p.name]}
+                                    columns={schema?.columns ?? []}
+                                    loading={Boolean(inputPath && !schema)}
+                                    refreshing={refreshingSchemaPath === inputPath}
+                                    onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
+                                    onChange={(v) => setParam(p.name, v)}
+                                  />
+                                )
+                              : (
+                                  <ParamField
+                                    key={p.name}
+                                    param={p}
+                                    value={data.paramValues[p.name]}
+                                    onChange={(v) => setParam(p.name, v)}
+                                  />
+                                )
+                          })}
+                        </div>
+                      )
                     })}
                   </div>
                 )}

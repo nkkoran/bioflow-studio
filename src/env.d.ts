@@ -108,6 +108,7 @@ interface Window {
       listModules: (connectionId: string, query?: string, options?: { force?: boolean }) => Promise<import('./types/ssh').ClusterModulesResult>
       getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) => Promise<import('./types/ssh').LearnedResourceSummary | null>
       resetLearnedResources: (connectionId: string, toolId: string) => Promise<void>
+      clearCaches: (connectionId: string) => Promise<{ ok: boolean }>
     }
     annovar: {
       status: (connectionId: string, humandbPath: string, buildver: string, databases: string[]) => Promise<import('./types/annotation').AnnovarStatusResult>

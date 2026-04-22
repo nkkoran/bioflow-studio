@@ -66,32 +66,20 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
     }
   }, [filePath, rows.length])
 
-  const filteredRows = useMemo(() => {
-    let next = filters.length > 0
-      ? rows.filter((row) => rowMatchesFilters(row, headers, filters))
-      : rows
-    if (sort) {
-      const idx = headers.indexOf(sort.column)
-      if (idx >= 0) {
-        next = [...next].sort((a, b) => {
-          const av = a[idx] ?? ''
-          const bv = b[idx] ?? ''
-          const an = Number(av)
-          const bn = Number(bv)
-          const cmp = !Number.isNaN(an) && !Number.isNaN(bn)
-            ? an - bn
-            : av.localeCompare(bv, undefined, { numeric: true })
-          return sort.dir === 'asc' ? cmp : -cmp
-        })
-      }
-    }
-    return next
-  }, [filters, headers, rows, sort])
-  const removedRows = rows.length - filteredRows.length
+  const appliedRows = useMemo(
+    () => filterAndSortRows(rows, headers, filters, sort),
+    [filters, headers, rows, sort],
+  )
+  const draftPreviewRows = useMemo(
+    () => filterAndSortRows(rows, headers, draftFilters, sort),
+    [draftFilters, headers, rows, sort],
+  )
+  const displayedRows = hasDraftChanges ? draftPreviewRows : appliedRows
+  const removedRows = rows.length - displayedRows.length
 
   const summaryRows = useMemo(
-    () => filteredRows.length > SUMMARY_SAMPLE_ROWS ? filteredRows.slice(0, SUMMARY_SAMPLE_ROWS) : filteredRows,
-    [filteredRows],
+    () => displayedRows.length > SUMMARY_SAMPLE_ROWS ? displayedRows.slice(0, SUMMARY_SAMPLE_ROWS) : displayedRows,
+    [displayedRows],
   )
 
   const columnSummaries = useMemo(() => new Map(
@@ -152,7 +140,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
   )
 
   const table = useReactTable({
-    data: filteredRows,
+    data: displayedRows,
     columns,
     getCoreRowModel: getCoreRowModel(),
   })
@@ -203,23 +191,27 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
             Revert draft
           </button>
           <button
-            onClick={() => onExportFilteredFile?.(filteredRows)}
-            disabled={filteredRows.length === 0}
+            onClick={() => onExportFilteredFile?.(appliedRows)}
+            disabled={appliedRows.length === 0 || hasDraftChanges}
             className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasDraftChanges ? 'Apply the draft filters first, then export the applied result.' : undefined}
           >
             Export as file
           </button>
           <button
             onClick={() => onAddFilteredToPipeline?.()}
-            disabled={filters.length === 0}
+            disabled={filters.length === 0 || hasDraftChanges}
             className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasDraftChanges ? 'Apply the draft filters first, then add the applied result to the pipeline.' : undefined}
           >
             Add to pipeline
           </button>
-          {hasDraftChanges && <span>Unapplied changes</span>}
+          {hasDraftChanges && <span>Previewing draft filters</span>}
         </div>
         <div className="rounded-md border border-border bg-bg-primary/60 px-2 py-1 text-[11px] text-text-muted">
-          Rows: {rows.length} original · {removedRows} removed · {filteredRows.length} remaining
+          {hasDraftChanges
+            ? `Rows: ${displayedRows.length} in draft preview · ${appliedRows.length} applied · ${rows.length} original`
+            : `Rows: ${rows.length} original · ${removedRows} removed · ${displayedRows.length} remaining`}
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -236,7 +228,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
             }}
             className="h-7 rounded-md border border-accent/40 bg-accent/10 px-2 text-[11px] text-accent"
           >
-            Apply expression
+            Set draft
           </button>
         </div>
 
@@ -402,11 +394,37 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
 
       <div className="shrink-0 border-t border-border bg-bg-secondary px-3 py-1.5">
         <span className="text-xs text-text-muted">
-          Showing {filteredRows.length} of {rows.length} rows · {visibleIndexes.length} of {headers.length} columns
+          {hasDraftChanges
+            ? `Showing ${displayedRows.length} preview rows (${appliedRows.length} applied) · ${visibleIndexes.length} of ${headers.length} columns`
+            : `Showing ${displayedRows.length} of ${rows.length} rows · ${visibleIndexes.length} of ${headers.length} columns`}
         </span>
       </div>
     </div>
   )
+}
+
+function filterAndSortRows(
+  rows: string[][],
+  headers: string[],
+  filters: TransformFilterRule[],
+  sort: { column: string; dir: 'asc' | 'desc' } | undefined,
+): string[][] {
+  let next = filters.length > 0
+    ? rows.filter((row) => rowMatchesFilters(row, headers, filters))
+    : rows
+  if (!sort) return next
+  const idx = headers.indexOf(sort.column)
+  if (idx < 0) return next
+  return [...next].sort((a, b) => {
+    const av = a[idx] ?? ''
+    const bv = b[idx] ?? ''
+    const an = Number(av)
+    const bn = Number(bv)
+    const cmp = !Number.isNaN(an) && !Number.isNaN(bn)
+      ? an - bn
+      : av.localeCompare(bv, undefined, { numeric: true })
+    return sort.dir === 'asc' ? cmp : -cmp
+  })
 }
 
 const FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
@@ -619,8 +637,7 @@ export function rowMatchesFilters(row: string[], headers: string[], rules: Trans
 
 export function rowMatchesRule(row: string[], headers: string[], rule: TransformFilterRule): boolean {
   const idx = headers.indexOf(rule.column)
-  if (idx < 0) return true
-  const raw = String(row[idx] ?? '')
+  const raw = idx < 0 ? '' : String(row[idx] ?? '')
   const value = String(rule.value ?? '')
   switch (rule.op) {
     case 'contains':

@@ -84,6 +84,7 @@ export class PipelineRunner {
   private cancelledLoginNodes = new Set<string>()
   private homeCache = new Map<string, string>()
   private afterCorrSupport = new Map<string, boolean>()
+  private shellCapabilities = new Map<string, { awk: boolean }>()
 
   private constructor() {
     this.loadPersistedRuns()
@@ -93,6 +94,12 @@ export class PipelineRunner {
   private get ssh() { return SshManager.getInstance() }
   private get sftp() { return SftpPool.getInstance() }
   private get tracker() { return JobTracker.getInstance(this.ssh) }
+
+  clearConnectionCache(connectionId: string): void {
+    this.homeCache.delete(connectionId)
+    this.afterCorrSupport.delete(connectionId)
+    this.shellCapabilities.delete(connectionId)
+  }
 
   async start(opts: StartOptions): Promise<{ runId: string }> {
     const { connectionId, snapshot } = opts
@@ -1356,10 +1363,31 @@ export class PipelineRunner {
         annovarDbPath: str('settings:annovarDbPath'),
         vepPath: str('settings:vepPath'),
         vepCachePath: str('settings:vepCachePath'),
+        shellCapabilities: await this.loadShellCapabilities(connectionId),
       }
     } catch (err) {
       console.error('[PipelineRunner] loadConnectionDefaults failed:', err)
       return { modulePreamble: MODULE_PREAMBLE }
+    }
+  }
+
+  private async loadShellCapabilities(connectionId: string): Promise<{ awk: boolean }> {
+    const cached = this.shellCapabilities.get(connectionId)
+    if (cached) return cached
+
+    try {
+      const { stdout, exitCode } = await this.ssh.exec(
+        connectionId,
+        'command -v awk >/dev/null 2>&1 && printf yes || printf no',
+      )
+      const capabilities = { awk: exitCode === 0 && stdout.trim() === 'yes' }
+      this.shellCapabilities.set(connectionId, capabilities)
+      return capabilities
+    } catch (err) {
+      console.warn('[PipelineRunner] shell capability probe failed:', err)
+      const capabilities = { awk: false }
+      this.shellCapabilities.set(connectionId, capabilities)
+      return capabilities
     }
   }
 

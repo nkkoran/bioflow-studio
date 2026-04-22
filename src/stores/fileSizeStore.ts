@@ -11,6 +11,7 @@ interface CachedSize {
 interface FileSizeState {
   sizes: Record<string, CachedSize>
   getSize: (connectionId: string, path: string) => Promise<number>
+  clear: (connectionId?: string) => void
   pruneConnections: (liveConnectionIds: string[]) => void
 }
 
@@ -39,6 +40,16 @@ export const useFileSizeStore = create<FileSizeState>((set, get) => ({
       return 0
     }
   },
+
+  clear: (connectionId) =>
+    set((state) => {
+      if (!connectionId) return { sizes: {} }
+      return {
+        sizes: Object.fromEntries(
+          Object.entries(state.sizes).filter(([key]) => !key.startsWith(`${connectionId}:`)),
+        ),
+      }
+    }),
 
   pruneConnections: (liveConnectionIds) => {
     const live = new Set([LOCAL_CONNECTION_ID, ...liveConnectionIds])

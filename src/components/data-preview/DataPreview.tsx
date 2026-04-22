@@ -11,7 +11,7 @@ import { RawTextView } from './RawTextView'
 import { SavedViewsMenu } from './SavedViewsMenu'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
-import { pathBasename, pathDirname } from '@/lib/utils'
+import { joinRemotePath, pathBasename, pathDirname } from '@/lib/remotePath'
 
 export function DataPreview() {
   const {
@@ -189,7 +189,7 @@ export function DataPreview() {
       {
         isInput: false,
         label: `${pathBasename(activeTab.filePath)} filtered`,
-        path: `${pathDirname(activeTab.filePath)}/${outputFilename}`,
+        path: joinRemotePath(pathDirname(activeTab.filePath), outputFilename),
         outputFilename,
         outputDir: pathDirname(activeTab.filePath),
         fileType: 'tsv',
@@ -202,7 +202,7 @@ export function DataPreview() {
   const exportFilteredFile = async (filteredRows: string[][]) => {
     if (!activeTab || !activeConnectionId) return
     const outputFilename = `${pathBasename(activeTab.filePath).replace(/(\.[^.]+)?$/, '')}.filtered.tsv`
-    const outputPath = `${pathDirname(activeTab.filePath)}/${outputFilename}`
+    const outputPath = joinRemotePath(pathDirname(activeTab.filePath), outputFilename)
     const content = [
       activeTab.data?.headers.join('\t') ?? '',
       ...filteredRows.map((row) => row.join('\t')),

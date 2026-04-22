@@ -12,6 +12,7 @@ interface ClusterInfoState {
   errorByConnection: Record<string, string | undefined>
   loadAccounts: (connectionId: string, options?: { force?: boolean }) => Promise<ClusterAccountsResult>
   loadModules: (connectionId: string, query?: string, options?: { force?: boolean }) => Promise<ClusterModulesResult>
+  clearConnection: (connectionId?: string) => void
 }
 
 export const useClusterInfoStore = create<ClusterInfoState>((set, get) => ({
@@ -86,4 +87,29 @@ export const useClusterInfoStore = create<ClusterInfoState>((set, get) => ({
       throw err
     }
   },
+
+  clearConnection: (connectionId) =>
+    set((state) => {
+      if (!connectionId) {
+        return {
+          accountsByConnection: {},
+          modulesByConnection: {},
+          loadingAccounts: {},
+          loadingModules: {},
+          errorByConnection: {},
+        }
+      }
+      const { [connectionId]: _accounts, ...accountsByConnection } = state.accountsByConnection
+      const { [connectionId]: _modules, ...modulesByConnection } = state.modulesByConnection
+      const { [connectionId]: _loadingAccounts, ...loadingAccounts } = state.loadingAccounts
+      const { [connectionId]: _loadingModules, ...loadingModules } = state.loadingModules
+      const { [connectionId]: _error, ...errorByConnection } = state.errorByConnection
+      return {
+        accountsByConnection,
+        modulesByConnection,
+        loadingAccounts,
+        loadingModules,
+        errorByConnection,
+      }
+    }),
 }))

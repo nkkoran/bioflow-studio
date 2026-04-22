@@ -10,6 +10,7 @@ function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
     host: config.host.trim(),
     username: config.username.trim(),
     privateKeyPath: config.privateKeyPath?.trim(),
+    alias: config.alias?.trim(),
     defaultDirectory: config.defaultDirectory?.trim(),
   }
 }
