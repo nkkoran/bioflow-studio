@@ -29,10 +29,20 @@ async function listDirectory(path: string): Promise<RemoteFileEntry[]> {
   const { activeConnectionId } = useConnectionStore.getState()
   if (!activeConnectionId) throw new Error('Not connected')
 
+  const request = activeConnectionId === LOCAL_CONNECTION_ID
+    ? window.api.local.ls(path)
+    : window.api.sftp.ls(activeConnectionId, path)
+
+  const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
+    window.setTimeout(() => {
+      reject(new Error('Directory listing timed out. Please retry.'))
+    }, 15000)
+  })
+
   if (activeConnectionId === LOCAL_CONNECTION_ID) {
-    return window.api.local.ls(path)
+    return Promise.race([request, timeout])
   } else {
-    return window.api.sftp.ls(activeConnectionId, path)
+    return Promise.race([request, timeout])
   }
 }
 

@@ -376,24 +376,26 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
               </button>
             ))}
           </div>
-          <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
-            <div className="min-w-0">
-              <div className="font-medium text-text-primary">Auto-setup SSH key</div>
-              <div>Generate an ed25519 key, install it on the host, and switch this connection to key auth.</div>
+          {!form.privateKeyPath.trim() && (
+            <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
+              <div className="min-w-0">
+                <div className="font-medium text-text-primary">Auto-setup SSH key</div>
+                <div>Generate an ed25519 key, install it on the host, and switch this connection to key auth.</div>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={!setupReady || setupRunning}
+                onClick={() => {
+                  setSetupMessage(null)
+                  setSetupOpen(true)
+                }}
+                icon={<Sparkles size={12} />}
+              >
+                Auto-setup key
+              </Button>
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={!setupReady || setupRunning}
-              onClick={() => {
-                setSetupMessage(null)
-                setSetupOpen(true)
-              }}
-              icon={<Sparkles size={12} />}
-            >
-              Auto-setup key
-            </Button>
-          </div>
+          )}
         </div>
 
         {/* SSH Key fields */}

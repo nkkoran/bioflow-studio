@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import type { DelimiterOverride } from '@/stores/dataPreviewStore'
 import { headPreviewFile, readFileBase64, statFile } from '@/stores/fileStore'
 import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
@@ -40,6 +41,7 @@ export function DataPreview() {
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
 
   useEffect(() => {
     if (!savedViewsLoaded) void loadSavedViews()
@@ -161,7 +163,7 @@ export function DataPreview() {
   const selectedSavedViewId = activeTab ? activeSavedViewId[activeTab.filePath] : undefined
   const activeFilters = activeTab ? (filters[activeTab.filePath] ?? []) : []
 
-  const exportFiltered = () => {
+  const addFilteredToPipeline = () => {
     if (!activeTab || activeFilters.length === 0) return
     const offset = nodes.length * 16
     const inputId = addFileNode(
@@ -195,6 +197,22 @@ export function DataPreview() {
     )
     onConnect({ source: inputId, sourceHandle: 'output', target: transformId, targetHandle: 'input' })
     onConnect({ source: transformId, sourceHandle: 'output', target: outputId, targetHandle: 'input' })
+  }
+
+  const exportFilteredFile = async (filteredRows: string[][]) => {
+    if (!activeTab || !activeConnectionId) return
+    const outputFilename = `${pathBasename(activeTab.filePath).replace(/(\.[^.]+)?$/, '')}.filtered.tsv`
+    const outputPath = `${pathDirname(activeTab.filePath)}/${outputFilename}`
+    const content = [
+      activeTab.data?.headers.join('\t') ?? '',
+      ...filteredRows.map((row) => row.join('\t')),
+    ].join('\n')
+    if (activeConnectionId === LOCAL_CONNECTION_ID) {
+      await window.api.local.write(outputPath, content)
+    } else {
+      await window.api.sftp.write(activeConnectionId, outputPath, content)
+    }
+    window.alert(`Saved filtered file to ${outputPath}`)
   }
 
   return (
@@ -298,7 +316,8 @@ export function DataPreview() {
             filePath={activeTab.filePath}
             headers={activeTab.data.headers}
             rows={activeTab.data.rows}
-            onExportFiltered={exportFiltered}
+            onAddFilteredToPipeline={addFilteredToPipeline}
+            onExportFilteredFile={(nextRows) => void exportFilteredFile(nextRows)}
           />
         )}
 

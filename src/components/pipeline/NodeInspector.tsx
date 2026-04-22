@@ -725,7 +725,7 @@ function ToolOutputRow({
             })}
             className="accent-accent"
           />
-          Intermediate output
+          Delete after success (temporary file)
         </label>
       </div>
     </div>
@@ -960,42 +960,44 @@ function AnnotationConfigPanel({
                   </span>
                 ))}
               </div>
-              <div className="mt-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
-                  onClick={async () => {
-                    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
-                    setRunning(true)
-                    setMessage('Saving the humandb path and installing missing ANNOVAR databases...')
-                    try {
-                      await setSetting('settings:annovarDbPath', dbPath)
-                      if (toolPath.trim()) await setSetting('settings:annovarScriptsPath', toolPath)
-                      if (pendingAnnovarDatabases.length === 0) {
-                        setMessage('Saved the humandb path. All selected ANNOVAR databases are already installed.')
-                        return
-                      }
-                      await window.api.annovar.install({
-                        connectionId: activeConnectionId,
-                        scriptsPath: toolPath,
-                        humandbPath: dbPath,
-                        buildver: build,
-                        databases: pendingAnnovarDatabases,
-                      })
-                      const refreshed = await window.api.annovar.status(activeConnectionId, dbPath, build, annovarDbNames(featureIds))
-                      setAnnovarStatus(refreshed)
-                      setMessage('Saved the humandb path and finished installing the missing ANNOVAR databases.')
-                    } catch (err: any) {
-                      setMessage(err?.message ?? String(err))
-                    } finally {
-                      setRunning(false)
+            </div>
+          )}
+          {isAnnovar && (
+            <div className="mt-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
+                onClick={async () => {
+                  if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+                  setRunning(true)
+                  setMessage('Saving the humandb path and downloading missing ANNOVAR databases...')
+                  try {
+                    await setSetting('settings:annovarDbPath', dbPath)
+                    if (toolPath.trim()) await setSetting('settings:annovarScriptsPath', toolPath)
+                    if (pendingAnnovarDatabases.length === 0) {
+                      setMessage('Saved the humandb path. All selected ANNOVAR databases are already installed.')
+                      return
                     }
-                  }}
-                >
-                  Set humandb + install missing DBs ({(annovarStatus?.totalDownloadSizeGB ?? 0).toFixed(1)} GB)
-                </Button>
-              </div>
+                    await window.api.annovar.install({
+                      connectionId: activeConnectionId,
+                      scriptsPath: toolPath,
+                      humandbPath: dbPath,
+                      buildver: build,
+                      databases: pendingAnnovarDatabases,
+                    })
+                    const refreshed = await window.api.annovar.status(activeConnectionId, dbPath, build, annovarDbNames(featureIds))
+                    setAnnovarStatus(refreshed)
+                    setMessage('Saved the humandb path and finished downloading missing ANNOVAR databases.')
+                  } catch (err: any) {
+                    setMessage(err?.message ?? String(err))
+                  } finally {
+                    setRunning(false)
+                  }
+                }}
+              >
+                Download selected DBs ({(annovarStatus?.totalDownloadSizeGB ?? 0).toFixed(1)} GB)
+              </Button>
             </div>
           )}
         </div>
@@ -2996,7 +2998,7 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
             onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
             className="accent-accent"
           />
-          Mark merged output as intermediate
+          Delete merged output after success (temporary file)
         </label>
       </div>
 
@@ -3322,7 +3324,7 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
             className="accent-accent"
           />
-          Mark filtered output as intermediate
+          Delete filtered output after success (temporary file)
         </label>
       </div>
 
