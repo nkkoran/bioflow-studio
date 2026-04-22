@@ -15,6 +15,7 @@ import { useFileStore } from '@/stores/fileStore'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
+import { usePipelineStore } from '@/stores/pipelineStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { classifyPreview } from '@/lib/filePreviewClassifier'
@@ -60,12 +61,14 @@ export function FileExplorer() {
   const resolveFilePick = useUIStore((s) => s.resolveFilePick)
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
+  const addFileNode = usePipelineStore((s) => s.addFileNode)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
   const [sortDropdownOpen, setSortDropdownOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadMessage, setUploadMessage] = useState<string | null>(null)
+  const [uploadPickerOpen, setUploadPickerOpen] = useState(false)
 
   // Context menu state
   const [contextEntry, setContextEntry] = useState<RemoteFileEntry | null>(null)
@@ -191,8 +194,9 @@ export function FileExplorer() {
   const canUploadLocal = Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
 
   const uploadLocalFile = useCallback(async () => {
-    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
-    const localPath = await window.api.dialog.openFile()
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || uploading || uploadPickerOpen) return
+    setUploadPickerOpen(true)
+    const localPath = await window.api.dialog.openFile().finally(() => setUploadPickerOpen(false))
     if (!localPath) return
     const name = localPath.split('/').pop() || 'upload'
     const remotePath = `${cwd.replace(/\/+$/, '')}/${name}`
@@ -200,7 +204,17 @@ export function FileExplorer() {
     setUploadMessage(null)
     try {
       await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
-      setUploadMessage(`Uploaded ${name}`)
+      const offset = Date.now() % 80
+      addFileNode(
+        { x: 120 + offset, y: 120 + offset },
+        {
+          isInput: true,
+          label: name,
+          path: remotePath,
+          fileType: inferFileType(name),
+        },
+      )
+      setUploadMessage(`Uploaded ${name} and added it to the pipeline`)
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
@@ -208,7 +222,7 @@ export function FileExplorer() {
       setUploading(false)
       window.setTimeout(() => setUploadMessage(null), 4000)
     }
-  }, [activeConnectionId, cwd, refresh])
+  }, [activeConnectionId, addFileNode, cwd, refresh, uploadPickerOpen, uploading])
 
   // Not connected state
   if (!isConnected) {

@@ -54,7 +54,8 @@ export function RemotePathInput({
     }
     const { dir, prefix } = autocompleteContext(value, homeDir)
     const normalizedPrefix = prefix.trim()
-    if (normalizedPrefix.length < minPrefixChars) {
+    const minChars = prefix.length === 0 ? 0 : minPrefixChars
+    if (normalizedPrefix.length < minChars) {
       setSuggestions([])
       return
     }

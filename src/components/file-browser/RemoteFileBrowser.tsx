@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Folder, FileText, RefreshCw, Clock3, Star, EyeOff } from 'lucide-react'
+import { Folder, FileText, RefreshCw, Clock3, Star, EyeOff, Loader2 } from 'lucide-react'
 
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
@@ -64,14 +64,15 @@ export function RemoteFileBrowser({
 
   useEffect(() => {
     if (!open || !activeConnectionId) return
+    const connectionId = activeConnectionId
     let cancelled = false
     async function loadHome() {
-      if (activeConnectionId === LOCAL_CONNECTION_ID) {
+      if (connectionId === LOCAL_CONNECTION_ID) {
         const home = await window.api.local.homedir()
         if (!cancelled) setHomeDir(home)
         return
       }
-      const result = await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')
+      const result = await window.api.ssh.exec(connectionId, 'printf %s "$HOME"')
       if (!cancelled) setHomeDir(result.stdout.trim() || null)
     }
     void loadHome().catch(() => {
@@ -96,19 +97,26 @@ export function RemoteFileBrowser({
   useEffect(() => {
     if (!open || !activeConnectionId || !cwd) return
     const path = expandHomePath(cwd, homeDir)
+    let cancelled = false
     setLoading(true)
     setError(null)
     const promise = activeConnectionId === LOCAL_CONNECTION_ID
       ? window.api.local.ls(path)
       : window.api.sftp.ls(activeConnectionId, path)
-    void promise.then((next) => {
+    const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
+      window.setTimeout(() => reject(new Error('Listing timed out. Try Refresh.')), 15000)
+    })
+    void Promise.race([promise, timeout]).then((next) => {
+      if (cancelled) return
       setEntries(next)
       setLoading(false)
     }).catch((err) => {
+      if (cancelled) return
       setError(err instanceof Error ? err.message : String(err))
       setEntries([])
       setLoading(false)
     })
+    return () => { cancelled = true }
   }, [activeConnectionId, cwd, homeDir, open, reloadNonce])
 
   const favorites = useMemo(() => {
@@ -266,6 +274,12 @@ export function RemoteFileBrowser({
               <div className="p-3 text-xs text-error">{error}</div>
             ) : (
               <div className="h-full overflow-y-auto">
+                {loading && (
+                  <div className="flex items-center gap-2 p-3 text-xs text-text-muted">
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading files…
+                  </div>
+                )}
                 {visibleEntries.map((entry) => {
                   const selectedHere = selected.includes(entry.path)
                   return (
