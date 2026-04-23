@@ -15,8 +15,9 @@ import type {
   TransformNodeData,
 } from '@/types/pipeline'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
-import { blockHasValue, getFlagDef, toolUsesFlagBuilder } from '@/lib/flagRegistry'
+import { blockHasValue, getFlagDef, toolUsesFlagBuilder, CUSTOM_FLAG_ID } from '@/lib/flagRegistry'
 import { connectedInputSchema, toolColumnWarnings, transformInputWarnings, type SchemaCache } from '@/lib/schemaResolver'
+import { getActiveToolInputs, validateAnalysisOptions } from '@/lib/analysisOptions'
 
 export type ValidationSeverity = 'error' | 'warning' | 'info'
 
@@ -121,6 +122,7 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       const d = node.data as FileNodeData
       const split = d.split
       if (split) {
+        const splitItems = Array.isArray((split as { items?: unknown }).items) ? split.items : []
         if (!split.axis || !split.axis.trim()) {
           issues.push({
             severity: 'error', nodeId: node.id,
@@ -129,7 +131,7 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
             suggestion: 'Set an axis name (e.g., "chrom") in the Split section.',
           })
         }
-        if (split.items.length === 0) {
+        if (splitItems.length === 0) {
           issues.push({
             severity: 'error', nodeId: node.id,
             code: 'EMPTY_SPLIT',
@@ -137,8 +139,8 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
             suggestion: 'Add items via the "Pick from glob" helper or enter manually.',
           })
         } else {
-          for (const item of split.items) {
-            if (!item.path.trim()) {
+          for (const item of splitItems) {
+            if (typeof item.path !== 'string' || !item.path.trim()) {
               issues.push({
                 severity: 'error', nodeId: node.id,
                 code: 'SPLIT_ITEM_NO_PATH',
@@ -188,7 +190,9 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       const inMap = incomingByPort.get(node.id)!
 
       // Required inputs
-      for (const port of tool.inputs) {
+      const activeInputs = getActiveToolInputs(tool, d)
+      const activeInputIds = new Set(activeInputs.map((port) => port.id))
+      for (const port of activeInputs) {
         const edges = inMap.get(port.id)
         const satisfiesFileBlock = toolUsesFlagBuilder(d.toolId) && blockProvidesInput(d, port.id, Boolean(edges?.length))
         if (port.required && (!edges || edges.length === 0) && !satisfiesFileBlock) {
@@ -224,10 +228,45 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
         }
       }
 
-      if (toolUsesFlagBuilder(d.toolId) && (d.flagBlocks?.length ?? 0) > 0) {
+      for (const [portId, edges] of inMap) {
+        if (activeInputIds.has(portId)) continue
+        if (edges.length === 0) continue
+        issues.push({
+          severity: 'warning', nodeId: node.id, portId,
+          code: 'INACTIVE_INPUT_CONNECTED',
+          message: `Input "${portId}" is connected but its analysis option is disabled.`,
+          suggestion: 'Enable the matching option or remove this connection.',
+        })
+      }
+
+      for (const issue of validateAnalysisOptions(tool, d, [...inMap.keys()])) {
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: issue.code,
+          message: issue.message,
+        })
+      }
+
+      if (!d.analysisOptions && toolUsesFlagBuilder(d.toolId) && (d.flagBlocks?.length ?? 0) > 0) {
         for (const block of d.flagBlocks ?? []) {
           const def = getFlagDef(d.toolId, block.flagId)
           if (!def || !block.enabled) continue
+          if (block.flagId === CUSTOM_FLAG_ID && !block.customFlag?.trim()) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'FLAG_NAME_MISSING',
+              message: `Custom flag on "${d.label}" does not have a flag name yet.`,
+              suggestion: 'Enter the flag exactly as the tool expects it, including the leading dashes.',
+            })
+          }
+          if (block.flagId === CUSTOM_FLAG_ID && block.customInputKind === 'file' && !blockHasFileSource(block, false)) {
+            issues.push({
+              severity: 'error', nodeId: node.id,
+              code: 'FLAG_VALUE_MISSING',
+              message: `Custom file flag on "${d.label}" does not have a selected file path.`,
+              suggestion: 'Choose a remote or local file for this custom flag.',
+            })
+          }
           if (def.requiredValue && !blockHasValue(block.value)) {
             issues.push({
               severity: 'error', nodeId: node.id,
@@ -567,7 +606,8 @@ function axisForNode(snapshot: PipelineSnapshot, nodeId: string, seen = new Set<
   if (!node) return undefined
   if (node.type === 'file') {
     const split = (node.data as FileNodeData).split
-    return split?.axis || undefined
+    const items = (split as { items?: unknown } | undefined)?.items
+    return Array.isArray(items) && items.length > 0 ? split?.axis || undefined : undefined
   }
   if (node.type === 'merge') return undefined
   const incoming = snapshot.edges.filter((edge) => edge.target === nodeId)
@@ -585,7 +625,9 @@ function hasAxedInput(snapshot: PipelineSnapshot, nodeId: string): boolean {
   return snapshot.edges.some((edge) => {
     if (edge.target !== nodeId) return false
     const source = snapshot.nodes.find((node) => node.id === edge.source)
-    return source?.type === 'file' && Boolean((source.data as FileNodeData).split?.items.length)
+    const split = source?.type === 'file' ? (source.data as FileNodeData).split : undefined
+    const items = (split as { items?: unknown } | undefined)?.items
+    return Array.isArray(items) && items.length > 0
   })
 }
 

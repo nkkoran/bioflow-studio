@@ -20,11 +20,18 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
 import { ValidationBadge } from './ValidationBadge'
 import { validatePipeline, type ValidationIssue, type ValidationResult } from '@/lib/pipelineValidator'
+import { mergeReadinessIntoValidation } from '@/lib/workflowReadiness'
 import type { DryRunScript, PipelineSnapshot } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import { Dialog } from '@/components/ui/Dialog'
 import { savePipelineSnapshot, savePipelineSnapshotAs } from '@/lib/pipelinePersistence'
+import { useDialogStore } from '@/stores/dialogStore'
+import { useClusterDoctorStore } from '@/stores/clusterDoctorStore'
+import { ClusterDoctorDialog } from '@/components/connection/ClusterDoctorDialog'
+import type { ClusterDoctorReport } from '@/types/workspace'
+import { WorkflowReadinessBadge } from './WorkflowReadinessBadge'
+import { useWorkflowReadinessStore } from '@/stores/readinessStore'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -153,6 +160,10 @@ export function PipelineToolbar() {
   const settings = useSettingsStore((s) => s.settings)
   const confirmOnLoginNodeRun = useSettingsStore((s) => s.settings.confirmOnLoginNodeRun)
   const cancelRun = useRunStore((s) => s.cancelRun)
+  const promptDialog = useDialogStore((s) => s.prompt)
+  const confirmAction = useDialogStore((s) => s.confirm)
+  const runDoctorReport = useClusterDoctorStore((s) => s.runReport)
+  const evaluateReadiness = useWorkflowReadinessStore((s) => s.evaluateSnapshot)
 
   const [editingName, setEditingName] = useState(false)
   const [savedMessage, setSavedMessage] = useState<{ text: string; isError: boolean } | null>(null)
@@ -160,6 +171,7 @@ export function PipelineToolbar() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [scriptPreview, setScriptPreview] = useState<DryRunScript[] | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
+  const [doctorDialog, setDoctorDialog] = useState<ClusterDoctorReport | null>(null)
   const [openPicker, setOpenPicker] = useState<Array<{ id: string; name: string }> | null>(null)
   const [templatePicker, setTemplatePicker] = useState(false)
   const activeRunIsCancellable = activeRun?.status === 'queued' || activeRun?.status === 'running'
@@ -169,10 +181,18 @@ export function PipelineToolbar() {
     setTimeout(() => setSavedMessage(null), isError ? 7000 : 2000)
   }, [])
 
-  const handleNew = useCallback(() => {
-    if (dirty && !confirm('Discard unsaved changes and start a new pipeline?')) return
+  const handleNew = useCallback(async () => {
+    if (dirty) {
+      const confirmed = await confirmAction({
+        title: 'New pipeline',
+        message: 'Discard unsaved changes and start a new pipeline?',
+        confirmLabel: 'Start new pipeline',
+        cancelLabel: 'Keep current',
+      })
+      if (!confirmed) return
+    }
     reset()
-  }, [dirty, reset])
+  }, [confirmAction, dirty, reset])
 
   const handleSave = useCallback(async () => {
     const snapshot = exportSnapshot()
@@ -188,7 +208,13 @@ export function PipelineToolbar() {
 
   const handleSaveAs = useCallback(async () => {
     const snapshot = exportSnapshot()
-    const nextName = window.prompt('Save pipeline as:', `${snapshot.name} copy`)
+    const nextName = await promptDialog({
+      title: 'Save pipeline as',
+      message: 'Choose a name for the copied pipeline.',
+      defaultValue: `${snapshot.name} copy`,
+      placeholder: 'Pipeline name',
+      confirmLabel: 'Save copy',
+    })
     if (!nextName?.trim()) return
     try {
       const next = {
@@ -203,10 +229,18 @@ export function PipelineToolbar() {
       console.error('Save as failed:', err)
       flashMessage('Save as failed', true)
     }
-  }, [exportSnapshot, flashMessage, loadSnapshot, markSaved])
+  }, [exportSnapshot, flashMessage, loadSnapshot, markSaved, promptDialog])
 
   const handleOpen = useCallback(async () => {
-    if (dirty && !confirm('Discard unsaved changes and open a pipeline?')) return
+    if (dirty) {
+      const confirmed = await confirmAction({
+        title: 'Open pipeline',
+        message: 'Discard unsaved changes and open a saved pipeline?',
+        confirmLabel: 'Open pipeline',
+        cancelLabel: 'Keep current',
+      })
+      if (!confirmed) return
+    }
     const ids = (await window.api.store.get<string[]>('pipelines:ids')) ?? []
     if (ids.length === 0) { flashMessage('No saved pipelines'); return }
     const entries = await Promise.all(
@@ -216,7 +250,7 @@ export function PipelineToolbar() {
       }),
     )
     setOpenPicker(entries.filter((e): e is { id: string; name: string } => e !== null))
-  }, [dirty, flashMessage])
+  }, [confirmAction, dirty, flashMessage])
 
   const confirmOpen = useCallback(async (id: string) => {
     setOpenPicker(null)
@@ -226,7 +260,15 @@ export function PipelineToolbar() {
   }, [loadSnapshot, flashMessage])
 
   const handleImport = useCallback(async () => {
-    if (dirty && !confirm('Discard unsaved changes and import a pipeline?')) return
+    if (dirty) {
+      const confirmed = await confirmAction({
+        title: 'Import pipeline',
+        message: 'Discard unsaved changes and import a pipeline file?',
+        confirmLabel: 'Import pipeline',
+        cancelLabel: 'Keep current',
+      })
+      if (!confirmed) return
+    }
     const path = await window.api.dialog.openFile({
       filters: [{ name: 'BioFlow pipeline JSON', extensions: ['json', 'bioflow'] }],
     })
@@ -243,12 +285,20 @@ export function PipelineToolbar() {
       console.error('Import failed:', err)
       flashMessage(`Import failed: ${err?.message ?? err}`, true)
     }
-  }, [dirty, loadSnapshot, flashMessage])
+  }, [confirmAction, dirty, loadSnapshot, flashMessage])
 
-  const handleTemplate = useCallback(() => {
-    if (dirty && !confirm('Discard unsaved changes and load a template?')) return
+  const handleTemplate = useCallback(async () => {
+    if (dirty) {
+      const confirmed = await confirmAction({
+        title: 'Load template',
+        message: 'Discard unsaved changes and load a template?',
+        confirmLabel: 'Load template',
+        cancelLabel: 'Keep current',
+      })
+      if (!confirmed) return
+    }
     setTemplatePicker(true)
-  }, [dirty])
+  }, [confirmAction, dirty])
 
   const confirmTemplate = useCallback((idx: number) => {
     setTemplatePicker(false)
@@ -276,7 +326,13 @@ export function PipelineToolbar() {
     if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
     const loginNodes = snapshot.nodes.filter((node) => node.type === 'tool' && (node.data as any).executionMode === 'login')
     if (confirmOnLoginNodeRun && loginNodes.length > 0) {
-      const ok = confirm(`This run includes ${loginNodes.length} login-node tool${loginNodes.length === 1 ? '' : 's'}. Continue?`)
+      const ok = await confirmAction({
+        title: 'Login-node execution',
+        message: `This run includes ${loginNodes.length} login-node tool${loginNodes.length === 1 ? '' : 's'}. Continue?`,
+        detail: 'Login-node tools are best kept to setup, light inspection, or tiny commands. Heavy work should go through Slurm.',
+        confirmLabel: 'Run anyway',
+        cancelLabel: 'Go back',
+      })
       if (!ok) return
     }
     setRunning(true)
@@ -290,7 +346,7 @@ export function PipelineToolbar() {
     } finally {
       setRunning(false)
     }
-  }, [activeConnectionId, startRun, flashMessage, confirmOnLoginNodeRun])
+  }, [activeConnectionId, confirmAction, startRun, flashMessage, confirmOnLoginNodeRun])
 
   const handleRun = useCallback(async () => {
     try {
@@ -321,6 +377,21 @@ export function PipelineToolbar() {
         return
       }
 
+      if (result.errorCount > 0) {
+        setConfirmDialog({ result, snapshot })
+        return
+      }
+
+      const readiness = await evaluateReadiness(activeConnectionId, snapshot, { force: true })
+      result = mergeReadinessIntoValidation(result, readiness)
+
+      const doctor = await runDoctorReport(activeConnectionId, { force: true })
+      if (doctor.checks.some((check) => check.status === 'error')) {
+        setDoctorDialog(doctor)
+        flashMessage('Cluster doctor found blocking issues', true)
+        return
+      }
+
       // No issues → run immediately.
       if (result.issues.length === 0) {
         await submitRun(snapshot)
@@ -333,7 +404,7 @@ export function PipelineToolbar() {
       console.error('[PipelineToolbar] handleRun threw:', err)
       flashMessage(err?.message ?? String(err), true)
     }
-  }, [exportSnapshot, flashMessage, activeConnectionId, submitRun, schemas, settings.annovarDbPath, settings.vepCachePath])
+  }, [activeConnectionId, evaluateReadiness, exportSnapshot, flashMessage, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, submitRun])
 
   const handlePreviewScripts = useCallback(async () => {
     const snapshot = exportSnapshot()
@@ -376,7 +447,14 @@ export function PipelineToolbar() {
 
   const handleCancelRun = useCallback(async () => {
     if (!activeRunId || !activeRunIsCancellable) return
-    if (!confirm('Cancel this run? Submitted Slurm jobs will be cancelled.')) return
+    const confirmed = await confirmAction({
+      title: 'Cancel run',
+      message: 'Cancel this run? Submitted Slurm jobs will be cancelled.',
+      confirmLabel: 'Cancel run',
+      cancelLabel: 'Keep running',
+      danger: true,
+    })
+    if (!confirmed) return
     try {
       await cancelRun(activeRunId)
       flashMessage('Run cancelled')
@@ -384,7 +462,7 @@ export function PipelineToolbar() {
       console.error('Cancel failed:', err)
       flashMessage(`Cancel failed: ${err?.message ?? err}`)
     }
-  }, [activeRunId, activeRunIsCancellable, cancelRun, flashMessage])
+  }, [activeRunId, activeRunIsCancellable, cancelRun, confirmAction, flashMessage])
 
   useEffect(() => {
     const onMenuCommand = (event: Event) => {
@@ -452,6 +530,7 @@ export function PipelineToolbar() {
             </select>
           </div>
           <ValidationBadge />
+          <WorkflowReadinessBadge />
         </div>
 
         {/* Feedback message — errors shown in red for 7s, info in accent for 2s */}
@@ -593,6 +672,12 @@ export function PipelineToolbar() {
       {scriptPreview && (
         <ScriptPreviewModal scripts={scriptPreview} onClose={() => setScriptPreview(null)} />
       )}
+      <ClusterDoctorDialog
+        open={Boolean(doctorDialog)}
+        onClose={() => setDoctorDialog(null)}
+        connectionId={activeConnectionId}
+        report={doctorDialog}
+      />
 
       <Dialog
         open={openPicker !== null}

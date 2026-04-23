@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { getQueueSnapshot, useSlurmQueueStore } from '@/stores/slurmQueueStore'
 import { useRunStore } from '@/stores/runStore'
+import { useDialogStore } from '@/stores/dialogStore'
 
 export function QueuePanel() {
   const connectionId = useConnectionStore((s) => s.activeConnectionId)
@@ -14,6 +15,8 @@ export function QueuePanel() {
   const [onlyBioFlow, setOnlyBioFlow] = useState(false)
   const [sortKey, setSortKey] = useState<'jobId' | 'name' | 'state' | 'elapsed' | 'partition'>('jobId')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  const confirmDialog = useDialogStore((s) => s.confirm)
+  const alertDialog = useDialogStore((s) => s.alert)
 
   const snapshot = connectionId ? getQueueSnapshot(snapshots, connectionId) : null
   const ourJobIds = useMemo(() => {
@@ -58,12 +61,24 @@ export function QueuePanel() {
   const onCancel = async (jobId: string) => {
     if (!connectionId) return
     const parent = jobId.split('_')[0]
-    if (!confirm(`Cancel Slurm job ${parent}?`)) return
+    const confirmed = await confirmDialog({
+      title: 'Cancel Slurm job',
+      message: `Cancel Slurm job ${parent}?`,
+      detail: 'BioFlow only offers cancel on jobs it believes it submitted itself.',
+      confirmLabel: 'Cancel job',
+      cancelLabel: 'Keep running',
+      danger: true,
+    })
+    if (!confirmed) return
     try {
       await window.api.pipeline.cancelJob(connectionId, parent)
       void refreshQueue(connectionId)
     } catch (err: any) {
-      alert(`scancel failed: ${err?.message ?? err}`)
+      await alertDialog({
+        title: 'scancel failed',
+        message: 'BioFlow could not cancel the selected Slurm job.',
+        detail: err?.message ?? String(err),
+      })
     }
   }
 

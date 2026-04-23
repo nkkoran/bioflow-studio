@@ -132,7 +132,7 @@ export class SftpPool {
       const list = await new Promise<SshFileEntry[]>((resolve, reject) => {
         sftp.readdir(remotePath, (err, fileList) => {
           if (err) reject(err)
-          else resolve(fileList)
+          else resolve(Array.isArray(fileList) ? fileList : [])
         })
       })
 

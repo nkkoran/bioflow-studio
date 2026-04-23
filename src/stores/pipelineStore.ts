@@ -20,6 +20,8 @@ import type {
 import { getTool } from '@/lib/toolRegistry'
 import { areTypesCompatible } from '@/lib/toolRegistry'
 import { ensureFlagBlocks, flagBlocksToParamValues, toolUsesFlagBuilder } from '@/lib/flagRegistry'
+import { analysisOptionsToParamValues, getActiveToolInputs, normalizeAnalysisOptions } from '@/lib/analysisOptions'
+import { defaultTransformPresetConfig } from '@/lib/transformPresets'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
@@ -145,9 +147,17 @@ function defaultOutputIntermediate(toolId: string): ToolNodeData['outputIntermed
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
-function migrateToolNodeData(data: ToolNodeData): ToolNodeData {
+function migrateToolNodeData(data: ToolNodeData, connectedPortIds: Iterable<string> = []): ToolNodeData {
+  const tool = getTool(data.toolId)
+  const analysisOptions = tool
+    ? normalizeAnalysisOptions(tool, data, { connectedPortIds })
+    : data.analysisOptions
   const next: ToolNodeData = {
     ...data,
+    analysisOptions,
+    paramValues: tool && analysisOptions
+      ? analysisOptionsToParamValues(tool, analysisOptions, data.paramValues)
+      : data.paramValues,
     outputMerge: data.outputMerge ?? defaultOutputMerge(data.toolId),
     outputIntermediate: data.outputIntermediate ?? defaultOutputIntermediate(data.toolId),
   }
@@ -156,17 +166,30 @@ function migrateToolNodeData(data: ToolNodeData): ToolNodeData {
   return {
     ...next,
     flagBlocks,
-    paramValues: flagBlocksToParamValues(data.toolId, flagBlocks, data.paramValues),
+    paramValues: tool && analysisOptions
+      ? analysisOptionsToParamValues(tool, analysisOptions, flagBlocksToParamValues(data.toolId, flagBlocks, data.paramValues))
+      : flagBlocksToParamValues(data.toolId, flagBlocks, data.paramValues),
   }
 }
 
 function migrateFileNodeData(data: FileNodeData): FileNodeData {
   if (!data.split) return data
+  const rawItems = (data.split as { items?: unknown }).items
+  const items = Array.isArray(rawItems)
+    ? rawItems.map((item, index) => {
+      const row = item as { key?: unknown; path?: unknown }
+      return {
+        key: typeof row.key === 'string' && row.key.trim() ? row.key : String(index + 1),
+        path: typeof row.path === 'string' ? row.path : '',
+      }
+    })
+    : []
   return {
     ...data,
     split: {
       ...data.split,
       axis: data.split.axis || 'item',
+      items,
       pattern: data.split.pattern ?? (data.split.glob ? { kind: 'brace', template: data.split.glob } : { kind: 'manual' }),
     },
   }
@@ -182,6 +205,7 @@ function migrateMergeNodeData(data: MergeNodeData): MergeNodeData {
 function migrateTransformNodeData(data: TransformNodeData): TransformNodeData {
   return {
     ...data,
+    presetConfig: data.preset ? { ...defaultTransformPresetConfig(data.preset), ...(data.presetConfig ?? {}) } : data.presetConfig,
     filters: (data.filters ?? []).map((filter, index) => ({
       ...filter,
       join: index === 0 ? 'and' : (filter.join ?? 'and'),
@@ -256,8 +280,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   },
 
   onConnect: (connection) => {
+    const edge = { ...connection, id: makeId('edge'), animated: false } as Edge
     set((state) => ({
-      edges: addEdge({ ...connection, animated: false }, state.edges),
+      edges: addEdge(edge, state.edges),
       ...pushHistory(state),
       dirty: true,
     }))
@@ -267,8 +292,14 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     set((state) => {
       const current = state.edges.find((edge) => edge.id === edgeId)
       if (!current) return state
+      const nextConnection: Connection = {
+        source: connection.source,
+        target: connection.target,
+        sourceHandle: connection.sourceHandle ?? null,
+        targetHandle: connection.targetHandle ?? null,
+      }
       return {
-        edges: reconnectFlowEdge(current, { ...connection, animated: false }, state.edges),
+        edges: reconnectFlowEdge(current, nextConnection, state.edges),
         ...pushHistory(state),
         dirty: true,
       }
@@ -285,6 +316,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       return ''
     }
     const id = makeId('node')
+    const paramValues = defaultParamValues(toolId)
+    const flagBlocks = toolUsesFlagBuilder(toolId) ? ensureFlagBlocks(toolId, undefined, paramValues) : undefined
+    const analysisOptions = normalizeAnalysisOptions(tool, { paramValues, flagBlocks })
     const node: BioflowNode = {
       id,
       type: 'tool',
@@ -292,8 +326,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       data: {
         toolId,
         label: tool.name,
-        paramValues: defaultParamValues(toolId),
-        flagBlocks: toolUsesFlagBuilder(toolId) ? ensureFlagBlocks(toolId, undefined, defaultParamValues(toolId)) : undefined,
+        paramValues: analysisOptionsToParamValues(tool, analysisOptions, paramValues),
+        flagBlocks,
+        analysisOptions,
         outputMerge: defaultOutputMerge(toolId),
         outputIntermediate: defaultOutputIntermediate(toolId),
         status: 'idle',
@@ -363,6 +398,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       data: {
         label: data?.label ?? 'Transform',
         fileType: data?.fileType ?? 'tsv',
+        preset: data?.preset,
+        roleMappings: data?.roleMappings,
+        presetConfig: data?.preset ? { ...defaultTransformPresetConfig(data.preset), ...(data.presetConfig ?? {}) } : data?.presetConfig,
         selectedColumns: data?.selectedColumns,
         filters: data?.filters ?? [],
         renames: data?.renames ?? [],
@@ -423,7 +461,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       if (target.type === 'tool') {
         const tool = getTool((target.data as ToolNodeData).toolId)
         if (!tool) continue
-        for (const port of tool.inputs) {
+        for (const port of getActiveToolInputs(tool, target.data as ToolNodeData)) {
           if (!areTypesCompatible(sourceType, port.fileType)) continue
           if (!port.multi && state.edges.some((edge) => edge.target === target.id && (edge.targetHandle ?? 'input') === port.id)) continue
           const key = `${nodeId}:output:${target.id}:${port.id}`
@@ -639,13 +677,18 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   },
 
   loadSnapshot: (snapshot) => {
+    const connectedPortsByNode = new Map<string, Set<string>>()
+    for (const edge of snapshot.edges) {
+      if (!connectedPortsByNode.has(edge.target)) connectedPortsByNode.set(edge.target, new Set())
+      connectedPortsByNode.get(edge.target)!.add(edge.targetHandle ?? 'input')
+    }
     const nodes: BioflowNode[] = snapshot.nodes.map((n) => ({
       id: n.id,
       type: n.type,
       position: n.position,
       data: (
         n.type === 'tool'
-          ? migrateToolNodeData(n.data as ToolNodeData)
+          ? migrateToolNodeData(n.data as ToolNodeData, connectedPortsByNode.get(n.id) ?? [])
           : n.type === 'file'
             ? migrateFileNodeData(n.data as FileNodeData)
             : n.type === 'merge'

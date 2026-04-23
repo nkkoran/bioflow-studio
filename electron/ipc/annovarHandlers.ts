@@ -4,7 +4,7 @@ import { basename } from 'path'
 import { SftpPool } from '../ssh/SftpPool'
 import { SshManager } from '../ssh/SshManager'
 import { annovarEstimatedSizeGB, annovarExpectedFiles } from '../../src/lib/annovarCatalog'
-import type { AnnovarInstallProgress, AnnovarInstallRequest, AnnovarStatusResult } from '../../src/types/annotation'
+import type { AnnovarDatabaseStatus, AnnovarInstallProgress, AnnovarInstallRequest, AnnovarStatusResult } from '../../src/types/annotation'
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
@@ -19,7 +19,7 @@ export function registerAnnovarHandlers(): void {
     async (_event, connectionId: string, humandbPath: string, buildver: string, databases: string[]): Promise<AnnovarStatusResult> => {
       const entries = await sftp.ls(connectionId, humandbPath).catch(() => [])
       const entryNames = new Set(entries.map((entry) => entry.name))
-      const rows = await Promise.all(databases.map(async (database) => {
+      const rows: AnnovarDatabaseStatus[] = await Promise.all(databases.map(async (database) => {
         const expected = annovarExpectedFiles(buildver, database)
         let foundPath = `${humandbPath.replace(/\/+$/, '')}/${expected[0]}`
         let installed = false

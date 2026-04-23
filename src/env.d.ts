@@ -78,7 +78,7 @@ interface Window {
       openDirectory: (options?: { defaultPath?: string }) => Promise<string | null>
     }
     pipeline: {
-      run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string) => Promise<{ runId: string }>
+      run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string, workspace?: import('./types/pipeline').RunState['workspace']) => Promise<{ runId: string }>
       cancel: (runId: string) => Promise<void>
       cancelNode: (runId: string, nodeId: string) => Promise<void>
       cancelJob: (connectionId: string, jobId: string) => Promise<void>

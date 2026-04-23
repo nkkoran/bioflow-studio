@@ -8,13 +8,14 @@
  *
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
-import { X, Trash2, Copy, Plus, Info, RefreshCcw, ChevronDown } from 'lucide-react'
+import { X, Trash2, Copy, Plus, Info, RefreshCcw, FolderOpen } from 'lucide-react'
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
-import { FlagBuilder } from '@/components/pipeline/inspector/FlagBuilder'
+import { AnalysisOptionsPanel } from '@/components/pipeline/inspector/AnalysisOptionsPanel'
+import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
@@ -24,6 +25,7 @@ import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useClusterInfoStore } from '@/stores/clusterInfoStore'
+import { useDialogStore } from '@/stores/dialogStore'
 import { getTool } from '@/lib/toolRegistry'
 import { iconForTool } from '@/lib/toolIcons'
 import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
@@ -34,13 +36,20 @@ import {
   parseHeader,
 } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
+import { defaultTransformPresetConfig, getTransformPreset, TRANSFORM_PRESETS } from '@/lib/transformPresets'
+import { suggestRoleMappings } from '@/lib/roleMappings'
 import { inferFileType } from '@/lib/fileTypeInference'
 import {
-  ensureFlagBlocks,
-  flagBlocksToParamValues,
   syncFlagBlocksFromParamValues,
   toolUsesFlagBuilder,
 } from '@/lib/flagRegistry'
+import {
+  analysisOptionsToParamValues,
+  getActiveToolInputs,
+  getAnalysisOptionDefs,
+  normalizeAnalysisOptions,
+  type AnalysisOptionDef,
+} from '@/lib/analysisOptions'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -86,8 +95,9 @@ function connectedInputPaths(
     if (!source) continue
     if (source.type === 'file') {
       const data = source.data as FileNodeData
-      paths[portId] = data.split?.items.length
-        ? data.split.items.map((item) => item.path).filter(Boolean)
+      const splitItems = safeSplitItems(data.split)
+      paths[portId] = splitItems.length
+        ? splitItems.map((item) => item.path).filter(Boolean)
         : data.path ? [data.path] : []
       continue
     }
@@ -121,7 +131,8 @@ function inspectorNodeLabel(node: PipelineSnapshot['nodes'][number]): string {
 function inputConnectionDetail(node: PipelineSnapshot['nodes'][number], sourceHandle: string): string {
   if (node.type === 'file') {
     const data = node.data as FileNodeData
-    if (data.split?.items.length) return `${data.split.items.length} files split by ${data.split.axis}`
+    const splitItems = safeSplitItems(data.split)
+    if (splitItems.length) return `${splitItems.length} files split by ${data.split?.axis || 'item'}`
     return data.path || 'File path not set'
   }
   if (node.type === 'tool') return `Output: ${sourceHandle}`
@@ -614,35 +625,106 @@ function ShellScriptField({
 }
 
 function ToolInputRow({
+  nodeId,
   port,
   connections,
   snapshot,
+  optionDef,
+  onRemoveOption,
 }: {
+  nodeId: string
   port: ToolPort
   connections: PipelineSnapshot['edges']
   snapshot: PipelineSnapshot
+  optionDef?: AnalysisOptionDef
+  onRemoveOption?: () => void
 }) {
   const deleteEdge = usePipelineStore((s) => s.deleteEdge)
+  const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const onConnect = usePipelineStore((s) => s.onConnect)
+  const [browserOpen, setBrowserOpen] = useState(false)
   const missingRequired = port.required && connections.length === 0
+  const accept = port.fileType === 'any' ? undefined : [port.fileType]
+  const initialPath = useMemo(() => {
+    const firstEdge = connections[0]
+    if (!firstEdge) return undefined
+    const source = snapshot.nodes.find((node) => node.id === firstEdge.source)
+    if (source?.type !== 'file') return undefined
+    const data = source.data as FileNodeData
+    return data.path || undefined
+  }, [connections, snapshot.nodes])
+
+  const attachInputFiles = (paths: string[]) => {
+    if (paths.length === 0) return
+    if (!port.multi) {
+      for (const edge of connections) deleteEdge(edge.id)
+    }
+    const target = snapshot.nodes.find((node) => node.id === nodeId)
+    paths.forEach((path, index) => {
+      const label = pathBasename(path) || port.label
+      const fileId = addFileNode(
+        target
+          ? { x: target.position.x - 220, y: target.position.y + Math.max(0, (connections.length + index) * 44) }
+          : { x: 80, y: 80 + index * 44 },
+        {
+          isInput: true,
+          label,
+          path,
+          fileType: inferFileType(path),
+          source: 'remote',
+        },
+      )
+      onConnect({
+        source: fileId,
+        sourceHandle: 'output',
+        target: nodeId,
+        targetHandle: port.id,
+      })
+    })
+  }
 
   return (
     <div className={classNames(
       'rounded-md border px-2 py-1.5 text-xs',
       missingRequired ? 'border-error/40 bg-error/5' : 'border-border bg-bg-tertiary',
     )}>
-      <div className="flex items-center gap-2">
-        <span className="font-medium text-text-primary">{port.label}</span>
-        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
-        {port.required && <span className="rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">required</span>}
-        {port.multi && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">multiple</span>}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="font-medium text-text-primary">{port.label}</span>
+          <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+          {optionDef?.flag && <span className="rounded bg-bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-text-muted">{optionDef.flag}</span>}
+          {port.required && <span className="rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">required</span>}
+          {port.multi && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">multiple</span>}
+        </div>
+        {onRemoveOption && (
+          <button
+            type="button"
+            onClick={onRemoveOption}
+            className="shrink-0 rounded border border-border bg-bg-secondary p-1 text-text-muted hover:text-text-primary"
+            title={`Remove ${optionDef?.label ?? port.label}`}
+          >
+            <X size={12} />
+          </button>
+        )}
       </div>
       <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
         {port.description ?? `Connect a ${port.fileType} file here.`}
       </div>
       <div className="mt-1.5 flex flex-col gap-0.5">
         {connections.length === 0 ? (
-          <div className={missingRequired ? 'text-error' : 'text-text-muted'}>
-            {missingRequired ? `Connect a ${port.fileType} source before running.` : 'Optional input not connected.'}
+          <div className="flex items-center justify-between gap-2">
+            <div className={missingRequired ? 'text-error' : 'text-text-muted'}>
+              {missingRequired ? `Connect a ${port.fileType} source before running.` : 'Optional input not connected.'}
+            </div>
+          <button
+            type="button"
+            onClick={() => setBrowserOpen(true)}
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[10px] text-text-muted hover:text-text-primary"
+            title={`Pick ${port.label} from the file browser`}
+            >
+              <FolderOpen size={12} />
+              Pick
+            </button>
           </div>
         ) : connections.map((edge) => {
           const source = snapshot.nodes.find((node) => node.id === edge.source)
@@ -669,7 +751,27 @@ function ToolInputRow({
             </div>
           )
         })}
+        {connections.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setBrowserOpen(true)}
+            className="mt-1 inline-flex h-7 w-fit items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[10px] text-text-muted hover:text-text-primary"
+            title={port.multi ? `Pick another ${port.label} file` : `Replace ${port.label} file`}
+          >
+            <FolderOpen size={12} />
+            {port.multi ? 'Pick another' : 'Replace'}
+          </button>
+        )}
       </div>
+      <RemoteFileBrowser
+        open={browserOpen}
+        onClose={() => setBrowserOpen(false)}
+        title={`Select ${port.label}`}
+        mode={port.multi ? 'multi-file' : 'file'}
+        initialPath={initialPath}
+        accept={accept}
+        onSelect={attachInputFiles}
+      />
     </div>
   )
 }
@@ -807,6 +909,7 @@ function AnnotationConfigPanel({
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const settings = useSettingsStore((s) => s.settings)
+  const confirmDialog = useDialogStore((s) => s.confirm)
   const setSetting = useSettingsStore((s) => s.setSetting)
   const [message, setMessage] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -869,12 +972,11 @@ function AnnotationConfigPanel({
   const toggleVepFeature = (id: string) => {
     const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
     const selected = VEP_FEATURES.filter((feature) => next.includes(feature.id))
-    const merged: Record<string, unknown> = {
-      annotationFeatures: next.join(','),
-      everything: false,
-      check_existing: false,
-      af_gnomad: false,
-      nearest: undefined,
+    const merged: Record<string, unknown> = { annotationFeatures: next.join(',') }
+    for (const feature of VEP_FEATURES) {
+      for (const [key, value] of Object.entries(feature.params)) {
+        merged[key] = typeof value === 'boolean' ? false : undefined
+      }
     }
     for (const feature of selected) Object.assign(merged, feature.params)
     patchParams(merged)
@@ -1133,6 +1235,7 @@ function AnnotationConfigPanel({
 
 function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const undoPipelineChange = usePipelineStore((s) => s.undo)
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
@@ -1150,8 +1253,6 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const [estimating, setEstimating] = useState(false)
   const [showEstimateWhy, setShowEstimateWhy] = useState(false)
   const [refreshingSchemaPath, setRefreshingSchemaPath] = useState<string | null>(null)
-  const advancedExpanded = useUIStore((s) => s.advancedExpanded[data.toolId] ?? false)
-  const setAdvancedExpanded = useUIStore((s) => s.setAdvancedExpanded)
 
   /**
    * Inputs whose upstream source carries an axis — either a file node with
@@ -1161,21 +1262,23 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
    */
   const axedInputPorts = useMemo(() => {
     const result: Array<{ portId: string; axis: string }> = []
+    const activePortIds = tool ? new Set(getActiveToolInputs(tool, data).map((port) => port.id)) : null
     for (const edge of edges) {
       if (edge.target !== nodeId) continue
       const portId = edge.targetHandle
       if (!portId) continue
+      if (activePortIds && !activePortIds.has(portId)) continue
       const src = nodes.find((n) => n.id === edge.source)
       if (!src) continue
       if (src.type === 'file') {
         const fd = src.data as FileNodeData
-        if (fd.split?.axis && fd.split.items.length > 0) {
+        if (fd.split?.axis && safeSplitItems(fd.split).length > 0) {
           result.push({ portId, axis: fd.split.axis })
         }
       }
     }
     return result
-  }, [nodes, edges, nodeId])
+  }, [nodes, edges, nodeId, tool, data])
 
   const setParam = useCallback(
     (name: string, value: unknown) => {
@@ -1282,9 +1385,9 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           inputSizes: sizes,
           isArray: data.arrayOver !== null && axedInputPorts.length > 0,
           arraySize: firstAxed
-            ? (snapshot.nodes.find((node) =>
+            ? safeSplitItems((snapshot.nodes.find((node) =>
                 snapshot.edges.some((edge) => edge.target === nodeId && edge.targetHandle === firstAxed.portId && edge.source === node.id),
-              )?.data as FileNodeData | undefined)?.split?.items.length
+              )?.data as FileNodeData | undefined)?.split).length
             : undefined,
           hasFilter: hasFilteringParam(data),
           partitionMaxMemGB: settings.partitionMaxMemGB,
@@ -1302,10 +1405,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
-  const useFlagBuilder = settings.plinkFlagBuilderEnabled && toolUsesFlagBuilder(data.toolId)
-  const flagBlocks = toolUsesFlagBuilder(data.toolId)
-    ? ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
-    : []
+  const activeInputs = getActiveToolInputs(tool, data)
 
   const ToolIcon = iconForTool(data.toolId)
   const slurm = { ...tool.slurm, ...data.slurmOverride }
@@ -1322,12 +1422,22 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     const portId = edge.sourceHandle ?? 'output'
     outputEdgesByPort.set(portId, [...(outputEdgesByPort.get(portId) ?? []), edge])
   }
+  const analysisDefs = getAnalysisOptionDefs(tool)
+  const analysisOptions = normalizeAnalysisOptions(tool, data, { connectedPortIds: inputEdgesByPort.keys() })
+  const analysisOptionsById = new Map(analysisOptions.map((option) => [option.optionId, option]))
+  const inputOptionByPort = new Map<string, AnalysisOptionDef>()
+  for (const def of analysisDefs) {
+    const portId = def.filePortId
+    if (!portId || !(def.kind === 'file' || def.kind === 'compound')) continue
+    if (analysisOptionsById.get(def.id)?.enabled) inputOptionByPort.set(portId, def)
+  }
   const visibleParams = tool.requiresDatabase
     ? tool.params.filter((param) => !ANNOTATION_INTERNAL_PARAMS.has(param.name))
     : tool.params
-  const commonParams = visibleParams.filter((param) => !param.advanced)
-  const advancedParams = visibleParams.filter((param) => param.advanced)
+  const commonParams = visibleParams.filter((param) => param.core || !param.advanced)
   const paramSections: Array<'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime'> = ['Inputs', 'Analysis', 'Filters', 'Output', 'Runtime']
+  const sortParams = (params: typeof visibleParams) =>
+    [...params].sort((a, b) => Number(b.core) - Number(a.core) || a.label.localeCompare(b.label))
   const applyEstimate = () => {
     if (!estimate) return
     updateNodeData(nodeId, {
@@ -1339,13 +1449,34 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
       },
     })
   }
-  const setFlagBlocks = useCallback((nextBlocks: ToolNodeData['flagBlocks']) => {
-    const safeBlocks = nextBlocks ?? []
+  const setAnalysisOptions = useCallback((patch: Pick<ToolNodeData, 'analysisOptions' | 'paramValues'>) => {
     updateNodeData(nodeId, {
-      flagBlocks: safeBlocks,
-      paramValues: flagBlocksToParamValues(data.toolId, safeBlocks, data.paramValues),
+      analysisOptions: patch.analysisOptions,
+      paramValues: patch.paramValues,
     })
-  }, [data.paramValues, data.toolId, nodeId, updateNodeData])
+  }, [nodeId, updateNodeData])
+
+  const disableOptionPort = useCallback((portId: string) => {
+    let removed = 0
+    for (const edge of snapshot.edges) {
+      if (edge.target === nodeId && (edge.targetHandle ?? 'input') === portId) {
+        usePipelineStore.getState().deleteEdge(edge.id)
+        removed += 1
+      }
+    }
+    return removed
+  }, [nodeId, snapshot.edges])
+
+  const removeInputOption = (def: AnalysisOptionDef) => {
+    const nextOptions = analysisOptions.map((option) =>
+      option.optionId === def.id ? { ...option, enabled: false } : option,
+    )
+    disableOptionPort(def.filePortId ?? def.sourcePortId ?? '')
+    updateNodeData(nodeId, {
+      analysisOptions: nextOptions,
+      paramValues: analysisOptionsToParamValues(tool, nextOptions, data.paramValues),
+    })
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1429,15 +1560,22 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           Inputs
         </h4>
         <div className="flex flex-col gap-1.5">
-          {tool.inputs.map((port) => (
+          {activeInputs.map((port) => (
             <ToolInputRow
               key={port.id}
+              nodeId={nodeId}
               port={port}
               connections={inputEdgesByPort.get(port.id) ?? []}
               snapshot={snapshot}
+              optionDef={inputOptionByPort.get(port.id)}
+              onRemoveOption={
+                inputOptionByPort.get(port.id) && !port.required
+                  ? () => removeInputOption(inputOptionByPort.get(port.id)!)
+                  : undefined
+              }
             />
           ))}
-          {tool.inputs.length === 0 && (
+          {activeInputs.length === 0 && (
             <div className="text-xs text-text-muted italic">This tool has no inputs.</div>
           )}
         </div>
@@ -1473,128 +1611,38 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Parameters
         </h4>
-        {useFlagBuilder ? (
-          <FlagBuilder
-            nodeId={nodeId}
-            tool={tool}
-            nodeData={{ ...data, flagBlocks }}
-            snapshot={snapshot}
-            schemas={schemas}
-            refreshingSchemaPath={refreshingSchemaPath}
-            advancedExpanded={advancedExpanded}
-            onSetAdvancedExpanded={(expanded) => setAdvancedExpanded(data.toolId, expanded)}
-            onLoadSchema={loadSchemaForPath}
-            onChange={(blocks) => setFlagBlocks(blocks)}
-          />
-        ) : (
+        {tool.id === 'custom.shell' ? (
           <div className="flex flex-col gap-2">
             {paramSections.map((section) => {
-              const sectionParams = commonParams.filter((param) => toolParamSection(param) === section)
+              const sectionParams = sortParams(commonParams.filter((param) => toolParamSection(param) === section))
               if (sectionParams.length === 0) return null
               return (
                 <div key={section} className="rounded-md border border-border bg-bg-tertiary/40 p-2">
                   <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">{section}</div>
                   <div className="flex flex-col gap-2">
-                    {sectionParams.map((p) => {
-                      const schema = p.columnRef
-                        ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                        : null
-                      const inputPath = p.columnRef
-                        ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                        : null
-                      return tool.id === 'custom.shell' && p.name === 'script'
-                        ? (
-                            <ShellScriptField
-                              key={p.name}
-                              value={data.paramValues[p.name]}
-                              onChange={(v) => setParam(p.name, v)}
-                            />
-                          )
-                        : p.columnRef
-                          ? (
-                              <ColumnParamField
-                                key={p.name}
-                                param={p}
-                                value={data.paramValues[p.name]}
-                                columns={schema?.columns ?? []}
-                                loading={Boolean(inputPath && !schema)}
-                                refreshing={refreshingSchemaPath === inputPath}
-                                onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                                onChange={(v) => setParam(p.name, v)}
-                              />
-                            )
-                          : (
-                              <ParamField
-                                key={p.name}
-                                param={p}
-                                value={data.paramValues[p.name]}
-                                onChange={(v) => setParam(p.name, v)}
-                              />
-                            )
-                    })}
+                    {sectionParams.map((p) => (
+                      p.name === 'script'
+                        ? <ShellScriptField key={p.name} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
+                        : <ParamField key={p.name} param={p} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
+                    ))}
                   </div>
                 </div>
               )
             })}
-            {advancedParams.length > 0 && (
-              <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
-                  onClick={() => setAdvancedExpanded(data.toolId, !advancedExpanded)}
-                >
-                  <ChevronDown size={13} className={classNames('transition-transform', advancedExpanded ? 'rotate-180' : '')} />
-                  Advanced
-                  <span className="ml-auto text-[10px] text-text-muted">{advancedParams.length}</span>
-                </button>
-                {advancedExpanded && (
-                  <div className="flex flex-col gap-2 border-t border-border p-2">
-                    {paramSections.map((section) => {
-                      const sectionParams = advancedParams.filter((param) => toolParamSection(param) === section)
-                      if (sectionParams.length === 0) return null
-                      return (
-                        <div key={section} className="flex flex-col gap-2">
-                          <div className="text-[10px] uppercase tracking-wide text-text-muted">{section}</div>
-                          {sectionParams.map((p) => {
-                            const schema = p.columnRef
-                              ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                              : null
-                            const inputPath = p.columnRef
-                              ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                              : null
-                            return p.columnRef
-                              ? (
-                                  <ColumnParamField
-                                    key={p.name}
-                                    param={p}
-                                    value={data.paramValues[p.name]}
-                                    columns={schema?.columns ?? []}
-                                    loading={Boolean(inputPath && !schema)}
-                                    refreshing={refreshingSchemaPath === inputPath}
-                                    onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                                    onChange={(v) => setParam(p.name, v)}
-                                  />
-                                )
-                              : (
-                                  <ParamField
-                                    key={p.name}
-                                    param={p}
-                                    value={data.paramValues[p.name]}
-                                    onChange={(v) => setParam(p.name, v)}
-                                  />
-                                )
-                          })}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-            {visibleParams.length === 0 && (
-              <div className="text-xs text-text-muted italic">No parameters</div>
-            )}
           </div>
+        ) : (
+          <AnalysisOptionsPanel
+            nodeId={nodeId}
+            tool={tool}
+            nodeData={data}
+            snapshot={snapshot}
+            schemas={schemas}
+            refreshingSchemaPath={refreshingSchemaPath}
+            onLoadSchema={loadSchemaForPath}
+            onChange={setAnalysisOptions}
+            onDisablePort={disableOptionPort}
+            onUndoDisconnect={undoPipelineChange}
+          />
         )}
       </div>
 
@@ -1783,8 +1831,9 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const settings = useSettingsStore((s) => s.settings)
+  const confirmDialog = useDialogStore((s) => s.confirm)
 
-  const split = data.split
+  const split = useMemo(() => normalizeSplitForInspector(data.split), [data.split])
   const outputParts = !data.isInput ? splitOutputPath(data) : null
   const [uploading, setUploading] = useState(false)
   const [uploadMessage, setUploadMessage] = useState<string | null>(null)
@@ -1976,10 +2025,16 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       fileType: inferFileType(localPath),
     })
     setUploadMessage(`Using ${pathBasename(localPath)}`)
-    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && window.confirm('Upload this file to the cluster now?')) {
+    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && await confirmDialog({
+      title: 'Upload local input',
+      message: 'Upload this file to the cluster now?',
+      detail: 'Choose Upload now to copy it into the configured uploads folder and switch the node to the remote path.',
+      confirmLabel: 'Upload now',
+      cancelLabel: 'Keep local',
+    })) {
       await uploadLocalFileForPath(activeConnectionId, localPath, settings.paths.uploadsSubfolder, nodeId, updateNodeData, setUploadMessage)
     }
-  }, [activeConnectionId, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
+  }, [activeConnectionId, confirmDialog, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
 
   return (
     <div className="flex flex-col gap-3">
@@ -2668,7 +2723,7 @@ async function detectSplitInFolder({
   fileType: FileNodeData['fileType']
   seedPath: string
 }): Promise<DetectedSplit> {
-  const entries = await window.api.sftp.ls(connectionId, folder)
+  const entries = asRemoteFileEntries(await window.api.sftp.ls(connectionId, folder))
   const candidates: DetectedSplit[] = []
   if (mode === 'auto' || mode === 'files') {
     const files = detectFilesInFolder(folder, entries, fileType, axis)
@@ -2720,7 +2775,7 @@ async function detectFoldersInFolder(
     .slice(0, 100)
   const listings = await Promise.all(folderEntries.map(async (entry) => {
     try {
-      return { folder: entry, entries: await window.api.sftp.ls(connectionId, entry.path) }
+      return { folder: entry, entries: asRemoteFileEntries(await window.api.sftp.ls(connectionId, entry.path)) }
     } catch {
       return { folder: entry, entries: [] as RemoteFileEntry[] }
     }
@@ -2763,7 +2818,7 @@ function detectOneNestedFilePerFolder(
   const items: FileNodeSplit['items'] = []
   for (const listing of listings) {
     const key = captureKeyFromName(listing.folder.name)
-    const files = preferredFiles(listing.entries.filter((entry) => !entry.isDirectory), fileType)
+    const files = preferredFiles(asRemoteFileEntries(listing.entries).filter((entry) => !entry.isDirectory), fileType)
     if (files.length === 0) continue
     const picked =
       files.find((file) => file.name.includes(key)) ??
@@ -2772,6 +2827,39 @@ function detectOneNestedFilePerFolder(
     items.push({ key, path: picked.path })
   }
   return sortSplitRows(items)
+}
+
+function safeSplitItems(split: FileNodeSplit | undefined): FileNodeSplit['items'] {
+  const rawItems = (split as { items?: unknown } | undefined)?.items
+  if (!Array.isArray(rawItems)) return []
+  return rawItems.map((item, index) => {
+    const row = item as { key?: unknown; path?: unknown }
+    return {
+      key: typeof row.key === 'string' && row.key.trim() ? row.key : String(index + 1),
+      path: typeof row.path === 'string' ? row.path : '',
+    }
+  })
+}
+
+function normalizeSplitForInspector(split: FileNodeSplit | undefined): FileNodeSplit | undefined {
+  if (!split) return undefined
+  return {
+    ...split,
+    axis: split.axis || 'item',
+    items: safeSplitItems(split),
+    pattern: split.pattern ?? (split.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }),
+  }
+}
+
+function asRemoteFileEntries(value: unknown): RemoteFileEntry[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is RemoteFileEntry => {
+    if (!entry || typeof entry !== 'object') return false
+    const candidate = entry as Partial<RemoteFileEntry>
+    return typeof candidate.name === 'string'
+      && typeof candidate.path === 'string'
+      && typeof candidate.isDirectory === 'boolean'
+  })
 }
 
 function preferredFiles(files: RemoteFileEntry[], fileType: FileNodeData['fileType']): RemoteFileEntry[] {
@@ -3173,9 +3261,66 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
   const inputPath = connectedInputPath(snapshot, nodeId, 'input')
   const schema = resolveUpstreamSchema(snapshot, nodeId, 'input', schemas)
   const columns = schema?.columns ?? []
+  const preset = getTransformPreset(data.preset)
   const selected = data.selectedColumns?.length ? data.selectedColumns : columns
   const filters = data.filters ?? []
   const renames = data.renames ?? []
+  const artifactMode = String(data.presetConfig?.artifactMode ?? 'filtered-table')
+  const lockedFileType =
+    data.preset === 'cohort-filter'
+      ? (artifactMode === 'keep-file' ? 'txt' : null)
+      : data.preset === 'clump-lead-list'
+        ? 'txt'
+        : data.preset === 'plink-score-file'
+          ? 'tsv'
+          : null
+  const presetRoleMappings = useMemo(
+    () => (preset ? suggestRoleMappings(columns, preset.roles, data.roleMappings ?? {}) : {}),
+    [preset, columns, data.roleMappings],
+  )
+  const canProjectColumns = !preset || data.preset === 'cohort-filter' || data.preset === 'gwas-pval-filter'
+  const canRenameColumns = !preset || data.preset === 'cohort-filter' || data.preset === 'gwas-pval-filter'
+  const canUseGenericFilters = !preset
+
+  const setRoleMapping = useCallback((mappingKey: string, roleId: string, column: string) => {
+    const next = { ...(data.roleMappings ?? {}) }
+    if (!column) {
+      delete next[mappingKey]
+    } else {
+      next[mappingKey] = {
+        ...(next[mappingKey] ?? { roleId }),
+        roleId,
+        column,
+        confirmed: true,
+        confidence: 1,
+      }
+    }
+    updateNodeData(nodeId, { roleMappings: next })
+  }, [data.roleMappings, nodeId, updateNodeData])
+
+  const applyPreset = useCallback((presetId: TransformNodeData['preset']) => {
+    if (!presetId) {
+      updateNodeData(nodeId, {
+        preset: undefined,
+        presetConfig: undefined,
+        roleMappings: undefined,
+      })
+      return
+    }
+    const presetDef = getTransformPreset(presetId)
+    if (!presetDef) return
+    const presetConfig = defaultTransformPresetConfig(presetId)
+    const presetFileType =
+      presetId === 'cohort-filter'
+        ? (String(presetConfig.artifactMode ?? 'filtered-table') === 'keep-file' ? 'txt' : presetDef.fileType)
+        : presetDef.fileType
+    updateNodeData(nodeId, {
+      preset: presetId,
+      presetConfig,
+      roleMappings: {},
+      fileType: presetFileType,
+    })
+  }, [nodeId, updateNodeData])
 
   useEffect(() => {
     if (!activeConnectionId || !inputPath || schemas[inputPath]) return
@@ -3216,9 +3361,155 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
         </p>
       </div>
 
-      <div>
+      <div className="rounded-lg border border-border bg-bg-primary/60 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+              Transform mode
+            </h4>
+            <p className="mt-1 text-[11px] text-text-muted">
+              Use a workflow-aware preset when this transform should create a specific analysis artifact.
+            </p>
+          </div>
+          <select
+            value={data.preset ?? ''}
+            onChange={(e) => applyPreset((e.target.value || undefined) as TransformNodeData['preset'])}
+            className="h-8 min-w-[220px] rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+          >
+            <option value="">Manual transform</option>
+            {TRANSFORM_PRESETS.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {preset && (
+          <div className="mt-3 flex flex-col gap-3">
+            <div className="rounded-md border border-border-light bg-bg-secondary px-3 py-2 text-[11px] text-text-secondary">
+              {preset.description}
+            </div>
+
+            <div>
+              <h5 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+                Role mappings
+              </h5>
+              <div className="flex flex-col gap-2">
+                {preset.roles.map((role) => {
+                  const bindingKey = role.binding?.kind === 'roleMapping' ? role.binding.key : role.id
+                  const mapping = presetRoleMappings[bindingKey] ?? presetRoleMappings[role.id]
+                  const suggested = !data.roleMappings?.[bindingKey] && mapping?.column
+                  return (
+                    <div key={role.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-2 items-center">
+                      <div className="text-[11px] text-text-secondary">
+                        <div className="text-text-primary">
+                          {role.label}{role.required ? ' *' : ''}
+                        </div>
+                        {suggested && (
+                          <div className="text-[10px] text-accent">
+                            Suggested: {mapping?.column}
+                          </div>
+                        )}
+                      </div>
+                      <select
+                        value={mapping?.column ?? ''}
+                        onChange={(e) => setRoleMapping(bindingKey, role.id, e.target.value)}
+                        className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                      >
+                        <option value="">-- select column --</option>
+                        {columns.map((column) => (
+                          <option key={column} value={column}>{column}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {data.preset === 'cohort-filter' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                    Cohort value
+                  </label>
+                  <input
+                    value={String(data.presetConfig?.matchValue ?? '')}
+                    onChange={(e) => updateNodeData(nodeId, {
+                      presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('cohort-filter')), matchValue: e.target.value },
+                    })}
+                    className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                    placeholder="EUR"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                    Artifact mode
+                  </label>
+                  <select
+                    value={artifactMode}
+                    onChange={(e) => {
+                      const nextMode = e.target.value
+                      updateNodeData(nodeId, {
+                        presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('cohort-filter')), artifactMode: nextMode },
+                        fileType: nextMode === 'keep-file' ? 'txt' : 'tsv',
+                      })
+                    }}
+                    className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                  >
+                    <option value="filtered-table">Filtered table</option>
+                    <option value="keep-file">PLINK keep file</option>
+                  </select>
+                </div>
+                {artifactMode === 'keep-file' && (
+                  <div className="col-span-2 rounded-md border border-border-light bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
+                    Keep-file mode writes two tab-separated columns with no header. If no family ID column is mapped, BioFlow will duplicate the sample ID into both FID and IID.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {data.preset === 'gwas-pval-filter' && (
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                  P-value threshold
+                </label>
+                <input
+                  type="number"
+                  value={String(data.presetConfig?.threshold ?? 5e-8)}
+                  onChange={(e) => updateNodeData(nodeId, {
+                    presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('gwas-pval-filter')), threshold: e.target.value === '' ? '' : Number(e.target.value) },
+                  })}
+                  className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                  step="any"
+                />
+              </div>
+            )}
+
+            {data.preset === 'plink-score-file' && (
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                  Weight transform
+                </label>
+                <select
+                  value={String(data.presetConfig?.weightTransform ?? 'identity')}
+                  onChange={(e) => updateNodeData(nodeId, {
+                    presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('plink-score-file')), weightTransform: e.target.value },
+                  })}
+                  className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                >
+                  <option value="identity">Use values as-is</option>
+                  <option value="log">log(OR)</option>
+                </select>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {canProjectColumns && (
+        <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
-          Columns
+          {preset ? 'Output columns' : 'Columns'}
         </h4>
         {columns.length > 0 ? (
           <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
@@ -3266,9 +3557,11 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             First 8
           </button>
         </div>
-      </div>
+        </div>
+      )}
 
-      <div>
+      {canUseGenericFilters && (
+        <div>
         <div className="flex items-center justify-between mb-2">
           <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
             Row filters
@@ -3334,9 +3627,11 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             Copy filters from current preview
           </button>
         )}
-      </div>
+        </div>
+      )}
 
-      <div>
+      {canRenameColumns && (
+        <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Rename columns
         </h4>
@@ -3371,19 +3666,26 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
         >
           Add rename
         </button>
-      </div>
+        </div>
+      )}
 
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Output
         </h4>
-        <select
-          value={data.fileType}
-          onChange={(e) => updateNodeData(nodeId, { fileType: e.target.value as TransformNodeData['fileType'] })}
-          className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
-        >
-          {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
+        {lockedFileType ? (
+          <div className="rounded-md border border-border bg-bg-primary px-2 py-2 text-[11px] text-text-secondary">
+            This preset writes a fixed <span className="text-text-primary">{lockedFileType}</span> artifact.
+          </div>
+        ) : (
+          <select
+            value={data.fileType}
+            onChange={(e) => updateNodeData(nodeId, { fileType: e.target.value as TransformNodeData['fileType'] })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
         <div className="mt-2">
           <FolderPickerField
             label=""

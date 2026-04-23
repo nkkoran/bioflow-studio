@@ -7,7 +7,7 @@ export function registerPipelineHandlers(): void {
 
   ipcMain.handle('pipeline:run', async (
     _event,
-    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string },
+    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string; workspace?: import('../../src/types/pipeline').RunState['workspace'] },
   ) => {
     return runner.start(args)
   })

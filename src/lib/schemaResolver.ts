@@ -10,6 +10,7 @@ import {
   parseHeaderLine as parseDelimitedHeader,
 } from '@/lib/delimitedText'
 import { getTool } from '@/lib/toolRegistry'
+import { transformPresetOutputSchema } from '@/lib/transformPresets'
 
 export interface ColumnSchema {
   columns: string[]
@@ -56,7 +57,7 @@ export function connectedInputPath(
 export function outputSchema(
   snapshot: PipelineSnapshot,
   nodeId: string,
-  _portId: string,
+  portId: string,
   schemas: SchemaCache,
 ): ColumnSchema | null {
   const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
@@ -73,6 +74,14 @@ export function outputSchema(
     const upstream = connectedInputSchema(snapshot, nodeId, 'input', schemas)
     if (!upstream) return null
     const data = node.data as TransformNodeData
+    const presetSchema = transformPresetOutputSchema(data, upstream.columns)
+    if (presetSchema?.columns?.length) {
+      return {
+        columns: presetSchema.columns,
+        delimiter: presetSchema.delimiter ?? (data.fileType === 'csv' ? ',' : upstream.delimiter),
+        sourcePath: upstream.sourcePath,
+      }
+    }
     const selected = data.selectedColumns?.length ? data.selectedColumns : upstream.columns
     const renameMap = new Map((data.renames ?? []).map((rule) => [rule.from, rule.to.trim() || rule.from]))
     return {
@@ -80,6 +89,24 @@ export function outputSchema(
       delimiter: data.fileType === 'csv' ? ',' : upstream.delimiter,
       sourcePath: upstream.sourcePath,
     }
+  }
+
+  if (node.type === 'tool') {
+    const data = node.data as ToolNodeData
+    const tool = getTool(data.toolId)
+    const port = tool?.outputs.find((candidate) => candidate.id === portId)
+    if (port?.outputSchema?.columns?.length) {
+      return {
+        columns: port.outputSchema.columns,
+        delimiter: port.outputSchema.delimiter ?? '\t',
+      }
+    }
+  }
+
+  if (node.type === 'merge') {
+    const firstEdge = snapshot.edges.find((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'input')
+    if (!firstEdge) return null
+    return outputSchema(snapshot, firstEdge.source, firstEdge.sourceHandle ?? 'output', schemas)
   }
 
   return null

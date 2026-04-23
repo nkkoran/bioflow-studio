@@ -5,6 +5,7 @@ import { TerminalPanel } from '@/components/terminal/TerminalPanel'
 import { DataPreview } from '@/components/data-preview/DataPreview'
 import { JobsPanel } from '@/components/jobs/JobsPanel'
 import { QueuePanel } from '@/components/jobs/QueuePanel'
+import { ResultsPanel } from '@/components/results/ResultsPanel'
 
 interface BottomPanelProps {
   height: number
@@ -49,6 +50,11 @@ export function BottomPanel({ height }: BottomPanelProps) {
           badge={runningCount > 0 ? runningCount : undefined}
         />
         <TabButton
+          label="Results"
+          active={mode === 'results'}
+          onClick={() => setMode('results')}
+        />
+        <TabButton
           label="Queue"
           active={mode === 'queue'}
           onClick={() => setMode('queue')}
@@ -71,6 +77,7 @@ export function BottomPanel({ height }: BottomPanelProps) {
           {mode === 'terminal' && <TerminalPanel />}
           {mode === 'data' && <DataPreview />}
           {mode === 'jobs' && <JobsPanel />}
+          {mode === 'results' && <ResultsPanel />}
           {mode === 'queue' && <QueuePanel />}
         </>
       )}

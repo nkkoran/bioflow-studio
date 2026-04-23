@@ -149,7 +149,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:fileLifecyclePolicy':
         next.fileLifecyclePolicy =
           value === 'keep-outputs-only' || value === 'delete-intermediates-on-success'
-            ? value
+            ? String(value) as AppSettings['fileLifecyclePolicy']
             : 'keep-all'
         break
     }

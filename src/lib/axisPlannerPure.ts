@@ -1,4 +1,5 @@
 import { getTool } from '@/lib/toolRegistry'
+import { getActiveToolInputs } from '@/lib/analysisOptions'
 import type { FileNodeData, PipelineSnapshot, ToolNodeData, TransformNodeData } from '@/types/pipeline'
 
 export interface EdgeAxisChip {
@@ -33,9 +34,12 @@ export function edgeAxisChips(snapshot: PipelineSnapshot): Record<string, EdgeAx
 
     if (node.type === 'file') {
       const data = node.data as FileNodeData
+      const split = data.split
+      const rawSplitItems = (split as { items?: unknown } | undefined)?.items
+      const splitItems = Array.isArray(rawSplitItems) ? rawSplitItems : []
       outputsByNode.set(nodeId, {
-        output: data.split && data.split.items.length > 0
-          ? { axis: data.split.axis, keys: data.split.items.map((item) => item.key) }
+        output: split && splitItems.length > 0
+          ? { axis: split.axis, keys: splitItems.map((item) => item.key) }
           : null,
       })
       continue
@@ -58,7 +62,7 @@ export function edgeAxisChips(snapshot: PipelineSnapshot): Record<string, EdgeAx
         continue
       }
 
-      const candidates = tool.inputs.flatMap((port) => {
+      const candidates = getActiveToolInputs(tool, data).flatMap((port) => {
         if (port.multi || port.arrayable === false) return []
         const axis = inputAxisFor(nodeId, port.id, incoming, outputsByNode)
         return axis ? [{ portId: port.id, axis }] : []

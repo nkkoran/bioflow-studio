@@ -3,6 +3,9 @@ import { Button } from '@/components/ui/Button'
 import type { FailureDiagnostic as FailureDiagnosticData } from '@/stores/runStore'
 import type { ToolNodeData } from '@/types/pipeline'
 import { usePipelineStore } from '@/stores/pipelineStore'
+import { CUSTOM_FLAG_ID, createCustomFlagBlock, ensureFlagBlocks, flagBlocksToParamValues } from '@/lib/flagRegistry'
+import { analysisOptionsToParamValues, normalizeAnalysisOptions } from '@/lib/analysisOptions'
+import { getTool } from '@/lib/toolRegistry'
 
 interface Props {
   nodeId: string
@@ -26,6 +29,50 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
           memoryGB: Math.max(1, Math.ceil((current.memoryGB ?? 8) * diagnostic.fix.multiplier)),
         },
       })
+    } else if (diagnostic.fix.kind === 'flags') {
+      if (node.type !== 'tool') return
+      const nextBlocks = [...ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)]
+      for (const suggested of diagnostic.fix.blocks) {
+        const existing = nextBlocks.find((block) =>
+          suggested.flagId === CUSTOM_FLAG_ID
+            ? block.flagId === CUSTOM_FLAG_ID && block.customFlag === suggested.customFlag
+            : block.flagId === suggested.flagId,
+        )
+        if (existing) {
+          existing.enabled = true
+          existing.value = suggested.value
+          if (suggested.flagId === CUSTOM_FLAG_ID) {
+            existing.customFlag = suggested.customFlag
+            existing.customLabel = suggested.customLabel
+          }
+          continue
+        }
+        const block = suggested.flagId === CUSTOM_FLAG_ID
+          ? {
+              ...createCustomFlagBlock(data.toolId),
+              customFlag: suggested.customFlag,
+              customLabel: suggested.customLabel,
+              value: suggested.value ?? '',
+            }
+          : {
+              id: `${suggested.flagId}_${Math.random().toString(36).slice(2, 10)}`,
+              flagId: suggested.flagId,
+              enabled: true,
+              value: suggested.value,
+            }
+        nextBlocks.push(block)
+      }
+      const tool = getTool(data.toolId)
+      const migratedOptions = tool
+        ? normalizeAnalysisOptions(tool, { ...data, flagBlocks: nextBlocks, paramValues: flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues) })
+        : data.analysisOptions
+      updateNodeData(nodeId, {
+        flagBlocks: nextBlocks,
+        analysisOptions: migratedOptions,
+        paramValues: tool && migratedOptions
+          ? analysisOptionsToParamValues(tool, migratedOptions, flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues))
+          : flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues),
+      })
     } else {
       updateNodeData(nodeId, {
         slurmOverride: {
@@ -46,7 +93,7 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
       <div className="mb-2 text-[11px] text-text-secondary">{diagnostic.suggestion}</div>
       {diagnostic.fix && (
         <Button variant="secondary" size="sm" className="mb-2 h-6 text-xs" onClick={applyFix}>
-          Apply fix and rerun
+          {diagnostic.fix.kind === 'flags' ? 'Apply suggested flag and rerun' : 'Apply fix and rerun'}
         </Button>
       )}
       <details className="text-[10px] text-text-muted">

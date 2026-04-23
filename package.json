@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "preview": "electron-vite preview"
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
@@ -20,7 +23,8 @@
     "electron": "^34.5.8",
     "electron-vite": "^5.0.0",
     "typescript": "^6.0.2",
-    "vite": "^6.4.2"
+    "vite": "^6.4.2",
+    "vitest": "^4.1.5"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",

@@ -40,6 +40,7 @@ export interface StartOptions {
   connectionId: string
   snapshot: PipelineSnapshot
   workDir?: string
+  workspace?: RunState['workspace']
 }
 
 /**
@@ -164,6 +165,8 @@ export class PipelineRunner {
       runId,
       pipelineId: snapshot.id,
       pipelineName: snapshot.name,
+      snapshot,
+      workspace: opts.workspace ?? null,
       connectionId,
       arrayChainMode,
       fileLifecyclePolicy,

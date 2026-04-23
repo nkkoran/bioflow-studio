@@ -1,5 +1,5 @@
 import { Client } from 'ssh2'
-import type { ClientChannel, ConnectConfig } from 'ssh2'
+import type { AuthenticationType, ClientChannel, ConnectConfig, Prompt } from 'ssh2'
 import { readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { homedir } from 'os'
@@ -151,7 +151,7 @@ function createPasswordAuthHandler(config: ConnectionConfig): ConnectConfig['aut
   let triedPassword = false
 
   return (methodsLeft, partialSuccess) => {
-    const canTry = (method: string): boolean => methodsLeft === null || methodsLeft.includes(method)
+    const canTry = (method: AuthenticationType): boolean => methodsLeft === null || methodsLeft.includes(method)
     const methodsLabel = methodsLeft?.join(',') ?? 'initial'
 
     if (partialSuccess === true && canTry('keyboard-interactive')) {
@@ -360,7 +360,7 @@ function buildPromptRequest(
   config: ConnectionConfig,
   title: string,
   instructions: string,
-  prompt: { prompt: string; echo: boolean },
+  prompt: Prompt,
 ): PromptRequestPayload {
   const promptLabel = prompt.prompt.trim() || 'Authentication response'
   const normalizedInstructions = instructions.trim()
@@ -569,7 +569,7 @@ export class SshManager {
             // via keyboard-interactive before they prompt for MFA choices/codes.
             if (shouldAutoRespondPasswordPrompt(cleanConfig, promptText, instructions, keyboardInteractiveState)) {
               this.emitDebug(id, 'prompt', 'Auto-responded to "password" prompt with the stored password')
-              responses.push(cleanConfig.password)
+              responses.push(cleanConfig.password!)
               keyboardInteractiveState.passwordAutoResponded = true
             }
             // For MFA/verification/OTP prompts, or any unknown prompt, ask the user
@@ -938,7 +938,7 @@ export class SshManager {
               const promptText = prompt.prompt.toLowerCase()
               if (shouldAutoRespondPasswordPrompt(config, promptText, instructions, keyboardInteractiveState)) {
                 this.emitDebug(id, 'prompt', 'Auto-responded to "password" prompt with the stored password')
-                responses.push(config.password)
+                responses.push(config.password!)
                 keyboardInteractiveState.passwordAutoResponded = true
               } else {
                 this.emitDebug(id, 'prompt', `Prompted user for: ${prompt.prompt || instructions || 'verification code'}`)

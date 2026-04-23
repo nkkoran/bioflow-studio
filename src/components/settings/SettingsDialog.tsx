@@ -253,13 +253,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               <p className="text-[11px] text-text-muted">
                 Show a warning after connect when the cluster reports a login-node CPU time limit below this value. Use 0 to suppress the warning.
               </p>
-              <Checkbox
-                label="Use experimental PLINK block-builder inspector"
-                checked={settings.plinkFlagBuilderEnabled}
-                onChange={(value) => toggle('settings:experimental:plinkFlagBuilderEnabled', value)}
-              />
+              <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-relaxed text-text-primary">
+                PLINK tools now use the block-based flag builder so users can add documented flags, custom fallback flags, and suggested rerun fixes directly in the inspector.
+              </div>
               <p className="text-[11px] text-text-muted">
-                Keeps the current PLINK inspector available as a fallback while the new block-based authoring flow is still being proven out.
+                This is the shared large-flag pattern we can extend to other tools with broad command surfaces in later passes.
               </p>
             </div>
           )}

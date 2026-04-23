@@ -10,6 +10,9 @@ import { CenterPanel } from './CenterPanel'
 import { BottomPanel } from './BottomPanel'
 import { MfaPrompt } from '@/components/connection/MfaPrompt'
 import { LoginPolicyToast } from '@/components/connection/LoginPolicyToast'
+import { AppDialogs } from '@/components/ui/AppDialogs'
+import { useWorkspaceStore } from '@/stores/workspaceStore'
+import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
 
 const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 480
@@ -22,6 +25,7 @@ export function AppLayout() {
   const setSidebarWidth = useUIStore((s) => s.setSidebarWidth)
   const bottomPanelHeight = useUIStore((s) => s.bottomPanelHeight)
   const setBottomPanelHeight = useUIStore((s) => s.setBottomPanelHeight)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
 
   const dragging = useRef<'sidebar' | 'bottom' | null>(null)
   const dragDepth = useRef(0)
@@ -97,11 +101,22 @@ export function AppLayout() {
     }).catch((err) => {
       console.error('[AppLayout] load settings failed:', err)
     })
+    void useWorkspaceStore.getState().load().then(() => {
+      void useWorkspaceStore.getState().applyActiveWorkspace(useConnectionStore.getState().activeConnectionId)
+    }).catch((err) => {
+      console.error('[AppLayout] load workspaces failed:', err)
+    })
     void useUIStore.getState().loadAdvancedExpanded().catch((err) => {
       console.error('[AppLayout] load advanced params state failed:', err)
     })
     return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
   }, [])
+
+  useEffect(() => {
+    void useWorkspaceStore.getState().applyActiveWorkspace(activeConnectionId).catch((err) => {
+      console.error('[AppLayout] apply workspace failed:', err)
+    })
+  }, [activeConnectionId])
 
   useEffect(() => {
     let disposed = false
@@ -229,6 +244,7 @@ export function AppLayout() {
   return (
     <div className="flex flex-col h-screen w-screen bg-bg-primary text-text-primary overflow-hidden">
       <TopBar />
+      <AppDialogs />
       <MfaPrompt />
       <LoginPolicyToast />
       {windowDragActive && (

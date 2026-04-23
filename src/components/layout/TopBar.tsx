@@ -3,6 +3,7 @@ import { Settings } from 'lucide-react'
 import { ConnectionStatus } from '@/components/connection/ConnectionStatus'
 import { PipelineSwitcher } from './PipelineSwitcher'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
+import { WorkspaceSwitcher } from '@/components/workspace/WorkspaceSwitcher'
 
 // Width below which the TopBar switches to compact mode: title hides,
 // connection status collapses to an icon pill. Measured against the TopBar
@@ -36,6 +37,7 @@ export function TopBar() {
       <div className="w-[70px] shrink-0" />
 
       <PipelineSwitcher compact={compact} />
+      {!compact && <WorkspaceSwitcher />}
 
       <div className="flex-1 min-w-0" />
 

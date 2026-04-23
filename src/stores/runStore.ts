@@ -11,10 +11,12 @@
  *   the SFTP-refresh path in LogViewer (array jobs / manual reload).
  */
 import { create } from 'zustand'
-import type { PipelineSnapshot, RunState, RunStatus } from '@/types/pipeline'
+import type { PipelineSnapshot, RunState, RunStatus, ToolNodeData } from '@/types/pipeline'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useWorkspaceStore } from '@/stores/workspaceStore'
+import type { ToolFlagBlock } from '@/types/pipeline'
 
 const LOG_RING_SIZE = 500
 
@@ -23,7 +25,9 @@ export interface FailureDiagnostic {
   tail: string[]
   cause: string
   suggestion: string
-  fix?: { kind: 'memory' | 'time'; multiplier: number }
+  fix?:
+    | { kind: 'memory' | 'time'; multiplier: number }
+    | { kind: 'flags'; blocks: Array<Pick<ToolFlagBlock, 'flagId' | 'value' | 'customFlag' | 'customLabel'>> }
 }
 
 interface RunStoreState {
@@ -64,7 +68,25 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   diagnostics: {},
 
   startRun: async (connectionId, snapshot) => {
-    const { runId } = await window.api.pipeline.run(connectionId, snapshot)
+    const workspaceStore = useWorkspaceStore.getState()
+    const activeWorkspace = workspaceStore.activeWorkspaceId
+      ? workspaceStore.workspaces.find((workspace) => workspace.id === workspaceStore.activeWorkspaceId) ?? null
+      : null
+    const { runId } = await window.api.pipeline.run(connectionId, snapshot, undefined, activeWorkspace ? {
+      id: activeWorkspace.id,
+      name: activeWorkspace.name,
+      connectionName: activeWorkspace.connectionName,
+      analysisRoot: activeWorkspace.analysisRoot,
+      slurmAccount: activeWorkspace.slurmAccount,
+      slurmPartition: activeWorkspace.slurmPartition,
+      toolsRoot: activeWorkspace.toolsRoot,
+      annovarScriptsPath: activeWorkspace.annovarScriptsPath,
+      annovarDbPath: activeWorkspace.annovarDbPath,
+      vepPath: activeWorkspace.vepPath,
+      vepCachePath: activeWorkspace.vepCachePath,
+      recommendedTemplateId: activeWorkspace.recommendedTemplateId,
+      notes: activeWorkspace.notes,
+    } : null)
     // Clear old logs before a new run so stale output doesn't bleed through.
     get().clearLogs()
     set({ activeRunId: runId, selectedNodeId: null })
@@ -216,6 +238,9 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
             if (!run) return state
             if (status === 'done' || status === 'failed' || status === 'cancelled') {
               notifyRunFinished(runId, status, run.pipelineName)
+              if (status === 'done' && state.activeRunId === runId) {
+                useUIStore.getState().setBottomPanelMode('results')
+              }
             }
             return { runs: { ...state.runs, [runId]: { ...run, status: status as RunStatus, updatedAt: Date.now() } } }
           })
@@ -292,7 +317,9 @@ async function fetchFailureDiagnostic(
   try {
     const text = (await window.api.ssh.exec(run.connectionId, `tail -n 50 ${shellQuote(path)} 2>/dev/null || true`)).stdout
     const tail = text.split(/\r?\n/).slice(-50)
-    return diagnoseTail(tail)
+    const toolNode = run.snapshot?.nodes.find((candidate) => candidate.id === nodeId && candidate.type === 'tool')
+    const toolId = toolNode?.type === 'tool' ? (toolNode.data as ToolNodeData).toolId : undefined
+    return diagnoseTail(tail, toolId)
   } catch {
     return null
   }
@@ -303,7 +330,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`
 }
 
-function diagnoseTail(tail: string[]): FailureDiagnostic {
+function diagnoseTail(tail: string[], toolId?: string): FailureDiagnostic {
   const text = tail.join('\n')
   if (/out of memory|oom-kill|oom killed|MemoryError/i.test(text)) {
     return { tail, cause: 'Likely out of memory', suggestion: 'Increase memory and rerun this step.', fix: { kind: 'memory', multiplier: 2 } }
@@ -314,10 +341,66 @@ function diagnoseTail(tail: string[]): FailureDiagnostic {
   if (/command not found|No such file or directory: .*plink|No such file or directory: .*regenie|No such file or directory: .*bcftools/i.test(text)) {
     return { tail, cause: 'Tool or module was not found', suggestion: 'Check the module name or tool path in the node/settings.' }
   }
+  if (toolId?.startsWith('plink2.')) {
+    const plinkDiagnostic = diagnosePlinkTail(tail, text)
+    if (plinkDiagnostic) return plinkDiagnostic
+  }
   if (/Invalid chromosome|No variants remaining/i.test(text)) {
     return { tail, cause: 'Input/filter removed the expected variants', suggestion: 'Check chromosome labels and filter thresholds for this input.' }
   }
   return { tail, cause: 'The job failed', suggestion: 'Review the last stderr lines and adjust the node settings before rerunning.' }
+}
+
+function diagnosePlinkTail(tail: string[], text: string): FailureDiagnostic | null {
+  if (/ambiguous sex|missing sex|allow-no-sex/i.test(text)) {
+    return {
+      tail,
+      cause: 'PLINK dropped phenotypes because some samples have missing or ambiguous sex values.',
+      suggestion: 'If that is expected for this cohort, rerun with --allow-no-sex.',
+      fix: { kind: 'flags', blocks: [{ flagId: 'allow-no-sex', value: true }] },
+    }
+  }
+  if (/duplicate-id variant|duplicate variant id|rmdup\.mismatch|duplicate ids?/i.test(text)) {
+    return {
+      tail,
+      cause: 'PLINK found duplicate variant IDs that need to be resolved before the analysis can continue.',
+      suggestion: 'Try --rm-dup exclude-mismatch to drop conflicting duplicates, or review the mismatch report if you need a less aggressive fix.',
+      fix: { kind: 'flags', blocks: [{ flagId: 'rm-dup', value: 'exclude-mismatch' }] },
+    }
+  }
+  if (/duplicate allele/i.test(text)) {
+    return {
+      tail,
+      cause: 'PLINK reported duplicate allele definitions in the input.',
+      suggestion: 'Start by deduplicating conflicting records with --rm-dup exclude-mismatch. If this is really a multiallelic-site issue, add --max-alleles 2 as well.',
+      fix: { kind: 'flags', blocks: [{ flagId: 'rm-dup', value: 'exclude-mismatch' }] },
+    }
+  }
+  if (/split multiallelic variant under a single id|must have unique variant ids|non-unique variant ids?|duplicate variant IDs/i.test(text)) {
+    return {
+      tail,
+      cause: 'PLINK needs unique variant IDs for this step.',
+      suggestion: 'Rerun with --set-all-var-ids, such as @:#$r,$a, to assign stable chromosome/position/allele-based IDs.',
+      fix: { kind: 'flags', blocks: [{ flagId: 'set-all-var-ids', value: '@:#$r,$a' }] },
+    }
+  }
+  if (/more than 2 alleles|multiallelic|must be biallelic/i.test(text)) {
+    return {
+      tail,
+      cause: 'PLINK hit multiallelic variants that this step does not handle cleanly.',
+      suggestion: 'Try restricting the run to biallelic variants with --max-alleles 2. If you only want SNPs, add --snps-only just-acgt as well.',
+      fix: { kind: 'flags', blocks: [{ flagId: 'max-alleles', value: 2 }] },
+    }
+  }
+  if (/invalid chromosome code|extra chromosome|unrecognized chromosome/i.test(text)) {
+    return {
+      tail,
+      cause: 'PLINK rejected nonstandard chromosome labels in the input.',
+      suggestion: 'If these contig names are expected for your dataset, rerun with --allow-extra-chr.',
+      fix: { kind: 'flags', blocks: [{ flagId: 'allow-extra-chr', value: true }] },
+    }
+  }
+  return null
 }
 
 function playNotificationSound(status: RunStatus): void {

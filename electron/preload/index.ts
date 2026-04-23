@@ -66,6 +66,17 @@ export interface FileStat {
   permissions: string
 }
 
+function normalizeRemoteFileEntries(value: unknown): RemoteFileEntry[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is RemoteFileEntry => {
+    if (!entry || typeof entry !== 'object') return false
+    const candidate = entry as Partial<RemoteFileEntry>
+    return typeof candidate.name === 'string'
+      && typeof candidate.path === 'string'
+      && typeof candidate.isDirectory === 'boolean'
+  })
+}
+
 export interface SshKeySetupRequest {
   host: string
   port: number
@@ -164,8 +175,8 @@ const api = {
     },
   },
   sftp: {
-    ls: (id: string, remotePath: string): Promise<RemoteFileEntry[]> =>
-      ipcRenderer.invoke('sftp:ls', id, remotePath),
+    ls: async (id: string, remotePath: string): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('sftp:ls', id, remotePath)),
     stat: (id: string, remotePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('sftp:stat', id, remotePath),
     read: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
@@ -225,8 +236,8 @@ const api = {
       ipcRenderer.invoke('store:delete-secret', key),
   },
   local: {
-    ls: (dirPath: string): Promise<RemoteFileEntry[]> =>
-      ipcRenderer.invoke('local:ls', dirPath),
+    ls: async (dirPath: string): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('local:ls', dirPath)),
     stat: (filePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('local:stat', filePath),
     read: (filePath: string, offset?: number, length?: number): Promise<string> =>
@@ -257,8 +268,8 @@ const api = {
       ipcRenderer.invoke('dialog:openDirectory', options),
   },
   pipeline: {
-    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<{ runId: string }> =>
-      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir }),
+    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string, workspace?: RunState['workspace']): Promise<{ runId: string }> =>
+      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir, workspace }),
     cancel: (runId: string): Promise<void> =>
       ipcRenderer.invoke('pipeline:cancel', runId),
     cancelNode: (runId: string, nodeId: string): Promise<void> =>

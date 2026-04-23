@@ -34,16 +34,21 @@ import { AxedEdge } from './edges/AxedEdge'
 import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { BUNDLE_DRAG_MIME, DRAG_MIME } from './ToolPalette'
+import { Dialog } from '@/components/ui/Dialog'
+import { Input } from '@/components/ui/Input'
+import { Button } from '@/components/ui/Button'
 import { usePipelineStore, type BioflowNode } from '@/stores/pipelineStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { edgeAxisChips } from '@/lib/axisPlannerPure'
 import { pathBasename } from '@/lib/utils'
 import type { FileType } from '@/types/pipeline'
 import type { NodeGroup } from '@/types/pipeline'
+import { useDialogStore } from '@/stores/dialogStore'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
 
@@ -90,9 +95,18 @@ function CanvasInner() {
   const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const uploadsSubfolder = useSettingsStore((s) => s.settings.paths.uploadsSubfolder)
+  const confirmDialog = useDialogStore((s) => s.confirm)
 
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
+  const [groupResourceEditor, setGroupResourceEditor] = useState<null | {
+    groupId: string
+    label: string
+    cpus: string
+    memoryGB: string
+    timeHours: string
+    partition: string
+  }>(null)
   const [dropMessage, setDropMessage] = useState<string | null>(null)
   const [dropBusy, setDropBusy] = useState(false)
   const displayEdges = useMemo(() => {
@@ -179,7 +193,13 @@ function CanvasInner() {
     try {
       setDropMessage(localDrop ? `Adding ${label}…` : 'Adding file…')
       if (localDrop && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
-        const uploadNow = window.confirm(`Upload ${label} to the active cluster connection now?`)
+        const uploadNow = await confirmDialog({
+          title: 'Upload dropped file',
+          message: `Upload ${label} to the active cluster connection now?`,
+          detail: 'Choose Upload now to copy the file into the cluster uploads folder before wiring it into the pipeline.',
+          confirmLabel: 'Upload now',
+          cancelLabel: 'Keep local',
+        })
         if (uploadNow) {
           setDropMessage(`Uploading ${label} to the cluster…`)
           const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
@@ -199,7 +219,8 @@ function CanvasInner() {
       }
 
       const tool = getTool((target.data as any).toolId)
-      if (!tool || tool.inputs.length === 0) {
+      const activeInputs = tool ? getActiveToolInputs(tool, target.data as any) : []
+      if (!tool || activeInputs.length === 0) {
         addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
         setDropMessage(`Added ${label} to the canvas.`)
         return
@@ -224,7 +245,7 @@ function CanvasInner() {
         setDropMessage(`Attached ${label} to ${target.data.label ?? 'the tool'}.`)
       }
 
-      const compatible = tool.inputs.filter((candidate) => {
+      const compatible = activeInputs.filter((candidate) => {
         if (!areTypesCompatible(fileType, candidate.fileType)) return false
         if (candidate.multi) return true
         return !occupied.has(candidate.id)
@@ -245,7 +266,7 @@ function CanvasInner() {
       setPortPicker({
         x: wrapperRef.current?.getBoundingClientRect().left ?? position.x,
         y: wrapperRef.current?.getBoundingClientRect().top ?? position.y,
-        ports: tool.inputs,
+        ports: activeInputs,
         droppedType: fileType,
         occupiedPortIds: occupied,
         onPick: (portId) => {
@@ -260,7 +281,7 @@ function CanvasInner() {
       setDropBusy(false)
       window.setTimeout(() => setDropMessage(null), 3000)
     }
-  }, [activeConnectionId, addFileNode, edges, nodes, onConnect, uploadsSubfolder])
+  }, [activeConnectionId, addFileNode, confirmDialog, edges, nodes, onConnect, uploadsSubfolder])
 
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
@@ -366,8 +387,9 @@ function CanvasInner() {
       let targetType = 'any'
       if (targetNode.type === 'tool') {
         const tool = getTool((targetNode.data as any).toolId)
-        const port = tool?.inputs.find((p) => p.id === conn.targetHandle)
+        const port = tool ? getActiveToolInputs(tool, targetNode.data as any).find((p) => p.id === conn.targetHandle) : undefined
         if (port) targetType = port.fileType
+        else return false
       } else if (targetNode.type === 'file') {
         targetType = (targetNode.data as any).fileType
       } else if (targetNode.type === 'transform') {
@@ -564,17 +586,13 @@ function CanvasInner() {
                     className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
                     onClick={() => {
                       const group = menu.group!
-                      const cpus = prompt('CPUs for grouped sbatch (blank = max across nodes)', group.sharedResources?.cpus?.toString() ?? '')
-                      const memoryGB = prompt('Memory GB for grouped sbatch (blank = max across nodes)', group.sharedResources?.memoryGB?.toString() ?? '')
-                      const timeHours = prompt('Time hours for grouped sbatch (blank = max across nodes)', group.sharedResources?.timeHours?.toString() ?? '')
-                      const partition = prompt('Partition for grouped sbatch (blank = default)', group.sharedResources?.partition ?? '')
-                      updateGroup(group.id, {
-                        sharedResources: {
-                          cpus: cpus ? Number(cpus) : undefined,
-                          memoryGB: memoryGB ? Number(memoryGB) : undefined,
-                          timeHours: timeHours ? Number(timeHours) : undefined,
-                          partition: partition || undefined,
-                        },
+                      setGroupResourceEditor({
+                        groupId: group.id,
+                        label: group.label,
+                        cpus: group.sharedResources?.cpus?.toString() ?? '',
+                        memoryGB: group.sharedResources?.memoryGB?.toString() ?? '',
+                        timeHours: group.sharedResources?.timeHours?.toString() ?? '',
+                        partition: group.sharedResources?.partition ?? '',
                       })
                       setMenu(null)
                     }}
@@ -587,6 +605,70 @@ function CanvasInner() {
           </div>
         </>
       )}
+      <Dialog
+        open={groupResourceEditor !== null}
+        onClose={() => setGroupResourceEditor(null)}
+        title="Grouped sbatch resources"
+        footer={(
+          <>
+            <Button variant="secondary" onClick={() => setGroupResourceEditor(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!groupResourceEditor) return
+                updateGroup(groupResourceEditor.groupId, {
+                  sharedResources: {
+                    cpus: groupResourceEditor.cpus.trim() ? Number(groupResourceEditor.cpus) : undefined,
+                    memoryGB: groupResourceEditor.memoryGB.trim() ? Number(groupResourceEditor.memoryGB) : undefined,
+                    timeHours: groupResourceEditor.timeHours.trim() ? Number(groupResourceEditor.timeHours) : undefined,
+                    partition: groupResourceEditor.partition.trim() || undefined,
+                  },
+                })
+                setGroupResourceEditor(null)
+              }}
+            >
+              Save resources
+            </Button>
+          </>
+        )}
+      >
+        {groupResourceEditor && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2 text-xs text-text-muted">
+              Override the shared Slurm resources for <span className="text-text-primary">{groupResourceEditor.label}</span>. Leave fields blank to keep the automatic max-across-nodes behavior.
+            </div>
+            <Input
+              label="CPUs"
+              type="number"
+              min={1}
+              value={groupResourceEditor.cpus}
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, cpus: e.target.value } : current)}
+            />
+            <Input
+              label="Memory (GB)"
+              type="number"
+              min={1}
+              value={groupResourceEditor.memoryGB}
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, memoryGB: e.target.value } : current)}
+            />
+            <Input
+              label="Time (hours)"
+              type="number"
+              min={0}
+              step="0.5"
+              value={groupResourceEditor.timeHours}
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, timeHours: e.target.value } : current)}
+            />
+            <Input
+              label="Partition"
+              value={groupResourceEditor.partition}
+              placeholder="Use connection default"
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, partition: e.target.value } : current)}
+            />
+          </div>
+        )}
+      </Dialog>
     </div>
   )
 }

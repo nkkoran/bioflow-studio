@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-type BottomPanelMode = 'terminal' | 'data' | 'jobs' | 'queue'
+type BottomPanelMode = 'terminal' | 'data' | 'jobs' | 'queue' | 'results'
 type Theme = 'dark'
 
 export type FilePickTarget = 'file' | 'directory'

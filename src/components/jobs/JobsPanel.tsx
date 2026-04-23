@@ -13,9 +13,11 @@ import { LogViewer } from './LogViewer'
 import { JobSummary } from './JobSummary'
 import { QueueDetails } from './QueueDetails'
 import { FailureDiagnostic } from './FailureDiagnostic'
+import { RunRecoveryCard } from './RunRecoveryCard'
 import type { NodeRunState, RunState } from '@/types/pipeline'
 import { useFileStore } from '@/stores/fileStore'
 import { useConnectionStore } from '@/stores/connectionStore'
+import { useUIStore } from '@/stores/uiStore'
 
 export function JobsPanel() {
   const runs = useRunStore((s) => s.runs)
@@ -31,6 +33,7 @@ export function JobsPanel() {
   const pipelineNodes = usePipelineStore((s) => s.nodes)
   const navigate = useFileStore((s) => s.navigate)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
+  const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const [nodesCollapsed, setNodesCollapsed] = useState(false)
 
   // Sort runs most-recent-first for the selector
@@ -121,6 +124,18 @@ export function JobsPanel() {
           </Button>
         )}
 
+        {activeRun && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setBottomPanelMode('results')}
+            className="h-6 text-xs"
+            title="Browse run outputs"
+          >
+            Results
+          </Button>
+        )}
+
         {activeRun && selectedNodeId && activeRun.nodes[selectedNodeId]?.status === 'failed' && activeRun.pipelineId === pipelineId && (
           <Button
             variant="secondary"
@@ -178,10 +193,18 @@ export function JobsPanel() {
           <div className="flex-1 min-w-0 flex flex-col">
             <RunDetails run={activeRun} />
             <QueueDetails run={activeRun} />
+            <RunRecoveryCard
+              run={activeRun}
+              canRerun={activeRun.pipelineId === pipelineId}
+              onRerun={(nodeId) => {
+                if (activeRun.pipelineId !== pipelineId) return
+                void rerunNode(activeRun.runId, nodeId, exportSnapshot())
+              }}
+            />
             {selectedNodeId && activeRun.nodes[selectedNodeId] && (
               <SelectedNodeSummary
                 ns={activeRun.nodes[selectedNodeId]}
-                label={labelForNode(pipelineNodes, selectedNodeId)}
+                label={labelForNode(activeRun.snapshot?.nodes as Array<{ id: string; type?: string; data: Record<string, unknown> }> | undefined ?? pipelineNodes, selectedNodeId)}
               />
             )}
             {(() => {

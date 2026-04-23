@@ -16,6 +16,7 @@ import type {
   MergeStrategy,
 } from '../../src/types/pipeline'
 import { topoSort } from './topoSort'
+import { getActiveToolInputs, normalizeAnalysisOptions } from '../../src/lib/analysisOptions'
 
 export type AxedValue =
   | { kind: 'single'; path: string }
@@ -254,15 +255,18 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         nodeId, nodeType: 'file', mode: 'skip', dependsOnArrayNodeIds: [],
         inputs: {}, outputs: {},
       }
-      if (data.split && data.split.items.length > 0) {
+      const split = data.split
+      const rawSplitItems = (split as { items?: unknown } | undefined)?.items
+      const splitItems = Array.isArray(rawSplitItems) ? rawSplitItems : []
+      if (split && splitItems.length > 0) {
         plan.outputs.output = {
           kind: 'array',
-          axis: data.split.axis,
-          keys: data.split.items.map((i) => i.key),
-          paths: data.split.items.map((i) => i.path),
-          pathTemplate: splitPathTemplate(data.split),
+          axis: split.axis,
+          keys: splitItems.map((i) => i.key),
+          paths: splitItems.map((i) => i.path),
+          pathTemplate: splitPathTemplate(split),
         }
-      } else if (data.split && data.split.items.length === 0) {
+      } else if (split && splitItems.length === 0) {
         throw new AxisPlanError('EMPTY_SPLIT', nodeId, `File node "${data.label}" has split with zero items`)
       } else {
         plan.outputs.output = { kind: 'single', path: data.path }
@@ -285,6 +289,14 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
 
     // Resolve each target port
     for (const [portId, edges] of inEdges) {
+      if (node.type === 'tool') {
+        const data = node.data as ToolNodeData
+        const tool = ctx.getTool(data.toolId)
+        const dataWithConnectedOptions: ToolNodeData = tool
+          ? { ...data, analysisOptions: normalizeAnalysisOptions(tool, data, { connectedPortIds: inEdges.keys() }) }
+          : data
+        if (tool && !getActiveToolInputs(tool, dataWithConnectedOptions).some((port) => port.id === portId)) continue
+      }
       // Gather upstream values
       const upstreams = edges.map((e) => {
         const upstreamPlan = plans.get(e.source)
@@ -581,7 +593,7 @@ function portIsMulti(
   if (node.type === 'tool') {
     const toolData = node.data as ToolNodeData
     const tool = ctx.getTool(toolData.toolId)
-    const portDef = tool?.inputs.find((p) => p.id === portId)
+    const portDef = tool ? getActiveToolInputs(tool, toolData).find((p) => p.id === portId) : undefined
     return Boolean(portDef?.multi)
   }
   if (node.type === 'transform') {

@@ -16,5 +16,13 @@
     "declaration": true,
     "composite": true
   },
-  "include": ["electron/**/*.ts", "src/types/**/*.ts", "src/lib/toolRegistry.ts", "src/lib/resourceLearning.ts"]
+  "include": [
+    "electron/**/*.ts",
+    "src/types/**/*.ts",
+    "src/lib/analysisOptions.ts",
+    "src/lib/annovarCatalog.ts",
+    "src/lib/flagRegistry.ts",
+    "src/lib/resourceLearning.ts",
+    "src/lib/toolRegistry.ts"
+  ]
 }

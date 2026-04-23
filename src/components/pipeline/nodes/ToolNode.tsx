@@ -15,6 +15,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { computeNodeOutputPreview } from '@/lib/outputPathPreview'
 import { iconForTool } from '@/lib/toolIcons'
+import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
@@ -96,6 +97,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   }
 
   const borderColor = CATEGORY_COLORS[tool.category] ?? 'border-border'
+  const activeInputs = getActiveToolInputs(tool, nodeData)
   const connectedInputs = new Set(edges.filter((edge) => edge.target === id).map((edge) => edge.targetHandle ?? 'input'))
   const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
   const inputDetailsByPort = useMemo(() => {
@@ -164,10 +166,10 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           exactly with the port label. */}
       <div className="px-3 py-2 flex flex-col text-[11px]">
         {/* Inputs on the left */}
-        {tool.inputs.length > 0 && (
+        {activeInputs.length > 0 && (
           <div className="mb-1 text-[9px] uppercase tracking-wide text-text-muted">Inputs</div>
         )}
-        {tool.inputs.map((port) => {
+        {activeInputs.map((port) => {
           const connected = connectedInputs.has(port.id)
           return (
             <div key={port.id} className="relative flex items-center h-7 gap-2">
@@ -199,7 +201,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           )
         })}
 
-        {tool.inputs.length > 0 && tool.outputs.length > 0 && (
+        {activeInputs.length > 0 && tool.outputs.length > 0 && (
           <div className="h-px bg-border my-1" />
         )}
 

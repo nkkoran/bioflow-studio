@@ -9,6 +9,7 @@ import { useClusterInfoStore } from '@/stores/clusterInfoStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
 import { ConnectionLogDrawer } from './ConnectionLogDrawer'
+import { ClusterDoctorDialog } from './ClusterDoctorDialog'
 
 interface ConnectionStatusProps {
   /** When true, collapse to an icon-only pill (used in narrow TopBar widths). */
@@ -20,6 +21,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
   const [dialogOpen, setDialogOpen] = useState(false)
   const [slurmOpen, setSlurmOpen] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
+  const [doctorOpen, setDoctorOpen] = useState(false)
   const [cacheRefreshing, setCacheRefreshing] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -210,6 +212,15 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
             <div className="p-2 flex flex-col gap-1">
               {!isLocal && (
                 <button
+                  onClick={() => setDoctorOpen(true)}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
+                >
+                  <Server size={14} />
+                  Cluster doctor
+                </button>
+              )}
+              {!isLocal && (
+                <button
                   onClick={() => void handleRefreshClusterCaches()}
                   className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
                 >
@@ -266,6 +277,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
 
       <ConnectionDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
       <ConnectionLogDrawer open={logOpen} onClose={() => setLogOpen(false)} connectionId={activeConnectionId} />
+      <ClusterDoctorDialog open={doctorOpen} onClose={() => setDoctorOpen(false)} connectionId={activeConnectionId} />
     </>
   )
 }

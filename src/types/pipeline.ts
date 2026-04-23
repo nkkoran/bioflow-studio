@@ -6,6 +6,14 @@
  * Edges represent data flow (output file → input file).
  */
 
+import type {
+  ArtifactRecipe,
+  OutputSchemaDef,
+  ParameterRule,
+  PortContract,
+  RoleMapping,
+} from './readiness'
+
 /** File-type categories used to validate connections between nodes. */
 export type FileType =
   | 'vcf' | 'bcf'            // variant calling
@@ -81,6 +89,38 @@ export interface ToolFlagBlock {
   flagId: string
   value?: unknown
   enabled: boolean
+  customFlag?: string
+  customLabel?: string
+  customInputKind?: 'text' | 'file'
+}
+
+export type AnalysisOptionKind =
+  | 'switch'
+  | 'text'
+  | 'number'
+  | 'enum'
+  | 'list'
+  | 'column'
+  | 'file'
+  | 'compound'
+  | 'custom'
+
+export type AnalysisOptionGroup = 'Input' | 'Model' | 'Filters' | 'Output' | 'Resources' | 'Advanced'
+
+export interface AnalysisSubOptionState {
+  enabled?: boolean
+  value?: unknown
+}
+
+export interface AnalysisOptionState {
+  optionId: string
+  enabled: boolean
+  value?: unknown
+  source?: ValueSource
+  subOptions?: Record<string, AnalysisSubOptionState>
+  customFlag?: string
+  customLabel?: string
+  customInputKind?: 'text' | 'file'
 }
 
 /** Input/output port on a tool. */
@@ -89,6 +129,8 @@ export interface ToolPort {
   label: string
   description?: string      // plain-language explanation shown in the inspector
   fileType: FileType
+  contract?: PortContract
+  outputSchema?: OutputSchemaDef
   autoMergeDefault?: MergeStrategy
   intermediate?: boolean
   required?: boolean
@@ -121,6 +163,8 @@ export interface ToolDef {
   inputs: ToolPort[]
   outputs: ToolPort[]
   params: ToolParam[]
+  artifactRecipes?: ArtifactRecipe[]
+  parameterRules?: ParameterRule[]
   /** Slurm defaults — can be overridden per-node */
   slurm?: {
     cpus?: number
@@ -153,6 +197,8 @@ export interface ToolNodeData {
   label: string                                // user-editable display label
   paramValues: Record<string, unknown>         // name -> value
   flagBlocks?: ToolFlagBlock[]
+  analysisOptions?: AnalysisOptionState[]
+  roleMappings?: Record<string, RoleMapping>
   outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
   outputIntermediate?: Record<string, boolean>
   /** Optional module name to load instead of the registry default. */
@@ -290,6 +336,9 @@ export interface TransformRenameRule {
 export interface TransformNodeData {
   label: string
   fileType: Extract<FileType, 'tsv' | 'csv' | 'txt' | 'any'>
+  preset?: ArtifactRecipe['preset']
+  roleMappings?: Record<string, RoleMapping>
+  presetConfig?: Record<string, unknown>
   selectedColumns?: string[]
   filters?: TransformFilterRule[]
   renames?: TransformRenameRule[]
@@ -378,6 +427,24 @@ export interface RunState {
   pipelineId: string
   /** Human-readable pipeline name captured at submit time; survives rename. */
   pipelineName?: string
+  /** Snapshot captured at submit time for reproducibility/results views. */
+  snapshot?: PipelineSnapshot
+  /** Workspace context captured at submit time. */
+  workspace?: {
+    id?: string
+    name?: string
+    connectionName?: string
+    analysisRoot?: string
+    slurmAccount?: string
+    slurmPartition?: string
+    toolsRoot?: string
+    annovarScriptsPath?: string
+    annovarDbPath?: string
+    vepPath?: string
+    vepCachePath?: string
+    recommendedTemplateId?: string
+    notes?: string
+  } | null
   connectionId: string
   arrayChainMode?: 'task-level' | 'job-level'
   fileLifecyclePolicy?: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'

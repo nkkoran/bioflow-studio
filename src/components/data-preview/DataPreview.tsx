@@ -12,6 +12,7 @@ import { SavedViewsMenu } from './SavedViewsMenu'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
 import { joinRemotePath, pathBasename, pathDirname } from '@/lib/remotePath'
+import { useDialogStore } from '@/stores/dialogStore'
 
 export function DataPreview() {
   const {
@@ -42,6 +43,9 @@ export function DataPreview() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const alertDialog = useDialogStore((s) => s.alert)
+  const promptDialog = useDialogStore((s) => s.prompt)
+  const confirmDialog = useDialogStore((s) => s.confirm)
 
   useEffect(() => {
     if (!savedViewsLoaded) void loadSavedViews()
@@ -212,7 +216,11 @@ export function DataPreview() {
     } else {
       await window.api.sftp.write(activeConnectionId, outputPath, content)
     }
-    window.alert(`Saved filtered file to ${outputPath}`)
+    await alertDialog({
+      title: 'Filtered file saved',
+      message: 'BioFlow wrote the filtered preview output.',
+      detail: outputPath,
+    })
   }
 
   return (
@@ -277,8 +285,14 @@ export function DataPreview() {
                   else resetFreshView(activeTab.filePath)
                 }}
                 onSave={() => {
-                  const name = window.prompt('Save preview view as:')
-                  if (name) void saveView(activeTab.filePath, name)
+                  void promptDialog({
+                    title: 'Save preview view',
+                    message: 'Name this saved preview configuration.',
+                    placeholder: 'QC subset',
+                    confirmLabel: 'Save view',
+                  }).then((name) => {
+                    if (name) void saveView(activeTab.filePath, name)
+                  })
                 }}
                 onUpdate={() => {
                   if (selectedSavedViewId) void updateSavedView(activeTab.filePath, selectedSavedViewId)
@@ -286,14 +300,26 @@ export function DataPreview() {
                 onRename={() => {
                   if (!selectedSavedViewId) return
                   const current = activeViews.find((view) => view.id === selectedSavedViewId)
-                  const name = window.prompt('Rename saved view:', current?.name ?? '')
-                  if (name) void renameSavedView(activeTab.filePath, selectedSavedViewId, name)
+                  void promptDialog({
+                    title: 'Rename preview view',
+                    message: 'Choose a new name for this saved preview configuration.',
+                    defaultValue: current?.name ?? '',
+                    confirmLabel: 'Rename',
+                  }).then((name) => {
+                    if (name) void renameSavedView(activeTab.filePath, selectedSavedViewId, name)
+                  })
                 }}
                 onDelete={() => {
                   if (!selectedSavedViewId) return
-                  if (window.confirm('Delete this saved preview view?')) {
-                    void deleteSavedView(activeTab.filePath, selectedSavedViewId)
-                  }
+                  void confirmDialog({
+                    title: 'Delete saved preview view',
+                    message: 'Delete this saved preview view?',
+                    confirmLabel: 'Delete view',
+                    cancelLabel: 'Keep',
+                    danger: true,
+                  }).then((confirmed) => {
+                    if (confirmed) void deleteSavedView(activeTab.filePath, selectedSavedViewId)
+                  })
                 }}
               />
             </>
