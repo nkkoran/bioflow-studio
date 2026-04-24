@@ -450,13 +450,31 @@ export function validateAnalysisOptions(tool: ToolDef, nodeData: ToolNodeData, c
       if (option.customFlag !== undefined && !option.customFlag.trim()) {
         issues.push({ optionId: option.optionId, code: 'OPTION_VALUE_MISSING', message: 'Custom flag needs an exact flag name.' })
       }
+      if (option.customInputKind === 'file') {
+        const source = option.source ?? (isValueSource(option.value) ? option.value : undefined)
+        if (source?.kind === 'upstream-file') {
+          const portId = source.portId
+          if (!portId || !connected.has(portId)) {
+            issues.push({ optionId: option.optionId, code: 'OPTION_FILE_MISSING', message: 'Custom file flag is enabled but no upstream file is connected.' })
+          }
+        } else {
+          const value = source?.value ?? (typeof option.value === 'string' ? option.value : '')
+          if (!value.trim()) {
+            issues.push({ optionId: option.optionId, code: 'OPTION_FILE_MISSING', message: 'Custom file flag is enabled but no file path is selected.' })
+          }
+        }
+      }
       continue
     }
     if (def.requiredValue && !optionHasValue(option)) {
       issues.push({ optionId: option.optionId, code: 'OPTION_VALUE_MISSING', message: `${def.label} needs a value.` })
     }
-    if ((def.kind === 'file' || def.kind === 'compound') && def.filePortId && option.source?.kind === 'upstream-file' && !connected.has(def.filePortId)) {
+    const isFileOption = def.kind === 'file' || def.kind === 'compound'
+    if (isFileOption && def.filePortId && option.source?.kind === 'upstream-file' && !connected.has(def.filePortId)) {
       issues.push({ optionId: option.optionId, code: 'OPTION_FILE_MISSING', message: `${def.label} is enabled but no file is connected to ${def.filePortId}.` })
+    }
+    if (isFileOption && option.source && option.source.kind !== 'upstream-file' && !option.source.value?.trim()) {
+      issues.push({ optionId: option.optionId, code: 'OPTION_FILE_MISSING', message: `${def.label} is enabled but no file path is selected.` })
     }
     for (const conflictId of def.conflicts ?? []) {
       if (enabled.has(conflictId)) issues.push({ optionId: option.optionId, code: 'OPTION_CONFLICT', message: `${def.label} conflicts with ${defsById.get(conflictId)?.label ?? conflictId}.` })

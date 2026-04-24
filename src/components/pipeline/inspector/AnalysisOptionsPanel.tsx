@@ -261,6 +261,17 @@ function ColumnOptionEditor(props: {
                 removeColumn(selected[selected.length - 1])
                 return
               }
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                const suggestion = suggestions[activeSuggestionIndex] ?? suggestions[0]
+                if (suggestion) insertColumn(suggestion)
+                else if (allowsMultiple && draft.trim()) addColumn(draft.trim())
+                return
+              }
+              if (event.key === 'Escape') {
+                setShowSuggestions(false)
+                return
+              }
               if (!showSuggestions || suggestions.length === 0) return
               if (event.key === 'ArrowDown') {
                 event.preventDefault()
@@ -272,14 +283,6 @@ function ColumnOptionEditor(props: {
                 setActiveSuggestionIndex((index) => Math.max(index - 1, 0))
                 return
               }
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                const suggestion = suggestions[activeSuggestionIndex] ?? suggestions[0]
-                if (suggestion) insertColumn(suggestion)
-                else if (allowsMultiple && draft.trim()) addColumn(draft.trim())
-                return
-              }
-              if (event.key === 'Escape') setShowSuggestions(false)
             }}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
           />

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { evaluateWorkflowReadiness } from '@/lib/workflowReadiness'
+import { inputFileNodes } from '@/stores/readinessStore'
 import type { PipelineSnapshot } from '@/types/pipeline'
 import type { FileProbeResult } from '@/types/readiness'
 
@@ -25,6 +26,38 @@ function fileProbe(path: string, partial: Partial<FileProbeResult>): FileProbeRe
 }
 
 describe('workflowReadiness', () => {
+  it('collects split input file items as probe targets', () => {
+    const snap = snapshot(
+      [
+        {
+          id: 'split',
+          type: 'file',
+          position: { x: 0, y: 0 },
+          data: {
+            label: 'Split genotypes',
+            path: '',
+            fileType: 'plink',
+            isInput: true,
+            split: {
+              axis: 'chrom',
+              items: [
+                { key: '1', path: '/data/chr1.pgen' },
+                { key: '2', path: '/data/chr2.pgen' },
+              ],
+              pattern: { kind: 'manual' },
+            },
+          },
+        },
+      ],
+      [],
+    )
+
+    expect(inputFileNodes(snap)).toEqual([
+      { path: '/data/chr1.pgen', fileType: 'plink' },
+      { path: '/data/chr2.pgen', fileType: 'plink' },
+    ])
+  })
+
   it('flags missing PLINK sidecars', () => {
     const snap = snapshot(
       [

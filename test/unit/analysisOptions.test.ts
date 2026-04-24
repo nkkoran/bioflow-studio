@@ -121,6 +121,45 @@ describe('analysisOptions', () => {
     expect(validateAnalysisOptions(tool, nodeData, ['input']).some((issue) => issue.code === 'OPTION_FILE_MISSING')).toBe(true)
   })
 
+  it('validates enabled file options with empty typed paths', () => {
+    const tool = toolOrThrow('plink2.assoc')
+    const nodeData: ToolNodeData = {
+      toolId: tool.id,
+      label: 'Assoc',
+      paramValues: {},
+      analysisOptions: normalizeAnalysisOptions(tool, { paramValues: {} }).map((option) =>
+        option.optionId === 'keep'
+          ? { ...option, enabled: true, source: { kind: 'path' as const, value: '' } }
+          : option,
+      ),
+      status: 'idle',
+    }
+
+    expect(validateAnalysisOptions(tool, nodeData, ['input', 'pheno']).some((issue) => issue.optionId === 'keep' && issue.code === 'OPTION_FILE_MISSING')).toBe(true)
+  })
+
+  it('validates custom file options with empty typed paths', () => {
+    const tool = toolOrThrow('plink2.assoc')
+    const nodeData: ToolNodeData = {
+      toolId: tool.id,
+      label: 'Assoc',
+      paramValues: {},
+      analysisOptions: [
+        ...normalizeAnalysisOptions(tool, { paramValues: {} }),
+        {
+          optionId: 'custom_file',
+          enabled: true,
+          customFlag: '--custom-file',
+          customInputKind: 'file',
+          source: { kind: 'path', value: '' },
+        },
+      ],
+      status: 'idle',
+    }
+
+    expect(validateAnalysisOptions(tool, nodeData, ['input', 'pheno']).some((issue) => issue.optionId === 'custom_file' && issue.code === 'OPTION_FILE_MISSING')).toBe(true)
+  })
+
   it('does not enable false boolean defaults on generic tools', () => {
     const tool = toolOrThrow('samtools.sort')
     const options = normalizeAnalysisOptions(tool, { paramValues: {} })

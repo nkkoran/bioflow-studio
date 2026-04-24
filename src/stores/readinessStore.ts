@@ -215,12 +215,19 @@ function commonIndexPaths(path: string): Record<string, string> {
   return {}
 }
 
-function inputFileNodes(snapshot: PipelineSnapshot): Array<{ path: string; fileType: string }> {
+export function inputFileNodes(snapshot: PipelineSnapshot): Array<{ path: string; fileType: string }> {
   return snapshot.nodes
     .filter((node) => node.type === 'file' && (node.data as FileNodeData).isInput)
-    .map((node) => {
+    .flatMap((node) => {
       const data = node.data as FileNodeData
-      return { path: data.path, fileType: data.fileType }
+      const rawSplitItems = (data.split as { items?: unknown } | undefined)?.items
+      if (Array.isArray(rawSplitItems) && rawSplitItems.length > 0) {
+        return rawSplitItems.map((item) => ({
+          path: typeof (item as { path?: unknown }).path === 'string' ? (item as { path: string }).path : '',
+          fileType: data.fileType,
+        }))
+      }
+      return [{ path: data.path, fileType: data.fileType }]
     })
     .filter((entry) => Boolean(entry.path?.trim()))
 }

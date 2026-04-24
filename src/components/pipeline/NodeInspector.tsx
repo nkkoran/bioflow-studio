@@ -642,6 +642,7 @@ function ToolInputRow({
   const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
   const onConnect = usePipelineStore((s) => s.onConnect)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const [browserOpen, setBrowserOpen] = useState(false)
   const missingRequired = port.required && connections.length === 0
   const accept = port.fileType === 'any' ? undefined : [port.fileType]
@@ -662,6 +663,7 @@ function ToolInputRow({
     const target = snapshot.nodes.find((node) => node.id === nodeId)
     paths.forEach((path, index) => {
       const label = pathBasename(path) || port.label
+      const source: FileNodeData['source'] = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'remote'
       const fileId = addFileNode(
         target
           ? { x: target.position.x - 220, y: target.position.y + Math.max(0, (connections.length + index) * 44) }
@@ -671,7 +673,7 @@ function ToolInputRow({
           label,
           path,
           fileType: inferFileType(path),
-          source: 'remote',
+          source,
         },
       )
       onConnect({
