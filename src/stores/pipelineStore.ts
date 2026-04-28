@@ -14,6 +14,7 @@ import type {
   NoteNodeData,
   PipelineSnapshot,
   NodeGroup,
+  TransferNodeData,
   TransformNodeData,
   ToolNodeData,
 } from '@/types/pipeline'
@@ -24,7 +25,7 @@ import { analysisOptionsToParamValues, getActiveToolInputs, normalizeAnalysisOpt
 import { defaultTransformPresetConfig } from '@/lib/transformPresets'
 import { useSettingsStore } from '@/stores/settingsStore'
 
-export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
+export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransferNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
 export type BioflowEdge = Edge
 
 interface HistoryEntry {
@@ -82,12 +83,14 @@ interface PipelineState {
   addToolNode: (toolId: string, position: { x: number; y: number }) => string
   addFileNode: (position: { x: number; y: number }, data?: Partial<FileNodeData>) => string
   addMergeNode: (position: { x: number; y: number }, data?: Partial<MergeNodeData>) => string
+  addTransferNode: (position: { x: number; y: number }, data?: Partial<TransferNodeData>) => string
   addTransformNode: (position: { x: number; y: number }, data?: Partial<TransformNodeData>) => string
   addNoteNode: (position: { x: number; y: number }) => string
   addNodesAndEdges: (nodes: BioflowNode[], edges: BioflowEdge[]) => void
+  insertTransferNodeForEdge: (edgeId: string) => string | null
   wireFileNodeToCompatibleInputs: (nodeId: string) => number
 
-  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData>) => void
+  updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | TransferNodeData | TransformNodeData | NoteNodeData>) => void
   deleteNode: (nodeId: string) => void
   deleteEdge: (edgeId: string) => void
   duplicateNode: (nodeId: string) => void
@@ -139,12 +142,7 @@ function defaultOutputMerge(toolId: string): ToolNodeData['outputMerge'] | undef
 }
 
 function defaultOutputIntermediate(toolId: string): ToolNodeData['outputIntermediate'] | undefined {
-  const tool = getTool(toolId)
-  if (!tool) return undefined
-  const entries = tool.outputs
-    .filter((port) => port.intermediate)
-    .map((port) => [port.id, true])
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+  return undefined
 }
 
 function migrateToolNodeData(data: ToolNodeData, connectedPortIds: Iterable<string> = []): ToolNodeData {
@@ -154,12 +152,13 @@ function migrateToolNodeData(data: ToolNodeData, connectedPortIds: Iterable<stri
     : data.analysisOptions
   const next: ToolNodeData = {
     ...data,
+    backend: data.backend ?? (tool?.backends?.includes('dnx') && (tool.backends?.length ?? 0) === 1 ? 'dnx' : 'ssh'),
     analysisOptions,
     paramValues: tool && analysisOptions
       ? analysisOptionsToParamValues(tool, analysisOptions, data.paramValues)
       : data.paramValues,
     outputMerge: data.outputMerge ?? defaultOutputMerge(data.toolId),
-    outputIntermediate: data.outputIntermediate ?? defaultOutputIntermediate(data.toolId),
+    outputIntermediate: data.outputIntermediate,
   }
   if (!toolUsesFlagBuilder(data.toolId)) return next
   const flagBlocks = ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
@@ -173,7 +172,11 @@ function migrateToolNodeData(data: ToolNodeData, connectedPortIds: Iterable<stri
 }
 
 function migrateFileNodeData(data: FileNodeData): FileNodeData {
-  if (!data.split) return data
+  const withOrigin: FileNodeData = {
+    ...data,
+    origin: data.origin ?? (data.source === 'local' ? 'local' : 'ssh'),
+  }
+  if (!withOrigin.split) return withOrigin
   const rawItems = (data.split as { items?: unknown }).items
   const items = Array.isArray(rawItems)
     ? rawItems.map((item, index) => {
@@ -185,12 +188,12 @@ function migrateFileNodeData(data: FileNodeData): FileNodeData {
     })
     : []
   return {
-    ...data,
+    ...withOrigin,
     split: {
-      ...data.split,
-      axis: data.split.axis || 'item',
+      ...withOrigin.split,
+      axis: withOrigin.split.axis || 'item',
       items,
-      pattern: data.split.pattern ?? (data.split.glob ? { kind: 'brace', template: data.split.glob } : { kind: 'manual' }),
+      pattern: withOrigin.split.pattern ?? (withOrigin.split.glob ? { kind: 'brace', template: withOrigin.split.glob } : { kind: 'manual' }),
     },
   }
 }
@@ -199,6 +202,21 @@ function migrateMergeNodeData(data: MergeNodeData): MergeNodeData {
   return {
     ...data,
     convergeMode: data.convergeMode ?? 'axed-fan-in',
+  }
+}
+
+function migrateTransferNodeData(data: TransferNodeData): TransferNodeData {
+  return {
+    label: data.label || 'Transfer',
+    from: data.from === 'dnx' ? 'dnx' : 'ssh',
+    to: data.to === 'dnx' ? 'dnx' : 'ssh',
+    dnxProjectId: data.dnxProjectId,
+    dnxFolder: data.dnxFolder,
+    sshFolder: data.sshFolder,
+    outputName: data.outputName,
+    status: data.status ?? 'idle',
+    jobId: data.jobId,
+    error: data.error,
   }
 }
 
@@ -219,6 +237,30 @@ function executionDefaults(): Pick<PipelineState, 'arrayChainMode' | 'fileLifecy
     arrayChainMode: settings.arrayChainMode ?? 'task-level',
     fileLifecyclePolicy: settings.fileLifecyclePolicy ?? 'keep-all',
   }
+}
+
+function transferBackendLabel(value: 'local' | 'ssh' | 'dnx'): string {
+  if (value === 'dnx') return 'DNAnexus'
+  if (value === 'local') return 'Local'
+  return 'Rorqual'
+}
+
+function inferNodeBackend(node: BioflowNode, direction: 'input' | 'output'): 'local' | 'ssh' | 'dnx' | null {
+  if (node.type === 'transfer') {
+    const data = node.data as TransferNodeData
+    return direction === 'input' ? data.from : data.to
+  }
+  if (node.type === 'tool') {
+    return (node.data as ToolNodeData).backend === 'dnx' ? 'dnx' : 'ssh'
+  }
+  if (node.type === 'file') {
+    const origin = (node.data as FileNodeData).origin
+    if (origin === 'dnx') return 'dnx'
+    if (origin === 'local') return 'local'
+    if (origin === 'ssh') return 'ssh'
+    return null
+  }
+  return 'ssh'
 }
 
 /** Push the current state onto the `past` stack before a mutation. */
@@ -329,6 +371,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         paramValues: analysisOptionsToParamValues(tool, analysisOptions, paramValues),
         flagBlocks,
         analysisOptions,
+        backend: tool.backends?.includes('dnx') && (tool.backends?.length ?? 0) === 1 ? 'dnx' : 'ssh',
         outputMerge: defaultOutputMerge(toolId),
         outputIntermediate: defaultOutputIntermediate(toolId),
         status: 'idle',
@@ -353,6 +396,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         label: data?.label ?? 'File',
         path: data?.path ?? '',
         source: data?.source ?? 'remote',
+        origin: data?.origin ?? (data?.source === 'local' ? 'local' : 'ssh'),
         fileType: data?.fileType ?? 'any',
         isInput: data?.isInput ?? true,
       },
@@ -378,6 +422,32 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         convergeMode: data?.convergeMode ?? 'axed-fan-in',
         slurmOverride: data?.slurmOverride,
         status: 'idle',
+      },
+    }
+    set((state) => ({
+      nodes: [...state.nodes, node],
+      selectedNodeId: id,
+      ...pushHistory(state),
+      dirty: true,
+    }))
+    return id
+  },
+
+  addTransferNode: (position, data) => {
+    const id = makeId('transfer')
+    const node: BioflowNode = {
+      id,
+      type: 'transfer',
+      position,
+      data: {
+        label: data?.label ?? 'Transfer',
+        from: data?.from === 'dnx' ? 'dnx' : 'ssh',
+        to: data?.to === 'dnx' ? 'dnx' : 'ssh',
+        dnxProjectId: data?.dnxProjectId,
+        dnxFolder: data?.dnxFolder,
+        sshFolder: data?.sshFolder,
+        outputName: data?.outputName,
+        status: data?.status ?? 'idle',
       },
     }
     set((state) => ({
@@ -446,6 +516,63 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     }))
   },
 
+  insertTransferNodeForEdge: (edgeId) => {
+    const state = get()
+    const edge = state.edges.find((candidate) => candidate.id === edgeId)
+    if (!edge) return null
+    const sourceNode = state.nodes.find((candidate) => candidate.id === edge.source)
+    const targetNode = state.nodes.find((candidate) => candidate.id === edge.target)
+    if (!sourceNode || !targetNode) return null
+    if (sourceNode.type === 'transfer' || targetNode.type === 'transfer') return null
+    const from = inferNodeBackend(sourceNode, 'output')
+    const to = inferNodeBackend(targetNode, 'input')
+    if (!from || !to || from === to) return null
+
+    const transferId = makeId('transfer')
+    const transferNode: BioflowNode = {
+      id: transferId,
+      type: 'transfer',
+      position: {
+        x: (sourceNode.position.x + targetNode.position.x) / 2,
+        y: (sourceNode.position.y + targetNode.position.y) / 2,
+      },
+      data: {
+        label: `${transferBackendLabel(from)} -> ${transferBackendLabel(to)}`,
+        from,
+        to,
+        status: 'idle',
+      },
+    }
+
+    set((current) => ({
+      nodes: [...current.nodes, transferNode],
+      edges: current.edges.flatMap((candidate) => {
+        if (candidate.id !== edgeId) return [candidate]
+        return [
+          {
+            id: makeId('edge'),
+            source: candidate.source,
+            sourceHandle: candidate.sourceHandle,
+            target: transferId,
+            targetHandle: 'input',
+          },
+          {
+            id: makeId('edge'),
+            source: transferId,
+            sourceHandle: 'output',
+            target: candidate.target,
+            targetHandle: candidate.targetHandle,
+          },
+        ]
+      }),
+      selectedNodeId: transferId,
+      ...pushHistory(current),
+      dirty: true,
+    }))
+
+    return transferId
+  },
+
   wireFileNodeToCompatibleInputs: (nodeId) => {
     const state = get()
     const sourceNode = state.nodes.find((node) => node.id === nodeId)
@@ -475,10 +602,9 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
           })
           existing.add(key)
         }
-      } else if (target.type === 'transform') {
+      } else if (target.type === 'transform' || target.type === 'transfer') {
         const key = `${nodeId}:output:${target.id}:input`
         if (existing.has(key)) continue
-        if (!areTypesCompatible(sourceType, 'any')) continue
         if (state.edges.some((edge) => edge.target === target.id && (edge.targetHandle ?? 'input') === 'input')) continue
         nextEdges.push({
           id: makeId('edge'),
@@ -693,6 +819,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
             ? migrateFileNodeData(n.data as FileNodeData)
             : n.type === 'merge'
               ? migrateMergeNodeData(n.data as MergeNodeData)
+              : n.type === 'transfer'
+                ? migrateTransferNodeData(n.data as TransferNodeData)
               : n.type === 'transform'
                 ? migrateTransformNodeData(n.data as TransformNodeData)
                 : n.data
@@ -745,7 +873,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         id: n.id,
         type: (n.type ?? 'tool') as BioflowNodeType,
         position: n.position,
-        data: n.data as ToolNodeData | FileNodeData | MergeNodeData | TransformNodeData | NoteNodeData,
+        data: n.data as ToolNodeData | FileNodeData | MergeNodeData | TransferNodeData | TransformNodeData | NoteNodeData,
       })),
       edges: state.edges.map((e) => ({
         id: e.id,
@@ -824,10 +952,10 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   setNodeStatus: (nodeId, status, jobId, error) => {
     set((state) => ({
       nodes: state.nodes.map((n) =>
-        n.id === nodeId && (n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
+        n.id === nodeId && (n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
           ? {
               ...n,
-              data: { ...(n.data as ToolNodeData | MergeNodeData | TransformNodeData), status, jobId, error } as BioflowNode['data'],
+              data: { ...(n.data as ToolNodeData | MergeNodeData | TransferNodeData | TransformNodeData), status, jobId, error } as BioflowNode['data'],
             }
           : n,
       ),

@@ -13,6 +13,7 @@ import type {
   PortContract,
   RoleMapping,
 } from './readiness'
+import type { FileOrigin } from '@/constants/connections'
 
 /** File-type categories used to validate connections between nodes. */
 export type FileType =
@@ -49,6 +50,8 @@ export interface ToolParam {
   columnSourcePortId?: string
   /** When true, render the column picker as add/remove chips instead of a single text field. */
   columnMulti?: boolean
+  /** When true, this param is managed by a dedicated UI section and should be hidden from the generic options panel. */
+  internal?: boolean
 }
 
 export type ValueSourceKind =
@@ -174,6 +177,8 @@ export interface ToolDef {
   }
   /** Advisory metadata for tools that need local/reference databases. */
   requiresDatabase?: { name: string; guideKey: string }
+  backends?: Array<'ssh' | 'dnx'>
+  dnxApplet?: { id?: string; name?: string }
 }
 
 export type ToolCategory =
@@ -198,6 +203,9 @@ export interface ToolNodeData {
   paramValues: Record<string, unknown>         // name -> value
   flagBlocks?: ToolFlagBlock[]
   analysisOptions?: AnalysisOptionState[]
+  commandOverride?: string
+  backend?: 'ssh' | 'dnx'
+  dnxInstanceType?: string
   roleMappings?: Record<string, RoleMapping>
   outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
   outputIntermediate?: Record<string, boolean>
@@ -269,6 +277,7 @@ export interface FileNodeData {
   label: string
   path: string                  // remote path; used when split is absent
   source?: 'local' | 'remote'
+  origin?: FileOrigin
   fileType: FileType
   isInput: boolean              // true = source, false = sink
   outputFilename?: string
@@ -303,6 +312,20 @@ export interface MergeNodeData {
     timeHours?: number
     partition?: string
   }
+  status?: ToolNodeData['status']
+  jobId?: string
+  error?: string
+  [key: string]: unknown
+}
+
+export interface TransferNodeData {
+  label: string
+  from: 'local' | 'ssh' | 'dnx'
+  to: 'local' | 'ssh' | 'dnx'
+  dnxProjectId?: string
+  dnxFolder?: string
+  sshFolder?: string
+  outputName?: string
   status?: ToolNodeData['status']
   jobId?: string
   error?: string
@@ -358,7 +381,7 @@ export interface TransformNodeData {
   [key: string]: unknown
 }
 
-export type BioflowNodeType = 'tool' | 'file' | 'note' | 'merge' | 'transform'
+export type BioflowNodeType = 'tool' | 'file' | 'note' | 'merge' | 'transform' | 'transfer'
 
 /** Data payload for a note/comment node. */
 export interface NoteNodeData {
@@ -383,7 +406,7 @@ export interface PipelineSnapshot {
     id: string
     type: BioflowNodeType
     position: { x: number; y: number }
-    data: ToolNodeData | FileNodeData | NoteNodeData | MergeNodeData | TransformNodeData
+    data: ToolNodeData | FileNodeData | NoteNodeData | MergeNodeData | TransformNodeData | TransferNodeData
   }>
   edges: Array<{
     id: string
@@ -466,6 +489,8 @@ export interface DryRunScript {
   label: string
   mode: 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
   script: string
+  summary?: string
+  commands?: string[]
   outputPaths: string[]
   arraySize?: number
 }

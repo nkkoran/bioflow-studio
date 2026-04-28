@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern } from '../../src/types/pipeline'
 import type { AnnovarInstallRequest, AnnovarInstallProgress, AnnovarStatusResult } from '../../src/types/annotation'
+import type {
+  DnxAppletInstallProgress,
+  DnxBridgeStatusEvent,
+  DnxFileStat,
+  DnxInstanceSpec,
+  DnxJobStatus,
+  DnxProject,
+  DnxRemoteFileEntry,
+  DnxTransferProgress,
+} from '../../src/types/dnx'
 
 // Types matching src/types/
 export interface ConnectionConfig {
@@ -234,6 +244,54 @@ const api = {
       ipcRenderer.invoke('store:set-secret', key, value),
     deleteSecret: (key: string): Promise<void> =>
       ipcRenderer.invoke('store:delete-secret', key),
+  },
+  dnx: {
+    bootstrap: (options?: { force?: boolean }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('dnx:bootstrap', options),
+    auth: (args: { token?: string; projectId?: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('dnx:auth', args),
+    listProjects: (): Promise<DnxProject[]> =>
+      ipcRenderer.invoke('dnx:list-projects'),
+    listInstanceTypes: (): Promise<DnxInstanceSpec[]> =>
+      ipcRenderer.invoke('dnx:list-instance-types'),
+    listFiles: (args: { projectId: string; path: string }): Promise<DnxRemoteFileEntry[]> =>
+      ipcRenderer.invoke('dnx:list-files', args),
+    stat: (args: { projectId: string; path: string }): Promise<DnxFileStat> =>
+      ipcRenderer.invoke('dnx:stat', args),
+    upload: (args: { projectId: string; localPath: string; folder: string }): Promise<{ fileId: string }> =>
+      ipcRenderer.invoke('dnx:upload', args),
+    download: (args: { projectId: string; fileId: string; localPath: string }): Promise<{ path: string }> =>
+      ipcRenderer.invoke('dnx:download', args),
+    run: (args: Record<string, unknown>): Promise<{ jobId: string }> =>
+      ipcRenderer.invoke('dnx:run', args),
+    jobStatus: (args: { jobId: string }): Promise<DnxJobStatus> =>
+      ipcRenderer.invoke('dnx:job-status', args),
+    cancel: (args: { jobId: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('dnx:cancel', args),
+    ensureApplet: (args: Record<string, unknown>): Promise<{ appletId: string; hash: string }> =>
+      ipcRenderer.invoke('dnx:ensure-applet', args),
+    sparkExtract: (args: Record<string, unknown>): Promise<{ jobId: string }> =>
+      ipcRenderer.invoke('dnx:spark-extract', args),
+    onBridgeStatus: (callback: (data: DnxBridgeStatusEvent) => void): (() => void) => {
+      const handler = (_event: any, data: DnxBridgeStatusEvent) => callback(data)
+      ipcRenderer.on('dnx:bridge-status', handler)
+      return () => ipcRenderer.removeListener('dnx:bridge-status', handler)
+    },
+    onBootstrapProgress: (callback: (data: DnxBridgeStatusEvent) => void): (() => void) => {
+      const handler = (_event: any, data: DnxBridgeStatusEvent) => callback(data)
+      ipcRenderer.on('dnx:bootstrap-progress', handler)
+      return () => ipcRenderer.removeListener('dnx:bootstrap-progress', handler)
+    },
+    onTransferProgress: (callback: (data: DnxTransferProgress) => void): (() => void) => {
+      const handler = (_event: any, data: DnxTransferProgress) => callback(data)
+      ipcRenderer.on('dnx:transfer-progress', handler)
+      return () => ipcRenderer.removeListener('dnx:transfer-progress', handler)
+    },
+    onAppletInstallProgress: (callback: (data: DnxAppletInstallProgress) => void): (() => void) => {
+      const handler = (_event: any, data: DnxAppletInstallProgress) => callback(data)
+      ipcRenderer.on('dnx:applet-install-progress', handler)
+      return () => ipcRenderer.removeListener('dnx:applet-install-progress', handler)
+    },
   },
   local: {
     ls: async (dirPath: string): Promise<RemoteFileEntry[]> =>

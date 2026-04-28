@@ -81,7 +81,7 @@ function BundleItem({ bundle }: { bundle: ToolBundle }) {
 }
 
 interface SpecialItemProps {
-  type: 'file-input' | 'file-output' | 'note' | 'merge' | 'transform'
+  type: 'file-input' | 'file-output' | 'note' | 'merge' | 'transfer' | 'transform'
   label: string
   icon: React.ReactNode
 }
@@ -114,6 +114,7 @@ export function ToolPalette() {
   const FileIcon = iconForNodeType('file')
   const TransformIcon = iconForNodeType('transform')
   const MergeIcon = iconForNodeType('merge')
+  const TransferIcon = iconForNodeType('transfer')
   const NoteIcon = iconForNodeType('note')
   const BundleIcon = iconForBundle()
 
@@ -173,6 +174,7 @@ export function ToolPalette() {
         <SpecialItem type="file-output" label="Output File" icon={<FileIcon size={12} className="text-amber-400" />} />
         <SpecialItem type="transform" label="Transform" icon={<TransformIcon size={12} className="text-teal-400" />} />
         <SpecialItem type="merge" label="Merge (fan-in)" icon={<MergeIcon size={12} className="text-indigo-400" />} />
+        <SpecialItem type="transfer" label="Transfer" icon={<TransferIcon size={12} className="text-cyan-400" />} />
         <SpecialItem type="note" label="Note" icon={<NoteIcon size={12} className="text-amber-400" />} />
       </div>
 

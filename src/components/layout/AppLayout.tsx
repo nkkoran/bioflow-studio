@@ -4,12 +4,14 @@ import { useRunStore } from '@/stores/runStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useDnxStore } from '@/stores/dnxStore'
 import { TopBar } from './TopBar'
 import { Sidebar } from './Sidebar'
 import { CenterPanel } from './CenterPanel'
 import { BottomPanel } from './BottomPanel'
 import { MfaPrompt } from '@/components/connection/MfaPrompt'
 import { LoginPolicyToast } from '@/components/connection/LoginPolicyToast'
+import { DnxBridgeBanner } from '@/components/connection/DnxBridgeBanner'
 import { AppDialogs } from '@/components/ui/AppDialogs'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
@@ -109,7 +111,14 @@ export function AppLayout() {
     void useUIStore.getState().loadAdvancedExpanded().catch((err) => {
       console.error('[AppLayout] load advanced params state failed:', err)
     })
-    return () => { try { unsubscribe?.() } catch (e) { console.error(e) } }
+    void useDnxStore.getState().load().catch((err) => {
+      console.error('[AppLayout] load DNX state failed:', err)
+    })
+    const unsubscribeDnx = useDnxStore.getState().subscribeToEvents()
+    return () => {
+      try { unsubscribe?.() } catch (e) { console.error(e) }
+      try { unsubscribeDnx() } catch (e) { console.error(e) }
+    }
   }, [])
 
   useEffect(() => {
@@ -247,6 +256,7 @@ export function AppLayout() {
       <AppDialogs />
       <MfaPrompt />
       <LoginPolicyToast />
+      <DnxBridgeBanner />
       {windowDragActive && (
         <div className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-accent/10 backdrop-blur-[1px]">
           <div className="rounded-2xl border border-accent/30 bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">

@@ -90,11 +90,11 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     // Clear old logs before a new run so stale output doesn't bleed through.
     get().clearLogs()
     set({ activeRunId: runId, selectedNodeId: null })
-    // Reset statuses on tool/merge nodes to 'idle' locally for instant feedback;
+    // Reset statuses on runnable nodes to 'idle' locally for instant feedback;
     // authoritative state arrives via the node-status event channel moments later.
     const pipelineStore = usePipelineStore.getState()
     for (const n of pipelineStore.nodes) {
-      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
+      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer') {
         pipelineStore.setNodeStatus(n.id, 'idle')
       }
     }

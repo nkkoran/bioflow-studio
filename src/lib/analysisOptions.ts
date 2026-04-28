@@ -37,6 +37,10 @@ export interface AnalysisOptionDef {
   label: string
   group: AnalysisOptionGroup
   kind: AnalysisOptionKind
+  advanced?: boolean
+  recommendedFor?: string[]
+  rank?: number
+  custom?: boolean
   flag?: string
   paramName?: string
   description?: string
@@ -157,6 +161,7 @@ function paramToOptionDef(param: ToolParam): AnalysisOptionDef {
     label: param.label,
     group: optionGroupFromParam(param),
     kind: optionKindFromParam(param),
+    advanced: param.advanced,
     flag: param.flag,
     paramName: param.name,
     description: param.description,
@@ -226,7 +231,7 @@ function plinkOptionDefs(tool: ToolDef): AnalysisOptionDef[] {
 }
 
 export function getAnalysisOptionDefs(tool: ToolDef): AnalysisOptionDef[] {
-  const base = toolUsesFlagBuilder(tool.id) ? plinkOptionDefs(tool) : tool.params.map(paramToOptionDef)
+  const base = toolUsesFlagBuilder(tool.id) ? plinkOptionDefs(tool) : tool.params.filter((p) => !p.internal).map(paramToOptionDef)
   const boundPorts = new Set(base.map((def) => def.filePortId ?? def.sourcePortId).filter(Boolean))
   const optionalInputOptions: AnalysisOptionDef[] = tool.inputs
     .filter((port) => !port.required && !boundPorts.has(port.id))
@@ -344,7 +349,6 @@ export function normalizeAnalysisOptions(
 ): AnalysisOptionState[] {
   const defs = getAnalysisOptionDefs(tool)
   const connectedPortIds = new Set(opts.connectedPortIds ?? [])
-  const hasExplicitAnalysisOptions = nodeData.analysisOptions !== undefined
   const existing = nodeData.analysisOptions ?? statesFromFlagBlocks(tool, nodeData.flagBlocks, nodeData.paramValues ?? {})
   const byId = new Map(existing.map((state) => [state.optionId, state]))
   const next = defs.map((def) => {
@@ -354,7 +358,7 @@ export function normalizeAnalysisOptions(
       ? {
           ...fallback,
           ...current,
-          enabled: current.enabled || (!hasExplicitAnalysisOptions && fallback.enabled && Boolean(def.filePortId)),
+          enabled: current.enabled || (Boolean(def.filePortId) && connectedPortIds.has(def.filePortId!)),
           source: current.source ?? fallback.source,
           subOptions: { ...(fallback.subOptions ?? {}), ...(current.subOptions ?? {}) },
         }
@@ -368,12 +372,12 @@ export function normalizeAnalysisOptions(
   return next
 }
 
-export function getEnabledAnalysisOptions(tool: ToolDef, nodeData: ToolNodeData): AnalysisOptionState[] {
-  return normalizeAnalysisOptions(tool, nodeData).filter((state) => state.enabled)
+export function getEnabledAnalysisOptions(tool: ToolDef, nodeData: ToolNodeData, opts: { connectedPortIds?: Iterable<string> } = {}): AnalysisOptionState[] {
+  return normalizeAnalysisOptions(tool, nodeData, opts).filter((state) => state.enabled)
 }
 
-export function getActiveToolInputs(tool: ToolDef, nodeData: ToolNodeData): ToolPort[] {
-  const options = normalizeAnalysisOptions(tool, nodeData)
+export function getActiveToolInputs(tool: ToolDef, nodeData: ToolNodeData, opts: { connectedPortIds?: Iterable<string> } = {}): ToolPort[] {
+  const options = normalizeAnalysisOptions(tool, nodeData, opts)
   const enabledFilePorts = new Set<string>()
   const defsById = new Map(getAnalysisOptionDefs(tool).map((def) => [def.id, def]))
   for (const option of options) {
@@ -387,8 +391,8 @@ export function getActiveToolInputs(tool: ToolDef, nodeData: ToolNodeData): Tool
   return tool.inputs.filter((port) => port.required || enabledFilePorts.has(port.id))
 }
 
-export function isToolInputActive(tool: ToolDef, nodeData: ToolNodeData, portId: string): boolean {
-  return getActiveToolInputs(tool, nodeData).some((port) => port.id === portId)
+export function isToolInputActive(tool: ToolDef, nodeData: ToolNodeData, portId: string, opts: { connectedPortIds?: Iterable<string> } = {}): boolean {
+  return getActiveToolInputs(tool, nodeData, opts).some((port) => port.id === portId)
 }
 
 export function analysisOptionsToParamValues(
@@ -509,6 +513,7 @@ export function analysisStateToLegacyFlagBlock(toolId: string, option: AnalysisO
 }
 
 export function previewAnalysisCommand(tool: ToolDef, nodeData: ToolNodeData, connectedPathForPort: (portId: string) => string | null): string {
+  if (nodeData.commandOverride?.trim()) return nodeData.commandOverride.trim()
   const defsById = new Map(getAnalysisOptionDefs(tool).map((def) => [def.id, def]))
   const options = normalizeAnalysisOptions(tool, nodeData)
   const parts = [tool.command]

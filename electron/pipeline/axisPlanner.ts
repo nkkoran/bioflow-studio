@@ -10,6 +10,7 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransferNodeData,
   TransformNodeData,
   ToolDef,
   FileType,
@@ -27,7 +28,7 @@ export type NodeMode = 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
 
 export interface AxisPlan {
   nodeId: string
-  nodeType: 'tool' | 'merge' | 'transform' | 'file' | 'note'
+  nodeType: 'tool' | 'merge' | 'transfer' | 'transform' | 'file' | 'note'
   mode: NodeMode
   /** For 'array': the axis being looped over. */
   axis?: string
@@ -213,6 +214,7 @@ export interface PlannerContext {
    * "node_abc12345"). If omitted, nodeId is used as-is.
    */
   nodeSlug?: (nodeId: string) => string
+  outputRootForNode?: (node: PipelineSnapshot['nodes'][number]) => string
   /**
    * Resolved `$HOME` on the remote. Used to expand `~` / `~/…` in user-provided
    * outputDirOverride values before they cross the SFTP boundary.
@@ -345,7 +347,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const data = node.data as TransformNodeData
       const input = resolvedInputs.input
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-      const outputDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const outputDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
       const fallbackOut = outputPath(outputDir, slug, 'output', null, data.fileType)
       if (input?.kind === 'array') {
@@ -432,7 +434,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const resolvedStrategy = resolveMergeStrategyStatic(data.strategy, upstreamFt)
       const outExt = mergeOutputExt(resolvedStrategy)
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-      const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
       const fallbackOut = `${mergeOutDir}/${slug}.output${outExt}`
       const outPath = resolveSinkPath(sink, mergeOutDir, fallbackOut, ctx.homeDir)
@@ -446,6 +448,47 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         outputs: { output: { kind: 'single', path: outPath } },
         upstreamFileType: upstreamFt,
         resolvedMergeStrategy: resolvedStrategy,
+      })
+      continue
+    }
+
+    if (node.type === 'transfer') {
+      const data = node.data as TransferNodeData
+      const input = resolvedInputs.input
+      const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
+      const outputRoot = ctx.outputRootForNode?.(node) ?? ctx.outputRoot
+      const outputDir = resolveNodeOutputDir(undefined, outputRoot, slug, ctx.homeDir)
+      const nameFor = (index: number, sourcePath: string) => {
+        const explicit = data.outputName?.trim()
+        if (!explicit) return pathBasename(sourcePath) || `${slug}.${index + 1}`
+        if (index === 0) return explicit
+        const dot = explicit.lastIndexOf('.')
+        if (dot <= 0) return `${explicit}.${index + 1}`
+        return `${explicit.slice(0, dot)}.${index + 1}${explicit.slice(dot)}`
+      }
+      const outputValue: AxedValue = !input
+        ? { kind: 'single', path: `${outputDir}/${slug}.output` }
+        : input.kind === 'single'
+          ? { kind: 'single', path: `${outputDir}/${nameFor(0, input.path)}` }
+          : input.kind === 'multi'
+            ? { kind: 'multi', paths: input.paths.map((path, index) => `${outputDir}/${nameFor(index, path)}`) }
+            : {
+                kind: 'array',
+                axis: input.axis,
+                keys: input.keys,
+                paths: input.paths.map((path, index) => `${outputDir}/${nameFor(index, path)}`),
+              }
+      plans.set(nodeId, {
+        nodeId,
+        nodeType: 'transfer',
+        mode: input?.kind === 'array' ? 'array' : dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single',
+        axis: input?.kind === 'array' ? input.axis : undefined,
+        keys: input?.kind === 'array' ? input.keys : undefined,
+        arrayPortId: input?.kind === 'array' ? 'input' : undefined,
+        dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+        dependsOnNodeIds: [...dependsOnNodeIds],
+        inputs: resolvedInputs,
+        outputs: { output: outputValue },
       })
       continue
     }
@@ -521,7 +564,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     const outputs: Record<string, AxedValue> = {}
     const implicitMerges: NonNullable<AxisPlan['implicitMerges']> = {}
     const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-    const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+    const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
       const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
       const fallbackOut = outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType)

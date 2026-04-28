@@ -97,8 +97,8 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   }
 
   const borderColor = CATEGORY_COLORS[tool.category] ?? 'border-border'
-  const activeInputs = getActiveToolInputs(tool, nodeData)
   const connectedInputs = new Set(edges.filter((edge) => edge.target === id).map((edge) => edge.targetHandle ?? 'input'))
+  const activeInputs = getActiveToolInputs(tool, nodeData, { connectedPortIds: connectedInputs })
   const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
   const inputDetailsByPort = useMemo(() => {
     const details = new Map<string, string>()
@@ -142,6 +142,11 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           <div className="text-[10px] uppercase tracking-wide text-text-muted flex items-center gap-1">
             <ToolIcon size={10} className="shrink-0" />
             <span>{tool.category}</span>
+            {tool.backends && tool.backends.length > 1 && (
+              <span className="rounded bg-cyan-500/15 px-1 py-px text-[9px] text-cyan-200 normal-case tracking-normal">
+                {nodeData.backend === 'dnx' ? 'dnx' : 'ssh'}
+              </span>
+            )}
             {nodeData.executionMode === 'login' && (
               <span className="rounded bg-yellow-500/15 px-1 py-px text-[9px] text-yellow-300 normal-case tracking-normal">
                 login

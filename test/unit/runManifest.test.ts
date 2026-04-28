@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildRunManifest } from '@/lib/runManifest'
-import type { PipelineSnapshot, RunState } from '@/types/pipeline'
+import type { DryRunScript, PipelineSnapshot, RunState } from '@/types/pipeline'
 
 describe('runManifest', () => {
   it('prefers the workspace captured on the run', () => {
@@ -34,9 +34,20 @@ describe('runManifest', () => {
         },
       },
     }
+    const scripts: DryRunScript[] = [{
+      nodeId: 'score',
+      label: 'GRS',
+      mode: 'single',
+      script: 'plink2 \\\n  --pfile /data/cohort \\\n  --score /data/score.tsv 3 4 5 header \\\n  --out /work/grs',
+      commands: ['plink2 --pfile /data/cohort --score /data/score.tsv 3 4 5 header --out /work/grs'],
+      outputPaths: ['/work/grs.profile.tsv'],
+    }]
 
-    const manifest = buildRunManifest(run, snapshot, { id: 'ws_current', name: 'Current workspace', createdAt: 0, updatedAt: 0 })
+    const manifest = buildRunManifest(run, snapshot, { id: 'ws_current', name: 'Current workspace', createdAt: 0, updatedAt: 0 }, { scripts })
     expect(manifest.workspace).toMatchObject({ id: 'ws_captured', name: 'Captured workspace' })
+    expect(manifest.summary).toContain('Example has 1 runnable step')
+    expect(manifest.steps[0]?.plainLanguage).toContain('PLINK2 Score / GRS')
+    expect(manifest.commands[0]?.commands[0]).toContain('--score /data/score.tsv 3 4 5 header')
     expect(manifest.outputs[0]).toMatchObject({
       nodeId: 'score',
       label: 'GRS',

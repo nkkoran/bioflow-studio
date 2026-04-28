@@ -13,15 +13,19 @@
  */
 import { BrowserWindow } from 'electron'
 import { randomUUID } from 'crypto'
+import { promises as fsPromises } from 'node:fs'
 
 import { SshManager } from '../ssh/SshManager'
 import { SftpPool } from '../ssh/SftpPool'
 import { getSettingsStore } from '../store/settingsStore'
 import { JobTracker } from './JobTracker'
+import { DnxBackendAdapter } from './DnxBackendAdapter'
+import { DnxJobPoller } from './DnxJobPoller'
 import { topoSort } from './topoSort'
 import { planAxes, resolveNodeOutputDir, type AxisPlan } from './axisPlanner'
 import { generateToolScript, generateMergeScript, generateTransformScript, type ConnectionDefaults } from './ScriptGenerator'
 import { getTool } from '../../src/lib/toolRegistry'
+import { buildRunManifest, extractCommands } from '../../src/lib/runManifest'
 import type {
   PipelineSnapshot,
   RunState,
@@ -30,6 +34,7 @@ import type {
   DryRunScript,
   ToolNodeData,
   MergeNodeData,
+  TransferNodeData,
   TransformNodeData,
   FileNodeData,
   NoteNodeData,
@@ -71,6 +76,11 @@ interface ExecutionDefaults {
   fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
 }
 
+interface DnxContext {
+  projectId: string
+  outputRoot: string
+}
+
 export class PipelineRunner {
   private static instance: PipelineRunner | null = null
   static getInstance(): PipelineRunner {
@@ -95,6 +105,8 @@ export class PipelineRunner {
   private get ssh() { return SshManager.getInstance() }
   private get sftp() { return SftpPool.getInstance() }
   private get tracker() { return JobTracker.getInstance(this.ssh) }
+  private get dnx() { return new DnxBackendAdapter() }
+  private get dnxPoller() { return new DnxJobPoller() }
 
   clearConnectionCache(connectionId: string): void {
     this.homeCache.delete(connectionId)
@@ -102,15 +114,33 @@ export class PipelineRunner {
     this.shellCapabilities.delete(connectionId)
   }
 
+  private nodeRunsOnDnx(node: PipelineSnapshot['nodes'][number]): boolean {
+    return node.type === 'tool' && (node.data as ToolNodeData).backend === 'dnx'
+  }
+
+  private nodeNeedsSsh(node: PipelineSnapshot['nodes'][number]): boolean {
+    if (node.type === 'file' || node.type === 'note') return false
+    if (node.type === 'transfer') return (node.data as TransferNodeData).from === 'ssh' || (node.data as TransferNodeData).to === 'ssh'
+    if (node.type === 'merge' || node.type === 'transform') return true
+    return !this.nodeRunsOnDnx(node)
+  }
+
   async start(opts: StartOptions): Promise<{ runId: string }> {
     const { connectionId, snapshot } = opts
     const runId = randomUUID()
 
-    const connectionDefaults = await this.loadConnectionDefaults(connectionId)
+    const needsSsh = snapshot.nodes.some((node) => this.nodeNeedsSsh(node))
+    const needsDnx = snapshot.nodes.some((node) =>
+      this.nodeRunsOnDnx(node) ||
+      (node.type === 'transfer' && ((node.data as TransferNodeData).from === 'dnx' || (node.data as TransferNodeData).to === 'dnx')) ||
+      (node.type === 'file' && (node.data as FileNodeData).origin === 'dnx'),
+    )
+    const connectionDefaults = needsSsh ? await this.loadConnectionDefaults(connectionId) : {}
     const needsSlurm = snapshot.nodes.some((node) =>
-      node.type === 'merge' ||
-      node.type === 'transform' ||
-      (node.type === 'tool' && (node.data as ToolNodeData).executionMode !== 'login'),
+      this.nodeNeedsSsh(node) &&
+      (node.type === 'merge' ||
+        node.type === 'transform' ||
+        (node.type === 'tool' && (node.data as ToolNodeData).executionMode !== 'login')),
     )
     if (needsSlurm && !connectionDefaults.account) {
       throw new Error(
@@ -125,15 +155,26 @@ export class PipelineRunner {
     // Resolve $HOME to an absolute path. SFTP does not shell-expand `~`, so
     // every path we hand to SftpPool.write must be absolute; SSH exec does
     // expand it, but keeping both paths consistent here avoids foot-guns.
-    const home = await this.resolveHome(connectionId)
+    const home = needsSsh ? await this.resolveHome(connectionId) : ''
 
     // Human-readable run directory. Root is the user's configured default
     // analysis folder, or ~/bioflow; the tail comes from settings.
     const pathSettings = this.loadRunPathSettings()
-    const workRoot = analysisFolder
-      ? expandHome(analysisFolder, home)
-      : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`
-    const runDirs = buildRunDirs(opts.workDir, workRoot, snapshot, pathSettings, home)
+    const dnxContext = needsDnx ? await this.dnx.authenticate() : null
+    const dnxOutputRoot = dnxContext ? buildDnxOutputRoot(snapshot, pathSettings) : undefined
+    const workRoot = needsSsh
+      ? (analysisFolder
+          ? expandHome(analysisFolder, home)
+          : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`)
+      : ''
+    const runDirs = needsSsh
+      ? buildRunDirs(opts.workDir, workRoot, snapshot, pathSettings, home)
+      : {
+          workDir: dnxOutputRoot ?? `dnx:${runId}`,
+          scriptsDir: '',
+          logsDir: '',
+          outputRoot: dnxOutputRoot ?? `/BioFlow/runs/${runId}/outputs`,
+        }
     const { workDir, scriptsDir, logsDir, outputRoot } = runDirs
 
     // Pre-compute human-readable slugs for every node (label-based with a short
@@ -145,15 +186,22 @@ export class PipelineRunner {
     topoSort(snapshot)
     const plans = planAxes(snapshot, {
       outputRoot,
+      outputRootForNode: (node) => {
+        if (!dnxOutputRoot) return outputRoot
+        if (node.type === 'transfer') {
+          return (node.data as TransferNodeData).to === 'dnx' ? dnxOutputRoot : outputRoot
+        }
+        return this.nodeRunsOnDnx(node) ? dnxOutputRoot : outputRoot
+      },
       getTool,
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
-      homeDir: home,
+      homeDir: home || undefined,
     })
 
     const now = Date.now()
     const nodes: Record<string, NodeRunState> = {}
     for (const n of snapshot.nodes) {
-      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
+      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer') {
         nodes[n.id] = {
           nodeId: n.id,
           toolId: n.type === 'tool' ? (n.data as ToolNodeData).toolId : n.type,
@@ -186,28 +234,42 @@ export class PipelineRunner {
 
     // One exec creates scripts/, logs/, and per-node output dirs (default or
     // override). Overrides are already `~`-expanded by resolveNodeOutputDir.
-    const dirs = new Set<string>([scriptsDir, logsDir])
-    for (const n of snapshot.nodes) {
-      if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
-        const slug = nodeSlugs.get(n.id) ?? n.id
-        const override = (n.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
-        dirs.add(resolveNodeOutputDir(override, outputRoot, slug, home))
+    if (needsSsh) {
+      const dirs = new Set<string>([scriptsDir, logsDir])
+      for (const n of snapshot.nodes) {
+        if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform') {
+          if (this.nodeRunsOnDnx(n)) continue
+          const slug = nodeSlugs.get(n.id) ?? n.id
+          const override = (n.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
+          dirs.add(resolveNodeOutputDir(override, outputRoot, slug, home))
+        }
       }
-    }
-    for (const plan of plans.values()) {
-      if (plan.nodeType !== 'tool' && plan.nodeType !== 'merge' && plan.nodeType !== 'transform') continue
-      for (const path of collectOutputPaths(plan.outputs)) {
-        dirs.add(pathDirname(path))
+      for (const [nodeId, plan] of plans) {
+        const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+        if (!node || this.nodeRunsOnDnx(node) || plan.nodeType === 'transfer') continue
+        if (plan.nodeType !== 'tool' && plan.nodeType !== 'merge' && plan.nodeType !== 'transform') continue
+        for (const path of collectOutputPaths(plan.outputs)) {
+          dirs.add(pathDirname(path))
+        }
       }
+      const mkdirCmd = [...dirs].map((d) => `mkdir -p ${shellQuote(d)}`).join(' && ')
+      await this.ssh.exec(connectionId, mkdirCmd)
     }
-    const mkdirCmd = [...dirs].map((d) => `mkdir -p ${shellQuote(d)}`).join(' && ')
-    await this.ssh.exec(connectionId, mkdirCmd)
 
     // Persist the snapshot for audit/debug. Best-effort; failure doesn't abort.
-    try {
-      await this.sftp.write(connectionId, `${workDir}/pipeline.json`, JSON.stringify(snapshot, null, 2))
-    } catch (err) {
-      console.error('[PipelineRunner] failed to write pipeline.json:', err)
+    if (needsSsh) {
+      try {
+        await this.sftp.write(connectionId, `${workDir}/pipeline.json`, JSON.stringify(snapshot, null, 2))
+      } catch (err) {
+        console.error('[PipelineRunner] failed to write pipeline.json:', err)
+      }
+      try {
+        const scripts = await this.generateScriptsDry({ connectionId, snapshot, workDir, workspace: opts.workspace })
+        const manifest = buildRunManifest(runState, snapshot, opts.workspace ?? null, { scripts })
+        await this.sftp.write(connectionId, `${workDir}/run.manifest.json`, JSON.stringify(manifest, null, 2))
+      } catch (err) {
+        console.error('[PipelineRunner] failed to write run.manifest.json:', err)
+      }
     }
 
     // Kick off the run; the caller resumes as soon as start() returns the runId.
@@ -218,23 +280,41 @@ export class PipelineRunner {
 
   async generateScriptsDry(opts: StartOptions): Promise<DryRunScript[]> {
     const { connectionId, snapshot } = opts
-    const connectionDefaults = await this.loadConnectionDefaults(connectionId)
-    const analysisFolder = this.loadAnalysisFolder(connectionId)
-    const home = await this.resolveHome(connectionId)
+    const needsSsh = snapshot.nodes.some((node) => this.nodeNeedsSsh(node))
+    const needsDnx = snapshot.nodes.some((node) =>
+      this.nodeRunsOnDnx(node) ||
+      (node.type === 'transfer' && ((node.data as TransferNodeData).from === 'dnx' || (node.data as TransferNodeData).to === 'dnx')),
+    )
+    const connectionDefaults = needsSsh ? await this.loadConnectionDefaults(connectionId) : {}
+    const analysisFolder = needsSsh ? this.loadAnalysisFolder(connectionId) : undefined
+    const home = needsSsh ? await this.resolveHome(connectionId) : ''
     const pathSettings = this.loadRunPathSettings()
-    const workRoot = analysisFolder
-      ? expandHome(analysisFolder, home)
-      : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`
-    const runDirs = buildRunDirs(opts.workDir, workRoot, snapshot, pathSettings, home)
+    const dnxOutputRoot = needsDnx ? buildDnxOutputRoot(snapshot, pathSettings) : undefined
+    const workRoot = needsSsh
+      ? (analysisFolder ? expandHome(analysisFolder, home) : `${home}/${DEFAULT_WORKDIR_SUBPATH_PARENT}`)
+      : ''
+    const runDirs = needsSsh
+      ? buildRunDirs(opts.workDir, workRoot, snapshot, pathSettings, home)
+      : {
+          workDir: dnxOutputRoot ?? `dnx:preview`,
+          scriptsDir: '',
+          logsDir: '',
+          outputRoot: dnxOutputRoot ?? '/BioFlow/runs/preview/outputs',
+        }
     const { workDir, logsDir, outputRoot } = runDirs
     const nodeSlugs = buildNodeSlugs(snapshot)
 
     topoSort(snapshot)
     const plans = planAxes(snapshot, {
       outputRoot,
+      outputRootForNode: (node) => {
+        if (!dnxOutputRoot) return outputRoot
+        if (node.type === 'transfer') return (node.data as TransferNodeData).to === 'dnx' ? dnxOutputRoot : outputRoot
+        return this.nodeRunsOnDnx(node) ? dnxOutputRoot : outputRoot
+      },
       getTool,
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
-      homeDir: home,
+      homeDir: home || undefined,
     })
 
     const { order } = topoSort(snapshot)
@@ -244,12 +324,12 @@ export class PipelineRunner {
     for (const nodeId of order) {
       const node = nodeById.get(nodeId)
       const plan = plans.get(nodeId)
-      if (!node || !plan || (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform')) continue
+      if (!node || !plan || (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform' && node.type !== 'transfer')) continue
 
       const slug = nodeSlugs.get(nodeId) ?? nodeId
       const logDir = logsDir
       const override = (node.data as ToolNodeData | MergeNodeData | TransformNodeData).outputDirOverride
-      const outputDir = resolveNodeOutputDir(override, outputRoot, slug, home)
+      const outputDir = resolveNodeOutputDir(override, this.nodeRunsOnDnx(node) && dnxOutputRoot ? dnxOutputRoot : outputRoot, slug, home || undefined)
 
       if (node.type === 'tool') {
         const toolData = node.data as ToolNodeData
@@ -269,6 +349,8 @@ export class PipelineRunner {
           nodeId,
           label: toolData.label || tool.name,
           mode: plan.mode,
+          summary: tool.description,
+          commands: extractCommands(gen.script),
           script: gen.script,
           outputPaths: collectOutputPaths(plan.outputs),
           arraySize: gen.arraySize,
@@ -296,10 +378,12 @@ export class PipelineRunner {
           nodeId,
           label: mergeData.label || 'Merge',
           mode: plan.mode,
+          summary: 'Merge upstream outputs into one file.',
+          commands: extractCommands(gen.script),
           script: gen.script,
           outputPaths: [gen.outputPath],
         })
-      } else {
+      } else if (node.type === 'transform') {
         const transformData = node.data as TransformNodeData
         const gen = generateTransformScript({
           nodeId,
@@ -314,9 +398,21 @@ export class PipelineRunner {
           nodeId,
           label: transformData.label || 'Transform',
           mode: plan.mode,
+          summary: 'Transform tabular input into a derived artifact.',
+          commands: extractCommands(gen.script),
           script: gen.script,
           outputPaths: collectOutputPaths(plan.outputs),
           arraySize: gen.arraySize,
+        })
+      } else {
+        scripts.push({
+          nodeId,
+          label: (node.data as TransferNodeData).label || 'Transfer',
+          mode: plan.mode,
+          summary: 'Transfer data between backends.',
+          commands: [],
+          script: '',
+          outputPaths: collectOutputPaths(plan.outputs),
         })
       }
     }
@@ -339,6 +435,33 @@ export class PipelineRunner {
     return home
   }
 
+  /**
+   * Route cancellation to the right backend based on the jobId shape.
+   * DNAnexus jobs are `job-…` prefixed; Slurm ids are numeric. Local
+   * "login-" jobs are an internal sentinel.
+   */
+  private async cancelOneJob(connectionId: string, runId: string, nodeId: string, jobId: string): Promise<void> {
+    if (jobId.startsWith('login-')) {
+      const key = `${runId}:${nodeId}`
+      this.cancelledLoginNodes.add(key)
+      this.loginCancels.get(key)?.()
+      return
+    }
+    if (jobId.startsWith('transfer-')) {
+      // Transfer nodes complete in-process; nothing to cancel on a backend.
+      return
+    }
+    if (jobId.startsWith('job-')) {
+      try {
+        await this.dnxPoller.cancel(jobId)
+      } catch (err) {
+        console.error('[PipelineRunner] DNAnexus cancel failed:', err)
+      }
+      return
+    }
+    await this.tracker.cancel(connectionId, jobId)
+  }
+
   async cancel(runId: string): Promise<void> {
     const run = this.runs.get(runId)
     if (!run) return
@@ -351,13 +474,7 @@ export class PipelineRunner {
     this.cancelledRuns.add(runId)
     for (const ns of nodes) {
       if (ns.jobId && (ns.status === 'queued' || ns.status === 'running')) {
-        if (ns.jobId.startsWith('login-')) {
-          const key = `${runId}:${ns.nodeId}`
-          this.cancelledLoginNodes.add(key)
-          this.loginCancels.get(key)?.()
-        } else {
-          await this.tracker.cancel(run.connectionId, ns.jobId)
-        }
+        await this.cancelOneJob(run.connectionId, runId, ns.nodeId, ns.jobId)
       }
     }
     run.status = 'cancelled'
@@ -369,13 +486,7 @@ export class PipelineRunner {
     if (!run) return
     const ns = run.nodes[nodeId]
     if (!ns?.jobId) return
-    if (ns.jobId.startsWith('login-')) {
-      const key = `${runId}:${nodeId}`
-      this.cancelledLoginNodes.add(key)
-      this.loginCancels.get(key)?.()
-      return
-    }
-    await this.tracker.cancel(run.connectionId, ns.jobId)
+    await this.cancelOneJob(run.connectionId, runId, nodeId, ns.jobId)
   }
 
   /**
@@ -511,6 +622,15 @@ export class PipelineRunner {
     if (!run) return []
     const ns = run.nodes[nodeId]
     if (!ns?.outputDir && !ns?.outputPaths?.length) return []
+    const snapshotNode = run.snapshot?.nodes.find((node) => node.id === nodeId)
+    if (snapshotNode && (this.nodeRunsOnDnx(snapshotNode) || (snapshotNode.type === 'transfer' && (snapshotNode.data as TransferNodeData).to === 'dnx'))) {
+      return (ns.outputPaths ?? []).map((path) => ({
+        name: pathBasename(path),
+        path,
+        size: 0,
+        modified: 0,
+      }))
+    }
     const byPath = new Map<string, { name: string; path: string; size: number; modified: number }>()
     try {
       if (ns.outputDir) {
@@ -848,6 +968,15 @@ export class PipelineRunner {
     const plan = plans.get(node.id)
     if (!plan) throw new Error(`No axis plan for ${node.id}`)
 
+    if (node.type === 'transfer') {
+      await this.runTransferNode(run, node, plan)
+      return
+    }
+    if (this.nodeRunsOnDnx(node)) {
+      await this.runDnxNode(run, node, plan, connectionDefaults, nodeSlugs)
+      return
+    }
+
     const slug = nodeSlugs.get(node.id) ?? node.id
     const logDir = run.logsDir ?? `${run.workDir}/logs`
     const override =
@@ -864,6 +993,14 @@ export class PipelineRunner {
 
     let script: string
     let arraySize: number | undefined
+    const localizedInputs: Record<string, AxisPlan['inputs'][string]> = {}
+    for (const [portId, value] of Object.entries(plan.inputs)) {
+      localizedInputs[portId] = await this.materializeInputValueForSsh(run, node, portId, value, outputDir)
+    }
+    const executionPlan: AxisPlan = {
+      ...plan,
+      inputs: localizedInputs,
+    }
 
     if (node.type === 'tool') {
       const toolData = node.data as ToolNodeData
@@ -873,7 +1010,7 @@ export class PipelineRunner {
         return
       }
       const gen = generateToolScript({
-        nodeId: node.id, nodeSlug: slug, tool, nodeData: toolData, axisPlan: plan,
+        nodeId: node.id, nodeSlug: slug, tool, nodeData: toolData, axisPlan: executionPlan,
         outputDir, logDir, connectionDefaults,
       })
       script = gen.script
@@ -894,7 +1031,7 @@ export class PipelineRunner {
         nodeId: node.id,
         nodeSlug: slug,
         mergeData: effective,
-        resolvedInputs: inputVal,
+        resolvedInputs: localizedInputs.input ?? inputVal,
         upstreamFileType: plan.upstreamFileType ?? 'any',
         outputPath: collectOutputPaths(plan.outputs)[0],
         outputDir, logDir, connectionDefaults,
@@ -906,7 +1043,7 @@ export class PipelineRunner {
         nodeId: node.id,
         nodeSlug: slug,
         transformData,
-        axisPlan: plan,
+        axisPlan: executionPlan,
         outputDir,
         logDir,
         connectionDefaults,
@@ -1056,6 +1193,270 @@ export class PipelineRunner {
     return args
   }
 
+  private nodeOutputBackend(
+    snapshot: PipelineSnapshot,
+    nodeId: string,
+  ): 'local' | 'ssh' | 'dnx' | null {
+    const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+    if (!node) return null
+    if (node.type === 'tool') return this.nodeRunsOnDnx(node) ? 'dnx' : 'ssh'
+    if (node.type === 'transfer') return (node.data as TransferNodeData).to
+    if (node.type === 'file') {
+      const origin = (node.data as FileNodeData).origin
+      if (origin === 'dnx') return 'dnx'
+      if (origin === 'local') return 'local'
+      if (origin === 'ssh') return 'ssh'
+      return null
+    }
+    return 'ssh'
+  }
+
+  private async materializeInputValueForSsh(
+    run: RunState,
+    node: PipelineSnapshot['nodes'][number],
+    portId: string,
+    value: AxisPlan['inputs'][string],
+    outputDir: string,
+  ): Promise<AxisPlan['inputs'][string]> {
+    const snapshot = run.snapshot
+    if (!snapshot || !value) return value
+    const incoming = snapshot.edges.filter((edge) => edge.target === node.id && (edge.targetHandle ?? 'input') === portId)
+    if (incoming.length === 0) return value
+    const backends = incoming.map((edge) => this.nodeOutputBackend(snapshot, edge.source))
+    if (!backends.some((backend) => backend === 'dnx')) return value
+
+    const remoteInputDir = `${outputDir}/inputs/${portId}`
+    await this.ssh.exec(run.connectionId, `mkdir -p ${shellQuote(remoteInputDir)}`)
+    const projectId = await this.ensureDnxProjectId()
+
+    const rewritePath = async (path: string, index: number) => {
+      const name = pathBasename(path) || `${portId}-${index + 1}`
+      const remotePath = `${remoteInputDir}/${name}`
+      await this.dnx.transferDnxToSsh(run.connectionId, projectId, path, remotePath)
+      return remotePath
+    }
+
+    return await mapAxedValueAsync(value, rewritePath)
+  }
+
+  private async materializeInputValueForDnx(
+    run: RunState,
+    node: PipelineSnapshot['nodes'][number],
+    portId: string,
+    value: AxisPlan['inputs'][string],
+    outputDir: string,
+    projectId: string,
+  ): Promise<AxisPlan['inputs'][string]> {
+    const snapshot = run.snapshot
+    if (!snapshot || !value) return value
+    const incoming = snapshot.edges.filter((edge) => edge.target === node.id && (edge.targetHandle ?? 'input') === portId)
+    if (incoming.length === 0) return value
+    const backends = incoming.map((edge) => this.nodeOutputBackend(snapshot, edge.source))
+    if (!backends.some((backend) => backend === 'ssh')) return value
+
+    const dnxInputDir = `${outputDir}/inputs/${portId}`
+    const rewritePath = async (path: string, index: number) => {
+      const name = pathBasename(path) || `${portId}-${index + 1}`
+      const uploaded = await this.dnx.transferSshToDnx(run.connectionId, path, projectId, dnxInputDir, name)
+      return uploaded.path
+    }
+
+    return await mapAxedValueAsync(value, rewritePath)
+  }
+
+  private async runTransferNode(
+    run: RunState,
+    node: PipelineSnapshot['nodes'][number],
+    plan: AxisPlan,
+  ): Promise<void> {
+    const data = node.data as TransferNodeData
+    const ns = run.nodes[node.id]
+    const projectId = (data.from === 'dnx' || data.to === 'dnx') ? await this.ensureDnxProjectId(data.dnxProjectId) : null
+    const input = plan.inputs.input
+    const outputs = collectOutputPaths(plan.outputs)
+    ns.outputPaths = outputs
+    ns.outputDir = outputs[0] ? pathDirname(outputs[0]) : undefined
+    ns.jobId = `transfer-${randomUUID().slice(0, 8)}`
+    ns.status = 'running'
+    ns.startedAt = Date.now()
+    this.emitNodeStatus(run.runId, node.id, 'running', ns.jobId)
+
+    try {
+      if (input && data.from === 'ssh' && data.to === 'dnx' && projectId) {
+        const folder = outputs[0] ? pathDirname(outputs[0]) : '/BioFlow/transfers'
+        const paths = await collectValuePaths(input)
+        for (const [index, path] of paths.entries()) {
+          const name = pathBasename(outputs[index] ?? path) || pathBasename(path)
+          await this.dnx.transferSshToDnx(run.connectionId, path, projectId, folder, name)
+        }
+      } else if (input && data.from === 'dnx' && data.to === 'ssh' && projectId) {
+        const paths = await collectValuePaths(input)
+        for (const [index, path] of paths.entries()) {
+          await this.dnx.transferDnxToSsh(run.connectionId, projectId, path, outputs[index] ?? path)
+        }
+      } else if (input && data.from === 'local' && data.to === 'dnx' && projectId) {
+        const folder = outputs[0]?.startsWith('/') ? pathDirname(outputs[0]) : '/BioFlow/transfers'
+        const paths = await collectValuePaths(input)
+        for (const [index, path] of paths.entries()) {
+          const name = pathBasename(outputs[index] ?? path) || pathBasename(path)
+          await this.dnx.uploadLocalPath(projectId, path, folder, name)
+        }
+      } else if (input && data.from === 'dnx' && data.to === 'local' && projectId) {
+        const paths = await collectValuePaths(input)
+        for (const [index, path] of paths.entries()) {
+          const target = outputs[index] ?? path
+          // mkdir-p the parent directory locally so the bridge download lands.
+          const parent = pathDirname(target)
+          if (parent) await fsPromises.mkdir(parent, { recursive: true }).catch(() => undefined)
+          await this.dnx.downloadDnxToLocal(projectId, path, target)
+        }
+      } else if (input && data.from === data.to) {
+        // Same-backend transfer is handled by the validator (warning) and is
+        // a no-op at runtime — flag it so the user notices.
+        throw new Error(`Transfer node has from=${data.from}, to=${data.to}; configure a cross-backend route.`)
+      } else if (input) {
+        // Currently unsupported (local↔ssh would just be sftp upload/download
+        // — a separate Transfer-node enhancement). Surface a clear message.
+        throw new Error(`Transfer ${data.from} -> ${data.to} is not yet implemented.`)
+      }
+      ns.status = 'done'
+      ns.finishedAt = Date.now()
+      this.emitNodeStatus(run.runId, node.id, 'done', ns.jobId)
+    } catch (error) {
+      ns.status = 'failed'
+      ns.finishedAt = Date.now()
+      ns.error = error instanceof Error ? error.message : String(error)
+      this.emitNodeStatus(run.runId, node.id, 'failed', ns.jobId, ns.error)
+    }
+  }
+
+  private async runDnxNode(
+    run: RunState,
+    node: PipelineSnapshot['nodes'][number],
+    plan: AxisPlan,
+    connectionDefaults: ConnectionDefaults,
+    nodeSlugs: Map<string, string>,
+  ): Promise<void> {
+    const ns = run.nodes[node.id]
+    const { projectId } = await this.dnx.authenticate()
+    const slug = nodeSlugs.get(node.id) ?? node.id
+    const logicalOutputPaths = collectOutputPaths(plan.outputs)
+    const logicalOutputDir = logicalOutputPaths[0] ? pathDirname(logicalOutputPaths[0]) : '/BioFlow/runs'
+    const localizedInputs: Record<string, AxisPlan['inputs'][string]> = {}
+    for (const [portId, value] of Object.entries(plan.inputs)) {
+      localizedInputs[portId] = await this.materializeInputValueForDnx(run, node, portId, value, logicalOutputDir, projectId)
+    }
+    const executionPlan: AxisPlan = {
+      ...plan,
+      inputs: localizeAxedValues(localizedInputs),
+      outputs: localizeOutputPaths(plan.outputs),
+    }
+
+    let script = ''
+    if (node.type === 'tool') {
+      const toolData = node.data as ToolNodeData
+      const tool = getTool(toolData.toolId)
+      if (!tool) {
+        this.failNode(run, ns, `Unknown tool ${toolData.toolId}`)
+        return
+      }
+      if (tool.id === 'ukb.spark-extract' && tool.dnxApplet?.name) {
+        const ensure = await this.dnx.ensureApplet(projectId, { appletName: tool.dnxApplet.name })
+        ns.status = 'queued'
+        ns.outputDir = logicalOutputDir
+        ns.outputPaths = logicalOutputPaths
+        ns.submittedAt = Date.now()
+        const { jobId } = await this.dnx.runSparkExtract({
+          projectId,
+          appletId: ensure.appletId,
+          fields: Array.isArray(toolData.paramValues?.fields) ? toolData.paramValues.fields as unknown[] : [],
+          renameMap: Object.fromEntries(
+            (Array.isArray(toolData.paramValues?.fields) ? toolData.paramValues.fields as Array<{ fieldId?: unknown; label?: unknown }> : [])
+              .filter((row) => typeof row.fieldId === 'string' && typeof row.label === 'string' && row.label.trim())
+              .map((row) => [String(row.fieldId), String(row.label).trim()]),
+          ),
+          codingValues: String(toolData.paramValues?.codingValues ?? 'replace'),
+          outputName: String(toolData.paramValues?.outputName ?? pathBasename(logicalOutputPaths[0] ?? 'ukb_extracted_traits.tsv')),
+          outputFolder: String(toolData.paramValues?.outputFolder ?? logicalOutputDir),
+          instanceType: toolData.dnxInstanceType,
+        })
+        ns.jobId = jobId
+        this.emitNodeStatus(run.runId, node.id, 'queued', jobId)
+        const outcome = await this.dnxPoller.waitForJob(jobId, {
+          onStart: () => {
+            ns.status = 'running'
+            ns.startedAt = Date.now()
+            this.emitNodeStatus(run.runId, node.id, 'running', jobId)
+          },
+        })
+        ns.finishedAt = Date.now()
+        if (outcome.kind === 'done') {
+          ns.status = 'done'
+          this.emitNodeStatus(run.runId, node.id, 'done', jobId)
+          return
+        }
+        ns.status = outcome.kind === 'cancelled' ? 'cancelled' : 'failed'
+        ns.error = outcome.kind === 'failed' ? outcome.reason : undefined
+        this.emitNodeStatus(run.runId, node.id, ns.status, jobId, ns.error)
+        return
+      }
+      const gen = generateToolScript({
+        nodeId: node.id,
+        nodeSlug: slug,
+        tool,
+        nodeData: { ...toolData, executionMode: 'sbatch' },
+        axisPlan: executionPlan,
+        outputDir: '.',
+        logDir: '.',
+        connectionDefaults: {
+          ...connectionDefaults,
+          modulePreamble: undefined,
+        },
+      })
+      script = gen.script
+    } else {
+      this.failNode(run, ns, 'DNAnexus execution currently supports tool nodes only.')
+      return
+    }
+
+    ns.status = 'queued'
+    ns.outputDir = logicalOutputDir
+    ns.outputPaths = logicalOutputPaths
+    ns.submittedAt = Date.now()
+    const { jobId } = await this.dnx.runSwissArmyKnife({
+      projectId,
+      outputFolder: logicalOutputDir,
+      script,
+      inputPaths: collectOutputPaths(localizedInputs),
+      instanceType: (node.data as ToolNodeData).dnxInstanceType,
+      name: slug,
+    })
+    ns.jobId = jobId
+    this.emitNodeStatus(run.runId, node.id, 'queued', jobId)
+
+    const outcome = await this.dnxPoller.waitForJob(jobId, {
+      onStart: () => {
+        ns.status = 'running'
+        ns.startedAt = Date.now()
+        this.emitNodeStatus(run.runId, node.id, 'running', jobId)
+      },
+    })
+    ns.finishedAt = Date.now()
+    if (outcome.kind === 'done') {
+      ns.status = 'done'
+      this.emitNodeStatus(run.runId, node.id, 'done', jobId)
+      return
+    }
+    ns.status = outcome.kind === 'cancelled' ? 'cancelled' : 'failed'
+    ns.error = outcome.kind === 'failed' ? outcome.reason : undefined
+    this.emitNodeStatus(run.runId, node.id, ns.status, jobId, ns.error)
+  }
+
+  private async ensureDnxProjectId(explicitProjectId?: string): Promise<string> {
+    const { projectId } = await this.dnx.authenticate(explicitProjectId)
+    return projectId
+  }
+
   private async supportsAfterCorr(connectionId: string): Promise<boolean> {
     if (this.afterCorrSupport.has(connectionId)) return this.afterCorrSupport.get(connectionId) ?? false
     try {
@@ -1186,7 +1587,7 @@ export class PipelineRunner {
         const tool = getTool(data.toolId)
         if (!tool) continue
         for (const port of tool.outputs) {
-          const flagged = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
+          const flagged = data.outputIntermediate?.[port.id] ?? false
           if (!flagged) continue
           addValuePaths(plan.outputs[port.id])
           const implicit = plan.implicitMerges?.[port.id]
@@ -1632,6 +2033,16 @@ function resolveRunFolder(
   return `${workRoot.replace(/\/+$/, '')}/${rendered.replace(/^\/+/, '')}`
 }
 
+function buildDnxOutputRoot(
+  snapshot: PipelineSnapshot,
+  settings: RunPathSettings,
+): string {
+  const rendered = renderRunTemplate(settings.runFolderTemplate || 'runs/{pipelineSlug}-{timestamp}', snapshot, '/user')
+  const runFolder = rendered.replace(/^\/+/, '')
+  if (!settings.createSubfolders) return `/BioFlow/${runFolder}`
+  return `/BioFlow/${runFolder}/${cleanPathSegment(settings.outputsSubfolder || 'outputs')}`
+}
+
 function renderRunTemplate(template: string, snapshot: PipelineSnapshot, home: string): string {
   const pipelineName = snapshot.name || 'pipeline'
   const timestamp = timestampStamp()
@@ -1656,6 +2067,58 @@ function collectOutputPaths(outputs: Record<string, { kind: string; path?: strin
     else if ((output.kind === 'array' || output.kind === 'multi') && output.paths) paths.push(...output.paths)
   }
   return paths
+}
+
+async function mapAxedValueAsync(
+  value: AxisPlan['inputs'][string],
+  mapPath: (path: string, index: number) => Promise<string>,
+): Promise<AxisPlan['inputs'][string]> {
+  if (value.kind === 'single') {
+    return { kind: 'single', path: await mapPath(value.path, 0) }
+  }
+  if (value.kind === 'multi') {
+    const paths = await Promise.all(value.paths.map((path, index) => mapPath(path, index)))
+    return { kind: 'multi', paths }
+  }
+  const paths = await Promise.all(value.paths.map((path, index) => mapPath(path, index)))
+  return {
+    kind: 'array',
+    axis: value.axis,
+    keys: value.keys,
+    paths,
+    pathTemplate: value.pathTemplate,
+  }
+}
+
+function localizeAxedValues(
+  inputs: Record<string, AxisPlan['inputs'][string]>,
+): Record<string, AxisPlan['inputs'][string]> {
+  return Object.fromEntries(Object.entries(inputs).map(([portId, value]) => [portId, localizeAxedValue(value)]))
+}
+
+function localizeAxedValue(value: AxisPlan['inputs'][string]): AxisPlan['inputs'][string] {
+  if (value.kind === 'single') {
+    return { kind: 'single', path: pathBasename(value.path) || value.path }
+  }
+  if (value.kind === 'multi') {
+    return { kind: 'multi', paths: value.paths.map((path) => pathBasename(path) || path) }
+  }
+  return {
+    kind: 'array',
+    axis: value.axis,
+    keys: value.keys,
+    paths: value.paths.map((path) => pathBasename(path) || path),
+    pathTemplate: value.pathTemplate,
+  }
+}
+
+function localizeOutputPaths(outputs: AxisPlan['outputs']): AxisPlan['outputs'] {
+  return Object.fromEntries(Object.entries(outputs).map(([portId, value]) => [portId, localizeAxedValue(value)]))
+}
+
+async function collectValuePaths(value: AxisPlan['inputs'][string]): Promise<string[]> {
+  if (value.kind === 'single') return [value.path]
+  return value.paths
 }
 
 function pathDirname(path: string): string {

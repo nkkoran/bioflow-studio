@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { FileOrigin } from '@/constants/connections'
 
 type BottomPanelMode = 'terminal' | 'data' | 'jobs' | 'queue' | 'results'
 type Theme = 'dark'
@@ -9,6 +10,7 @@ export interface FilePickResult {
   path: string
   /** Present only for file picks. */
   fileType?: string
+  origin?: FileOrigin
 }
 
 /**
@@ -34,6 +36,8 @@ export interface FilePickMode {
   onResolve?: (result: FilePickResult) => void
 }
 
+export type SettingsSection = 'General' | 'Paths' | 'Tools' | 'DNAnexus' | 'Notifications' | 'Advanced'
+
 interface UIStore {
   sidebarWidth: number
   bottomPanelHeight: number
@@ -44,6 +48,12 @@ interface UIStore {
   rightPanelOpen: boolean
   filePickMode: FilePickMode
   advancedExpanded: Record<string, boolean>
+  /**
+   * Global request to open the Settings dialog at a particular section. The
+   * TopBar listens to changes and opens the dialog when this is non-null;
+   * setting back to null indicates the dialog has been opened/closed.
+   */
+  settingsOpenRequest: { section: SettingsSection; nonce: number } | null
 
   setSidebarWidth: (width: number) => void
   setBottomPanelHeight: (height: number) => void
@@ -67,9 +77,14 @@ interface UIStore {
     onResolve?: (result: FilePickResult) => void
   }) => void
   /** Called by FileExplorer when the user picks a file or folder. */
-  resolveFilePick: (path: string, fileType?: string) => void
+  resolveFilePick: (path: string, fileType?: string, origin?: FileOrigin) => void
   /** Abort without picking (Escape / close button). */
   cancelFilePick: () => void
+
+  /** Ask the TopBar to open the Settings dialog at a specific section. */
+  openSettings: (section?: SettingsSection) => void
+  /** Clear the open-request once the dialog has consumed it. */
+  consumeSettingsOpen: () => void
 }
 
 const IDLE_PICK: FilePickMode = { active: false, target: 'file', nodeId: null }
@@ -84,6 +99,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   rightPanelOpen: false,
   filePickMode: IDLE_PICK,
   advancedExpanded: {},
+  settingsOpenRequest: null,
 
   setSidebarWidth: (width) => set({ sidebarWidth: width }),
   setBottomPanelHeight: (height) => set({ bottomPanelHeight: height }),
@@ -118,20 +134,30 @@ export const useUIStore = create<UIStore>((set, get) => ({
       },
     })
   },
-  resolveFilePick: (path, fileType) => {
+  resolveFilePick: (path, fileType, origin) => {
     const mode = get().filePickMode
     if (!mode.active) return
     if (mode.onResolve) {
-      mode.onResolve({ path, fileType })
+      mode.onResolve({ path, fileType, origin })
     } else if (mode.nodeId) {
       // Defer the pipelineStore import to runtime to avoid a circular dep with
       // stores that themselves import uiStore (runStore does).
       const nodeId = mode.nodeId
       import('@/stores/pipelineStore').then(({ usePipelineStore }) => {
-        usePipelineStore.getState().updateNodeData(nodeId, { path, fileType })
+        usePipelineStore.getState().updateNodeData(nodeId, {
+          path,
+          fileType,
+          origin,
+          source: origin === 'local' ? 'local' : 'remote',
+        })
       })
     }
     set({ filePickMode: IDLE_PICK })
   },
   cancelFilePick: () => set({ filePickMode: IDLE_PICK }),
+
+  openSettings: (section = 'General') => {
+    set({ settingsOpenRequest: { section, nonce: Date.now() } })
+  },
+  consumeSettingsOpen: () => set({ settingsOpenRequest: null }),
 }))

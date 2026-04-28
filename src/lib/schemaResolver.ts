@@ -1,6 +1,7 @@
 import type {
   FileNodeData,
   PipelineSnapshot,
+  TransferNodeData,
   ToolNodeData,
   TransformNodeData,
 } from '@/types/pipeline'
@@ -109,6 +110,12 @@ export function outputSchema(
     return outputSchema(snapshot, firstEdge.source, firstEdge.sourceHandle ?? 'output', schemas)
   }
 
+  if (node.type === 'transfer') {
+    const firstEdge = snapshot.edges.find((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'input')
+    if (!firstEdge) return null
+    return outputSchema(snapshot, firstEdge.source, firstEdge.sourceHandle ?? 'output', schemas)
+  }
+
   return null
 }
 
@@ -117,6 +124,9 @@ function outputPath(snapshot: PipelineSnapshot, nodeId: string, _portId: string)
   if (!node) return null
   if (node.type === 'file') return (node.data as FileNodeData).path || null
   if (node.type === 'transform') {
+    return connectedInputPath(snapshot, nodeId, 'input')
+  }
+  if (node.type === 'transfer') {
     return connectedInputPath(snapshot, nodeId, 'input')
   }
   return null

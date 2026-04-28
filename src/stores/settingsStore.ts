@@ -29,6 +29,10 @@ export interface AppSettings {
   plinkFlagBuilderEnabled: boolean
   arrayChainMode: 'task-level' | 'job-level'
   fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
+  skipPreRunFileCheck: boolean
+  skipPreRunDoctorCheck: boolean
+  dnxAuthTokenStored: boolean
+  dnxDefaultProjectId: string | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -58,6 +62,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   plinkFlagBuilderEnabled: false,
   arrayChainMode: 'task-level',
   fileLifecyclePolicy: 'keep-all',
+  skipPreRunFileCheck: false,
+  skipPreRunDoctorCheck: false,
+  dnxAuthTokenStored: false,
+  dnxDefaultProjectId: null,
 }
 
 interface SettingsState {
@@ -104,6 +112,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       plinkFlagBuilderEnabled: await readSetting('settings:experimental:plinkFlagBuilderEnabled', DEFAULT_SETTINGS.plinkFlagBuilderEnabled),
       arrayChainMode: await readSetting('settings:execution:arrayChainMode', DEFAULT_SETTINGS.arrayChainMode),
       fileLifecyclePolicy: await readSetting('settings:fileLifecyclePolicy', DEFAULT_SETTINGS.fileLifecyclePolicy),
+      skipPreRunFileCheck: await readSetting('settings:skipPreRunFileCheck', DEFAULT_SETTINGS.skipPreRunFileCheck),
+      skipPreRunDoctorCheck: await readSetting('settings:skipPreRunDoctorCheck', DEFAULT_SETTINGS.skipPreRunDoctorCheck),
+      dnxAuthTokenStored: Boolean(await window.api.store.getSecret('dnx:authToken')),
+      dnxDefaultProjectId: await readSetting('dnx:defaultProjectId', DEFAULT_SETTINGS.dnxDefaultProjectId),
     }
     set({ settings, loaded: true })
   },
@@ -152,6 +164,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             ? String(value) as AppSettings['fileLifecyclePolicy']
             : 'keep-all'
         break
+      case 'settings:skipPreRunFileCheck': next.skipPreRunFileCheck = Boolean(value); break
+      case 'settings:skipPreRunDoctorCheck': next.skipPreRunDoctorCheck = Boolean(value); break
+      case 'dnx:defaultProjectId': next.dnxDefaultProjectId = value ? String(value) : null; break
     }
     set({ settings: next, loaded: true })
   },

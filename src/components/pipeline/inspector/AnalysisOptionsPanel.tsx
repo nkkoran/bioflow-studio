@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Info, Plus, X } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { Dialog } from '@/components/ui/Dialog'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
@@ -14,6 +15,7 @@ import {
   validateAnalysisOptions,
   type AnalysisOptionDef,
 } from '@/lib/analysisOptions'
+import { parseToolCommand } from '@/lib/commandEditing'
 import { columnParamValues, connectedInputPath, type SchemaCache } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
 import { classNames } from '@/lib/utils'
@@ -27,9 +29,17 @@ interface AnalysisOptionsPanelProps {
   schemas: SchemaCache
   refreshingSchemaPath?: string | null
   onLoadSchema: (path: string, options?: { force?: boolean }) => Promise<void>
-  onChange: (patch: Pick<ToolNodeData, 'analysisOptions' | 'paramValues'>) => void
+  onChange: (patch: Partial<Pick<ToolNodeData, 'analysisOptions' | 'paramValues' | 'commandOverride'>>) => void
   onDisablePort: (portId: string) => number
   onUndoDisconnect: () => void
+}
+
+const RECOMMENDED_BY_TOOL: Record<string, string[]> = {
+  'plink2.assoc': ['pheno-name', 'covar', 'covar-name', 'keep'],
+  'plink2.qc': ['keep', 'maf', 'geno', 'mind', 'hwe'],
+  'plink2.clump': ['clump-snp-field', 'clump-field', 'keep'],
+  'plink2.score': ['score', 'extract', 'keep'],
+  'plink2.pca': ['keep', 'chr'],
 }
 
 function optionValue(option: AnalysisOptionState): string {
@@ -475,6 +485,13 @@ export function AnalysisOptionsPanel({
   onUndoDisconnect,
 }: AnalysisOptionsPanelProps) {
   const [search, setSearch] = useState('')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [customDialogOpen, setCustomDialogOpen] = useState(false)
+  const [customFlag, setCustomFlag] = useState('--')
+  const [customLabel, setCustomLabel] = useState('')
+  const [customKind, setCustomKind] = useState<'text' | 'file'>('text')
+  const [customValue, setCustomValue] = useState('')
+  const [commandDraft, setCommandDraft] = useState(nodeData.commandOverride?.trim() ?? '')
   const [disconnectNotice, setDisconnectNotice] = useState<{ count: number; portId: string } | null>(null)
   const connectedPortIds = useMemo(
     () => snapshot.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.targetHandle ?? 'input'),
@@ -488,6 +505,11 @@ export function AnalysisOptionsPanel({
     () => previewAnalysisCommand(tool, { ...nodeData, analysisOptions: options }, (portId) => connectedInputPath(snapshot, nodeId, portId)),
     [tool, nodeData, options, snapshot, nodeId],
   )
+  const supportsCommandApply = tool.command === 'plink2' || tool.command === 'plink'
+
+  useEffect(() => {
+    setCommandDraft(nodeData.commandOverride?.trim() ?? preview)
+  }, [nodeData.commandOverride, preview])
 
   const commit = (nextOptions: AnalysisOptionState[]) => {
     onChange({
@@ -517,12 +539,18 @@ export function AnalysisOptionsPanel({
       {
         optionId: `custom_${Math.random().toString(36).slice(2, 10)}`,
         enabled: true,
-        customFlag: '',
-        customLabel: '',
-        customInputKind: 'text',
-        value: '',
+        customFlag: customFlag.trim(),
+        customLabel: customLabel.trim(),
+        customInputKind: customKind,
+        value: customKind === 'text' ? customValue : undefined,
+        source: customKind === 'file' ? { kind: 'path', value: customValue } : undefined,
       },
     ])
+    setCustomDialogOpen(false)
+    setCustomFlag('--')
+    setCustomLabel('')
+    setCustomKind('text')
+    setCustomValue('')
   }
 
   const term = search.trim().toLowerCase()
@@ -530,6 +558,11 @@ export function AnalysisOptionsPanel({
   const selectedDefs = defs
     .filter((def) => selectedOptionIds.has(def.id) && !isCanvasInputOption(def))
     .sort((a, b) => Number(Boolean(b.required)) - Number(Boolean(a.required)) || a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
+  const recommendedDefs = defs
+    .filter((def) => !selectedOptionIds.has(def.id) && !isCanvasInputOption(def) && (RECOMMENDED_BY_TOOL[tool.id] ?? []).includes(def.id))
+    .sort((a, b) => (RECOMMENDED_BY_TOOL[tool.id] ?? []).indexOf(a.id) - (RECOMMENDED_BY_TOOL[tool.id] ?? []).indexOf(b.id))
+  const commonSelectedDefs = selectedDefs.filter((def) => !def.advanced && def.group !== 'Advanced')
+  const advancedSelectedDefs = selectedDefs.filter((def) => def.advanced || def.group === 'Advanced')
   const searchResults = term
     ? defs
         .filter((def) => !selectedOptionIds.has(def.id) && optionSearchText(def).includes(term))
@@ -537,6 +570,16 @@ export function AnalysisOptionsPanel({
         .slice(0, 8)
     : []
   const selectedCustomOptions = options.filter((option) => option.enabled && (option.customFlag !== undefined || option.customInputKind !== undefined))
+
+  const applyCommandDraft = () => {
+    if (!supportsCommandApply) return
+    const parsed = parseToolCommand(tool, nodeData, commandDraft)
+    onChange({
+      analysisOptions: parsed.analysisOptions,
+      paramValues: parsed.paramValues,
+      commandOverride: undefined,
+    })
+  }
 
   useEffect(() => {
     if (!disconnectNotice) return
@@ -565,11 +608,31 @@ export function AnalysisOptionsPanel({
       )}
       <div className="flex items-center gap-2">
         <Input label="" value={search} placeholder="Search options" onChange={(event) => setSearch(event.target.value)} />
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={addCustomOption}>
+        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setCustomDialogOpen(true)}>
           <Plus size={13} />
           Custom
         </Button>
       </div>
+      {recommendedDefs.length > 0 && !term && (
+        <div className="rounded-md border border-border bg-bg-tertiary/30 p-2">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Recommended</div>
+          <div className="flex flex-wrap gap-1.5">
+            {recommendedDefs.map((def) => (
+              <button
+                key={def.id}
+                type="button"
+                onClick={() => {
+                  patchOption(def.id, { enabled: true })
+                  if (def.advanced || def.group === 'Advanced') setAdvancedOpen(true)
+                }}
+                className="rounded border border-border bg-bg-secondary px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
+              >
+                {def.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {term && (
         <div className="rounded-md border border-border bg-bg-tertiary/30 p-1.5">
           {searchResults.length > 0 ? (
@@ -604,7 +667,7 @@ export function AnalysisOptionsPanel({
       )}
 
       <div className="flex flex-col gap-2">
-        {selectedDefs.map((def) => {
+        {commonSelectedDefs.map((def) => {
           const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: true, value: def.defaultValue }
           const invalid = issueByOption.get(def.id)
           return (
@@ -649,6 +712,63 @@ export function AnalysisOptionsPanel({
         )
         }
       </div>
+
+      {(advancedSelectedDefs.length > 0 || term.length > 0) && (
+        <div className="rounded-md border border-border bg-bg-tertiary/20">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((value) => !value)}
+            className="flex w-full items-center justify-between px-3 py-2 text-left"
+          >
+            <span className="text-[10px] uppercase tracking-wide text-text-muted">Advanced options</span>
+            <span className="text-[11px] text-text-secondary">{advancedOpen ? 'Hide' : 'Show'}</span>
+          </button>
+          {advancedOpen && (
+            <div className="border-t border-border px-2 py-2">
+              <div className="flex flex-col gap-2">
+                {advancedSelectedDefs.length === 0 && (
+                  <div className="rounded-md border border-dashed border-border bg-bg-secondary px-3 py-3 text-xs text-text-muted">
+                    Search for advanced flags above to add them here.
+                  </div>
+                )}
+                {advancedSelectedDefs.map((def) => {
+                  const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: true, value: def.defaultValue }
+                  const invalid = issueByOption.get(def.id)
+                  return (
+                    <div key={def.id} className={classNames('rounded-md border p-2', invalid ? 'border-error/40 bg-error/5' : 'border-border bg-bg-secondary')}>
+                      <div className="mb-2 flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-xs font-medium text-text-primary">{helpLabel(def)}</div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
+                            <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-muted">{def.group}</span>
+                          </div>
+                        </div>
+                        {!def.required && (
+                          <button type="button" onClick={() => toggleOption(def, option, false)} className="shrink-0 rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary">
+                            <X size={12} />
+                          </button>
+                        )}
+                      </div>
+                      {optionEditor({
+                        nodeId,
+                        snapshot,
+                        def,
+                        option,
+                        schemas,
+                        refreshingSchemaPath,
+                        onLoadSchema,
+                        onPatch: (patch) => patchOption(def.id, patch),
+                      })}
+                      {invalid && <div className="mt-2 text-[10px] text-error">{invalid}</div>}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {selectedCustomOptions.map((option) => {
         const isFile = option.customInputKind === 'file'
@@ -695,6 +815,89 @@ export function AnalysisOptionsPanel({
           <code>{preview}</code>
         </pre>
       </div>
+
+      <div className="rounded-md border border-border bg-bg-secondary p-2">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-text-muted">Command editing</div>
+            <div className="text-[11px] text-text-secondary">Edit the generated command directly, then either sync fields or keep it as an override.</div>
+          </div>
+          <label className="flex items-center gap-2 text-[11px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={Boolean(nodeData.commandOverride?.trim())}
+              onChange={(event) => onChange({ commandOverride: event.target.checked ? commandDraft : undefined })}
+              className="accent-accent"
+            />
+            Use override
+          </label>
+        </div>
+        <textarea
+          value={commandDraft}
+          onChange={(event) => {
+            setCommandDraft(event.target.value)
+            if (nodeData.commandOverride?.trim()) onChange({ commandOverride: event.target.value })
+          }}
+          rows={6}
+          className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 font-mono text-[11px] text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+        />
+        {supportsCommandApply && commandDraft.trim() !== preview.trim() && (
+          <div className="mt-2 rounded-md border border-accent/30 bg-accent/10 px-3 py-2">
+            <div className="text-[11px] text-text-secondary">Applying this command will update: {parseToolCommand(tool, nodeData, commandDraft).changes.join(', ') || 'No structured changes detected'}.</div>
+            <div className="mt-2 flex gap-2">
+              <Button variant="secondary" size="sm" className="h-7 text-[11px]" onClick={applyCommandDraft}>
+                Apply command edits to fields
+              </Button>
+              <Button variant="ghost" size="sm" className="h-7 text-[11px]" onClick={() => onChange({ commandOverride: commandDraft })}>
+                Use as override
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <Dialog
+        open={customDialogOpen}
+        onClose={() => setCustomDialogOpen(false)}
+        title="Add custom flag"
+        footer={(
+          <>
+            <Button variant="secondary" onClick={() => setCustomDialogOpen(false)}>Cancel</Button>
+            <Button variant="primary" onClick={addCustomOption} disabled={!customFlag.trim() || !customFlag.trim().startsWith('--')}>Add</Button>
+          </>
+        )}
+        width="max-w-lg"
+      >
+        <div className="flex flex-col gap-3">
+          <Input label="Flag" value={customFlag} placeholder="--set-all-var-ids" onChange={(event) => setCustomFlag(event.target.value)} />
+          <Input label="Label (optional)" value={customLabel} placeholder="Readable name" onChange={(event) => setCustomLabel(event.target.value)} />
+          <div className="flex gap-2">
+            {(['text', 'file'] as const).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => setCustomKind(kind)}
+                className={classNames('rounded border px-2 py-1 text-[11px]', customKind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted')}
+              >
+                {kind === 'file' ? 'File parameter' : 'Text parameter'}
+              </button>
+            ))}
+          </div>
+          {customKind === 'file' ? (
+            <RemotePathField
+              label="File path"
+              value={customValue}
+              placeholder="/project/.../input.txt"
+              onChange={setCustomValue}
+              mode="file"
+              title="Select custom flag file"
+              buttonLabel="Browse"
+            />
+          ) : (
+            <Input label="Value (optional)" value={customValue} placeholder="Optional value" onChange={(event) => setCustomValue(event.target.value)} />
+          )}
+        </div>
+      </Dialog>
     </div>
   )
 }

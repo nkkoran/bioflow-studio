@@ -473,18 +473,18 @@ export const TOOLS: ToolDef[] = [
       { id: 'output', label: 'Annotated variants', description: 'ANNOVAR multianno table with requested functional and frequency annotations.', fileType: 'tsv' },
     ],
     params: [
-      { name: 'toolPath', label: 'ANNOVAR scripts folder', type: 'string', placeholder: '~/bioflow/tools/annovar' },
-      { name: 'annotationDbPath', flag: '--humandb', label: 'humandb folder', type: 'string', placeholder: '/project/.../annovar/humandb' },
-      { name: 'annotationFeatures', label: 'Annotation features', type: 'string', default: 'gene,rsid' },
-      { name: 'buildver', flag: '--buildver', label: 'Genome build', type: 'select', options: ['hg19', 'hg38'], default: 'hg38' },
-      { name: 'protocol', flag: '--protocol', label: 'Protocols', type: 'string', default: 'refGeneWithVer,avsnp151' },
-      { name: 'operation', flag: '--operation', label: 'Operations', type: 'string', default: 'g,f' },
+      { name: 'toolPath', label: 'ANNOVAR scripts folder', type: 'string', placeholder: '~/bioflow/tools/annovar', internal: true },
+      { name: 'annotationDbPath', flag: '--humandb', label: 'humandb folder', type: 'string', placeholder: '/project/.../annovar/humandb', internal: true },
+      { name: 'annotationFeatures', label: 'Annotation features', type: 'string', default: 'gene,rsid', internal: true },
+      { name: 'buildver', flag: '--buildver', label: 'Genome build', type: 'select', options: ['hg19', 'hg38'], default: 'hg38', internal: true },
+      { name: 'protocol', flag: '--protocol', label: 'Protocols', type: 'string', default: 'refGeneWithVer,avsnp151', internal: true },
+      { name: 'operation', flag: '--operation', label: 'Operations', type: 'string', default: 'g,f', internal: true },
       { name: 'arg', flag: '--arg', label: 'Per-protocol arguments', type: 'string', placeholder: "'-hgvs',,,," },
       { name: 'xref', flag: '--xref', label: 'Gene cross-reference file', type: 'file', placeholder: '/project/.../gene_xref.txt' },
       { name: 'polish', flag: '--polish', label: 'Polish gene annotation', type: 'boolean', default: true },
       { name: 'intronhgvs', flag: '--intronhgvs', label: 'Intron HGVS range', type: 'number', min: 0, placeholder: '100' },
       { name: 'otherinfo', flag: '--otherinfo', label: 'Keep input extra columns', type: 'boolean', default: false },
-      { name: 'remove', flag: '--remove', label: 'Remove intermediate files', type: 'boolean', default: true },
+      { name: 'remove', flag: '--remove', label: 'Remove intermediate files', type: 'boolean', default: false, advanced: true, section: 'Output' },
       { name: 'nastring', flag: '--nastring', label: 'Missing value', type: 'string', default: '.' },
       { name: 'vcfinput', flag: '--vcfinput', label: 'VCF input', type: 'boolean', default: true },
     ],
@@ -504,11 +504,11 @@ export const TOOLS: ToolDef[] = [
       { id: 'output', label: 'Annotated variants', description: 'VEP annotation output for each variant, usually VCF or tabular depending on parameters.', fileType: 'vcf' },
     ],
     params: [
-      { name: 'toolPath', label: 'VEP executable or folder', type: 'string', placeholder: 'vep or ~/bioflow/tools/ensembl-vep/vep' },
-      { name: 'annotationDbPath', flag: '--dir_cache', label: 'Cache folder', type: 'string', placeholder: '/project/.../vep/cache' },
-      { name: 'annotationFeatures', label: 'Annotation features', type: 'string', default: 'consequence,rsid' },
-      { name: 'species', flag: '--species', label: 'Species', type: 'string', default: 'homo_sapiens' },
-      { name: 'assembly', flag: '--assembly', label: 'Assembly', type: 'select', options: ['GRCh37', 'GRCh38'], default: 'GRCh38' },
+      { name: 'toolPath', label: 'VEP executable or folder', type: 'string', placeholder: 'vep or ~/bioflow/tools/ensembl-vep/vep', internal: true },
+      { name: 'annotationDbPath', flag: '--dir_cache', label: 'Cache folder', type: 'string', placeholder: '/project/.../vep/cache', internal: true },
+      { name: 'annotationFeatures', label: 'Annotation features', type: 'string', default: 'consequence,rsid', internal: true },
+      { name: 'species', flag: '--species', label: 'Species', type: 'string', default: 'homo_sapiens', internal: true },
+      { name: 'assembly', flag: '--assembly', label: 'Assembly', type: 'select', options: ['GRCh37', 'GRCh38'], default: 'GRCh38', internal: true },
       { name: 'cache', flag: '--cache', label: 'Use cache', type: 'boolean', default: true },
       { name: 'offline', flag: '--offline', label: 'Offline mode', type: 'boolean', default: true },
       { name: 'fasta', flag: '--fasta', label: 'Reference FASTA', type: 'file', placeholder: '/project/.../reference.fa' },
@@ -650,6 +650,25 @@ export const TOOLS: ToolDef[] = [
       { id: 'plink-score-file', label: 'PLINK score file', description: 'Build a three-column PLINK score file.', preset: 'plink-score-file', sourcePortId: 'input', targetFileType: 'tsv' },
     ],
     params: [],
+    slurm: { cpus: 1, memoryGB: 4, timeHours: 1 },
+  },
+  {
+    id: 'ukb.spark-extract',
+    name: 'UKB Data Extraction (Spark)',
+    category: 'utility',
+    description: 'Extract phenotype and metadata fields from a RAP-dispensed UK Biobank dataset using a fixed Spark applet.',
+    command: 'bioflow-ukb-extract',
+    backends: ['dnx'],
+    dnxApplet: { name: 'bioflow-ukb-extract' },
+    inputs: [],
+    outputs: [{ id: 'tsv', label: 'Extracted phenotypes', description: 'TSV containing the requested UKB fields.', fileType: 'tsv' }],
+    params: [
+      { name: 'fields', label: 'Fields', type: 'string', internal: true },
+      { name: 'codingValues', label: 'Coding values', type: 'select', options: ['replace', 'raw'], default: 'replace', internal: true },
+      { name: 'outputName', label: 'Output filename', type: 'string', default: 'ukb_extracted_traits.tsv', internal: true },
+      { name: 'outputFolder', label: 'Output folder', type: 'string', default: '/', internal: true },
+      { name: 'preset', label: 'Preset', type: 'string', internal: true },
+    ],
     slurm: { cpus: 1, memoryGB: 4, timeHours: 1 },
   },
   {
@@ -1013,8 +1032,20 @@ const CORE_PARAMS = new Set([
   'script',
 ])
 
+const DNX_READY_TOOL_IDS = new Set([
+  'plink2.assoc',
+  'plink2.qc',
+  'plink2.clump',
+  'plink2.score',
+  'plink2.pca',
+  'bcftools.view',
+  'bcftools.merge',
+])
+
 for (const tool of TOOLS) {
   tool.docUrl = tool.docUrl ?? TOOL_DOCS[tool.id]
+  tool.backends = tool.backends ?? ['ssh']
+  if (DNX_READY_TOOL_IDS.has(tool.id)) tool.backends = ['ssh', 'dnx']
   for (const param of tool.params) {
     param.description = param.description ?? PARAM_DESCRIPTIONS[param.name]
     param.docUrl = param.docUrl ?? TOOL_DOCS[tool.id]

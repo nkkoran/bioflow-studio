@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { AnalysisOptionsPanel } from '@/components/pipeline/inspector/AnalysisOptionsPanel'
+import { UkbFieldBuilder } from '@/components/pipeline/inspector/UkbFieldBuilder'
 import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { LocalPathField } from '@/components/file-browser/LocalPathField'
@@ -23,6 +24,7 @@ import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStor
 import { useUIStore } from '@/stores/uiStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
+import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useClusterInfoStore } from '@/stores/clusterInfoStore'
 import { useDialogStore } from '@/stores/dialogStore'
@@ -39,6 +41,7 @@ import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
 import { defaultTransformPresetConfig, getTransformPreset, TRANSFORM_PRESETS } from '@/lib/transformPresets'
 import { suggestRoleMappings } from '@/lib/roleMappings'
 import { inferFileType } from '@/lib/fileTypeInference'
+import { SPARK_INSTANCE_TYPES } from '@/lib/dnxInstanceCatalog'
 import {
   syncFlagBlocksFromParamValues,
   toolUsesFlagBuilder,
@@ -58,6 +61,7 @@ import type {
   MergeNodeData,
   MergeStrategy,
   NoteNodeData,
+  TransferNodeData,
   ToolNodeData,
   ToolParam,
   ToolPort,
@@ -137,6 +141,7 @@ function inputConnectionDetail(node: PipelineSnapshot['nodes'][number], sourceHa
   }
   if (node.type === 'tool') return `Output: ${sourceHandle}`
   if (node.type === 'merge') return 'Merged output'
+  if (node.type === 'transfer') return 'Transferred output'
   if (node.type === 'transform') return 'Transformed output'
   return 'Connected'
 }
@@ -641,7 +646,9 @@ function ToolInputRow({
 }) {
   const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const addTransformNode = usePipelineStore((s) => s.addTransformNode)
   const onConnect = usePipelineStore((s) => s.onConnect)
+  const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const [browserOpen, setBrowserOpen] = useState(false)
   const missingRequired = port.required && connections.length === 0
@@ -655,7 +662,7 @@ function ToolInputRow({
     return data.path || undefined
   }, [connections, snapshot.nodes])
 
-  const attachInputFiles = (paths: string[]) => {
+  const attachInputFiles = (paths: string[], pickedOrigin?: 'local' | 'ssh' | 'dnx') => {
     if (paths.length === 0) return
     if (!port.multi) {
       for (const edge of connections) deleteEdge(edge.id)
@@ -663,7 +670,8 @@ function ToolInputRow({
     const target = snapshot.nodes.find((node) => node.id === nodeId)
     paths.forEach((path, index) => {
       const label = pathBasename(path) || port.label
-      const source: FileNodeData['source'] = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'remote'
+      const origin = pickedOrigin ?? (activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')
+      const source: FileNodeData['source'] = origin === 'local' ? 'local' : 'remote'
       const fileId = addFileNode(
         target
           ? { x: target.position.x - 220, y: target.position.y + Math.max(0, (connections.length + index) * 44) }
@@ -674,6 +682,7 @@ function ToolInputRow({
           path,
           fileType: inferFileType(path),
           source,
+          origin,
         },
       )
       onConnect({
@@ -683,6 +692,28 @@ function ToolInputRow({
         targetHandle: port.id,
       })
     })
+  }
+
+  const buildKeepFileFromPhenotype = () => {
+    const target = snapshot.nodes.find((node) => node.id === nodeId)
+    const phenotypeEdge = snapshot.edges.find((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'pheno')
+    if (!target || !phenotypeEdge) return
+    const transformId = addTransformNode(
+      { x: target.position.x - 260, y: target.position.y + snapshot.nodes.length * 18 },
+      {
+        label: `${port.label} builder`,
+        fileType: 'txt',
+        preset: 'cohort-filter',
+        presetConfig: { ...defaultTransformPresetConfig('cohort-filter'), artifactMode: 'keep-file' },
+        filters: [],
+        renames: [],
+        outputIntermediate: { output: false },
+        status: 'idle',
+      },
+    )
+    onConnect({ source: phenotypeEdge.source, sourceHandle: phenotypeEdge.sourceHandle ?? 'output', target: transformId, targetHandle: 'input' })
+    onConnect({ source: transformId, sourceHandle: 'output', target: nodeId, targetHandle: port.id })
+    setSelectedNode(transformId)
   }
 
   return (
@@ -764,6 +795,18 @@ function ToolInputRow({
             {port.multi ? 'Pick another' : 'Replace'}
           </button>
         )}
+        {port.id === 'keep' && (
+          <button
+            type="button"
+            onClick={buildKeepFileFromPhenotype}
+            disabled={!snapshot.edges.some((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'pheno')}
+            className="mt-1 inline-flex h-7 w-fit items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[10px] text-text-muted hover:text-text-primary disabled:opacity-50"
+            title="Create a cohort-filter transform from the connected phenotype input and wire it into this keep port"
+          >
+            <FolderOpen size={12} />
+            Build from phenotype
+          </button>
+        )}
       </div>
       <RemoteFileBrowser
         open={browserOpen}
@@ -798,7 +841,7 @@ function ToolOutputRow({
   const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const mergeConfig = data.outputMerge?.[port.id]
   const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
-  const intermediate = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
+  const intermediate = data.outputIntermediate?.[port.id] ?? false
   return (
     <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
       <div className="flex items-center gap-2">
@@ -874,7 +917,7 @@ function ToolOutputRow({
             })}
             className="accent-accent"
           />
-          Delete after success (temporary file)
+          Temporary output: delete after successful run
         </label>
       </div>
     </div>
@@ -1242,6 +1285,9 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const edges = usePipelineStore((s) => s.edges)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const dnxCatalog = useDnxStore((s) => s.instanceCatalog)
+  const refreshDnxCatalog = useDnxStore((s) => s.refreshInstanceCatalog)
   const settings = useSettingsStore((s) => s.settings)
   const loadModules = useClusterInfoStore((s) => s.loadModules)
   const loadingModules = useClusterInfoStore((s) => activeConnectionId ? s.loadingModules[activeConnectionId] : false)
@@ -1264,7 +1310,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
    */
   const axedInputPorts = useMemo(() => {
     const result: Array<{ portId: string; axis: string }> = []
-    const activePortIds = tool ? new Set(getActiveToolInputs(tool, data).map((port) => port.id)) : null
+    const activePortIds = tool ? new Set(getActiveToolInputs(tool, data, { connectedPortIds: snapshot.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.targetHandle ?? 'input') }).map((port) => port.id)) : null
     for (const edge of edges) {
       if (edge.target !== nodeId) continue
       const portId = edge.targetHandle
@@ -1403,13 +1449,21 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     return () => { cancelled = true }
   }, [activeConnectionId, axedInputPorts, data, learnedEstimate, nodeId, settings.partitionMaxMemGB, snapshot, tool])
 
+  useEffect(() => {
+    const supported = tool?.backends ?? ['ssh']
+    const currentBackend = supported.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supported[0] === 'dnx' ? 'dnx' : 'ssh'
+    if (currentBackend !== 'dnx' || dnxCatalog?.specs?.length) return
+    void refreshDnxCatalog().catch(() => undefined)
+  }, [data.backend, dnxCatalog?.specs?.length, refreshDnxCatalog, tool])
+
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
-  const activeInputs = getActiveToolInputs(tool, data)
-
   const ToolIcon = iconForTool(data.toolId)
+  const supportedBackends = tool.backends ?? ['ssh']
+  const backend = supportedBackends.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supportedBackends[0] === 'dnx' ? 'dnx' : 'ssh'
+  const dnxInstanceOptions = dnxCatalog?.specs?.length ? dnxCatalog.specs : SPARK_INSTANCE_TYPES
   const slurm = { ...tool.slurm, ...data.slurmOverride }
   const executionMode = data.executionMode ?? 'sbatch'
   const inputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
@@ -1424,6 +1478,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     const portId = edge.sourceHandle ?? 'output'
     outputEdgesByPort.set(portId, [...(outputEdgesByPort.get(portId) ?? []), edge])
   }
+  const activeInputs = getActiveToolInputs(tool, data, { connectedPortIds: inputEdgesByPort.keys() })
   const analysisDefs = getAnalysisOptionDefs(tool)
   const analysisOptions = normalizeAnalysisOptions(tool, data, { connectedPortIds: inputEdgesByPort.keys() })
   const analysisOptionsById = new Map(analysisOptions.map((option) => [option.optionId, option]))
@@ -1434,8 +1489,8 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     if (analysisOptionsById.get(def.id)?.enabled) inputOptionByPort.set(portId, def)
   }
   const visibleParams = tool.requiresDatabase
-    ? tool.params.filter((param) => !ANNOTATION_INTERNAL_PARAMS.has(param.name))
-    : tool.params
+    ? tool.params.filter((param) => !param.internal && !ANNOTATION_INTERNAL_PARAMS.has(param.name))
+    : tool.params.filter((param) => !param.internal)
   const commonParams = visibleParams.filter((param) => param.core || !param.advanced)
   const paramSections: Array<'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime'> = ['Inputs', 'Analysis', 'Filters', 'Output', 'Runtime']
   const sortParams = (params: typeof visibleParams) =>
@@ -1451,10 +1506,11 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
       },
     })
   }
-  const setAnalysisOptions = useCallback((patch: Pick<ToolNodeData, 'analysisOptions' | 'paramValues'>) => {
+  const setAnalysisOptions = useCallback((patch: Partial<Pick<ToolNodeData, 'analysisOptions' | 'paramValues' | 'commandOverride'>>) => {
     updateNodeData(nodeId, {
       analysisOptions: patch.analysisOptions,
       paramValues: patch.paramValues,
+      commandOverride: patch.commandOverride,
     })
   }, [nodeId, updateNodeData])
 
@@ -1509,6 +1565,70 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         )}
       </div>
 
+      {supportedBackends.length > 1 && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+            Backend
+          </h4>
+          <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+            {supportedBackends.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => updateNodeData(nodeId, { backend: option })}
+                className={classNames(
+                  'h-7 rounded text-xs transition-colors',
+                  backend === option
+                    ? 'bg-accent text-white'
+                    : 'text-text-secondary hover:text-text-primary',
+                )}
+              >
+                {option === 'dnx' ? 'DNAnexus' : 'Rorqual'}
+              </button>
+            ))}
+          </div>
+          {backend === 'dnx' && !dnxDefaultProjectId && (
+            <p className="text-[10px] text-warning mt-2">
+              Choose a default DNAnexus project in Settings before running this node on DNAnexus.
+            </p>
+          )}
+        </div>
+      )}
+
+      {backend === 'dnx' && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+            DNAnexus Runtime
+          </h4>
+          <select
+            value={data.dnxInstanceType ?? ''}
+            onChange={(e) => updateNodeData(nodeId, { dnxInstanceType: e.target.value || undefined })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            <option value="">Default instance</option>
+            {dnxInstanceOptions.map((spec) => (
+              <option key={spec.id} value={spec.id}>
+                {spec.name} ({spec.cpu} CPU, {spec.memoryGB} GB)
+              </option>
+            ))}
+          </select>
+          <div className="mt-1 text-[10px] text-text-muted">
+            {dnxCatalog?.lastRefreshed
+              ? `Specs refreshed ${new Date(dnxCatalog.lastRefreshed).toLocaleString()}.`
+              : 'Using bundled instance specs until the live catalog is refreshed.'}
+            {' '}
+            <a
+              href="https://documentation.dnanexus.com/developer/api/running-analyses/instance-types"
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent underline"
+            >
+              View current pricing
+            </a>
+          </div>
+        </div>
+      )}
+
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Execution Mode
@@ -1521,24 +1641,33 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             <button
               key={option.value}
               type="button"
-              onClick={() => updateNodeData(nodeId, { executionMode: option.value === 'sbatch' ? undefined : 'login' })}
+              onClick={() => {
+                if (backend === 'dnx' && option.value === 'login') return
+                updateNodeData(nodeId, { executionMode: option.value === 'sbatch' ? undefined : 'login' })
+              }}
               className={classNames(
                 'h-7 rounded text-xs transition-colors',
                 executionMode === option.value
                   ? 'bg-accent text-white'
                   : 'text-text-secondary hover:text-text-primary',
               )}
+              disabled={backend === 'dnx' && option.value === 'login'}
             >
               {option.label}
             </button>
           ))}
         </div>
-        {executionMode === 'login' && (
+        {backend === 'dnx' ? (
+          <div className="mt-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
+            DNAnexus-backed tools run as platform jobs. Login-node execution is not available on this backend.
+          </div>
+        ) : executionMode === 'login' && (
           <div className="mt-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1.5 text-[11px] text-yellow-200">
             Running an array or heavy job on the login node will likely be killed by cluster admins. Consider Slurm for anything beyond quick commands.
           </div>
         )}
-        <div className="mt-2">
+        {backend !== 'dnx' && (
+          <div className="mt-2">
           <ModuleAutocompleteField
             connectionId={activeConnectionId}
             value={data.moduleOverride ?? tool.module ?? ''}
@@ -1554,7 +1683,8 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           <p className="mt-1 text-[10px] text-text-muted">
             Leave blank to keep the registry default. Free text still works if the module list is incomplete.
           </p>
-        </div>
+          </div>
+        )}
       </div>
 
       <div>
@@ -1605,6 +1735,43 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           )}
         </div>
       </div>
+
+      {tool.id === 'ukb.spark-extract' && (
+        <div className="flex flex-col gap-4">
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+              UKB Fields
+            </h4>
+            <UkbFieldBuilder nodeId={nodeId} value={data.paramValues?.fields} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={String(data.paramValues?.codingValues ?? 'replace')}
+              onChange={(e) => setParam('codingValues', e.target.value)}
+              className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+            >
+              <option value="replace">Replace coding values</option>
+              <option value="raw">Keep raw coding values</option>
+            </select>
+            <Input
+              label="Output filename"
+              value={String(data.paramValues?.outputName ?? 'ukb_extracted_traits.tsv')}
+              onChange={(e) => setParam('outputName', e.target.value)}
+            />
+          </div>
+
+          <Input
+            label="DNAnexus output folder"
+            value={String(data.paramValues?.outputFolder ?? '/')}
+            onChange={(e) => {
+              setParam('outputFolder', e.target.value)
+              updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })
+            }}
+            placeholder="/BioFlow/extracts"
+          />
+        </div>
+      )}
 
       {tool.requiresDatabase && <AnnotationConfigPanel nodeId={nodeId} data={data} />}
 
@@ -2023,6 +2190,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     }
     updateNodeData(nodeId, {
       source: 'local',
+      origin: 'local',
       path: localPath,
       fileType: inferFileType(localPath),
     })
@@ -2056,7 +2224,10 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               <button
                 key={option.value}
                 type="button"
-                onClick={() => updateNodeData(nodeId, { source: option.value as FileNodeData['source'] })}
+                onClick={() => updateNodeData(nodeId, {
+                  source: option.value as FileNodeData['source'],
+                  origin: option.value === 'local' ? 'local' : 'ssh',
+                })}
                 className={classNames(
                   'h-7 flex-1 rounded text-xs transition-colors',
                   (data.source ?? 'remote') === option.value
@@ -2093,6 +2264,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
 	                  const inferred = inferFileType(value)
 	                  updateNodeData(nodeId, {
 	                    path: value,
+	                    origin: 'ssh',
 	                    fileType: data.fileType === 'plink' && inferred === 'bed' ? 'plink' : inferred,
 	                  })
 	                }}
@@ -2512,7 +2684,7 @@ async function uploadLocalFileForPath(
   const remotePath = `${uploadDir}/${fileName}`
   await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
   await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
-  updateNodeData(nodeId, { path: remotePath, source: 'remote' })
+  updateNodeData(nodeId, { path: remotePath, source: 'remote', origin: 'ssh' })
   setUploadMessage(`Uploaded to ${remotePath}`)
 }
 
@@ -3164,7 +3336,7 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
             onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
             className="accent-accent"
           />
-          Delete merged output after success (temporary file)
+          Temporary output: delete after successful run
         </label>
       </div>
 
@@ -3207,6 +3379,101 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
           />
         </div>
       </div>
+
+      {data.status && data.status !== 'idle' && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+            Execution
+          </h4>
+          <div className="flex flex-col gap-1 text-xs">
+            <div>Status: <span className="text-text-primary font-medium">{data.status}</span></div>
+            {data.jobId && <div>Job ID: <span className="font-mono text-text-primary">{data.jobId}</span></div>}
+            {data.error && (
+              <div className="px-2 py-1 rounded bg-error/10 border border-error/20 text-error text-[11px]">
+                {data.error}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNodeData }) {
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <Input
+          label="Label"
+          value={data.label}
+          onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
+        />
+        <p className="text-xs text-text-muted mt-2">
+          Use Transfer to make cross-backend copies explicit. The runner will move the upstream output between Rorqual and DNAnexus before downstream work continues.
+        </p>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Route
+        </h4>
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            value={data.from}
+            onChange={(e) => updateNodeData(nodeId, { from: e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            <option value="ssh">From Rorqual</option>
+            <option value="dnx">From DNAnexus</option>
+          </select>
+          <select
+            value={data.to}
+            onChange={(e) => updateNodeData(nodeId, { to: e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            <option value="ssh">To Rorqual</option>
+            <option value="dnx">To DNAnexus</option>
+          </select>
+        </div>
+      </div>
+
+      <Input
+        label="Output filename"
+        value={data.outputName ?? ''}
+        placeholder="(keep upstream name)"
+        onChange={(e) => updateNodeData(nodeId, { outputName: e.target.value || undefined })}
+      />
+
+      {data.to === 'ssh' && (
+        <FolderPickerField
+          label="Rorqual folder"
+          value={data.sshFolder ?? ''}
+          placeholder="(default run output folder)"
+          requesterLabel={`${data.label} SSH folder`}
+          onChange={(value) => updateNodeData(nodeId, { sshFolder: value || undefined })}
+        />
+      )}
+
+      {data.to === 'dnx' && (
+        <div className="flex flex-col gap-2">
+          <Input
+            label="DNAnexus folder"
+            value={data.dnxFolder ?? ''}
+            placeholder="/BioFlow/transfers"
+            onChange={(e) => updateNodeData(nodeId, { dnxFolder: e.target.value || undefined })}
+          />
+          <Input
+            label="Project ID"
+            value={data.dnxProjectId ?? dnxDefaultProjectId ?? ''}
+            placeholder={dnxDefaultProjectId ?? 'project-xxxx'}
+            onChange={(e) => updateNodeData(nodeId, { dnxProjectId: e.target.value || undefined })}
+          />
+        </div>
+      )}
 
       {data.status && data.status !== 'idle' && (
         <div>
@@ -3704,7 +3971,7 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
             className="accent-accent"
           />
-          Delete filtered output after success (temporary file)
+          Temporary output: delete after successful run
         </label>
       </div>
 
@@ -3817,6 +4084,9 @@ export function NodeInspector() {
         )}
         {node.type === 'merge' && (
           <MergeInspector nodeId={node.id} data={node.data as MergeNodeData} />
+        )}
+        {node.type === 'transfer' && (
+          <TransferInspector nodeId={node.id} data={node.data as TransferNodeData} />
         )}
         {node.type === 'transform' && (
           <TransformInspector nodeId={node.id} data={node.data as TransformNodeData} />

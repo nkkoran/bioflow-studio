@@ -1,6 +1,7 @@
 import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
+  ArrowRightLeft,
   Boxes,
   Dna,
   FileCog,
@@ -33,6 +34,7 @@ const NODE_ICONS: Record<BioflowNodeType, LucideIcon> = {
   file: FileText,
   note: StickyNote,
   merge: GitMerge,
+  transfer: ArrowRightLeft,
   transform: SlidersHorizontal,
 }
 

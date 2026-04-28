@@ -12,6 +12,7 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransferNodeData,
   TransformNodeData,
 } from '@/types/pipeline'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
@@ -50,13 +51,17 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
     vepCachePath?: string
     vepPath?: string
   }
+  dnx?: {
+    defaultProjectId?: string | null
+    authenticated?: boolean
+  }
 }): ValidationResult {
   const issues: ValidationIssue[] = []
   const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]))
   const schemas = opts?.schemas ?? {}
 
   // ---------- Pipeline-level ----------
-  const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
+  const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
   if (runnable.length === 0) {
     issues.push({
       severity: 'error',
@@ -110,6 +115,50 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
   const hasOutgoing = new Set<string>() // `${nodeId}:${portId}`
   for (const e of snapshot.edges) {
     hasOutgoing.add(`${e.source}:${e.sourceHandle ?? 'output'}`)
+  }
+
+  const usesDnx = snapshot.nodes.some((node) => {
+    if (node.type === 'tool') return (node.data as ToolNodeData).backend === 'dnx'
+    if (node.type === 'file') return (node.data as FileNodeData).origin === 'dnx'
+    if (node.type === 'transfer') {
+      const data = node.data as TransferNodeData
+      return data.from === 'dnx' || data.to === 'dnx'
+    }
+    return false
+  })
+  if (usesDnx && !opts?.dnx?.defaultProjectId) {
+    issues.push({
+      severity: 'error',
+      code: 'DNX_NO_PROJECT',
+      message: 'DNAnexus-backed steps need a default project before they can run.',
+      suggestion: 'Open Settings -> DNAnexus and choose the project that should receive runs and transferred files.',
+    })
+  }
+  if (usesDnx && !opts?.dnx?.authenticated) {
+    issues.push({
+      severity: 'error',
+      code: 'DNX_NOT_AUTHENTICATED',
+      message: 'DNAnexus-backed steps are present, but DNAnexus is not authenticated.',
+      suggestion: 'Open Settings -> DNAnexus, save a token, then test the connection.',
+    })
+  }
+
+  for (const edge of snapshot.edges) {
+    const sourceNode = nodeById.get(edge.source)
+    const targetNode = nodeById.get(edge.target)
+    if (!sourceNode || !targetNode) continue
+    if (sourceNode.type === 'transfer' || targetNode.type === 'transfer') continue
+    const sourceBackend = nodeBackend(sourceNode, 'output')
+    const targetBackend = nodeBackend(targetNode, 'input')
+    if (!sourceBackend || !targetBackend || sourceBackend === targetBackend) continue
+    issues.push({
+      severity: 'warning',
+      edgeId: edge.id,
+      nodeId: edge.target,
+      code: 'BACKEND_MISMATCH_NEEDS_TRANSFER',
+      message: `This edge crosses backends (${backendLabel(sourceBackend)} -> ${backendLabel(targetBackend)}) without a Transfer node.`,
+      suggestion: 'Insert a Transfer node so the cross-backend copy is explicit and editable.',
+    })
   }
 
   const labelCounts = new Map<string, number>()
@@ -190,7 +239,10 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       const inMap = incomingByPort.get(node.id)!
 
       // Required inputs
-      const activeInputs = getActiveToolInputs(tool, d)
+      const connectedPortIds = snapshot.edges
+        .filter((edge) => edge.target === node.id)
+        .map((edge) => edge.targetHandle ?? 'input')
+      const activeInputs = getActiveToolInputs(tool, d, { connectedPortIds })
       const activeInputIds = new Set(activeInputs.map((port) => port.id))
       for (const port of activeInputs) {
         const edges = inMap.get(port.id)
@@ -485,6 +537,38 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       continue
     }
 
+    // TRANSFER
+    if (node.type === 'transfer') {
+      const d = node.data as TransferNodeData
+      labelCounts.set(d.label, (labelCounts.get(d.label) ?? 0) + 1)
+      const inMap = incomingByPort.get(node.id)!
+      const edges = inMap.get('input')
+      if (!edges || edges.length === 0) {
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'TRANSFER_NO_INPUT',
+          message: `Transfer "${d.label}" has no input connected.`,
+          suggestion: 'Connect an upstream file or tool output into the transfer.',
+        })
+      }
+      if (!hasOutgoing.has(`${node.id}:output`)) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'ORPHAN_OUTPUT',
+          message: `Transfer "${d.label}" output is not connected downstream.`,
+        })
+      }
+      if (d.from === d.to) {
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'TRANSFER_SAME_BACKEND',
+          message: `Transfer "${d.label}" copies data within the same backend.`,
+          suggestion: 'Remove it unless you need the explicit relocation step.',
+        })
+      }
+      continue
+    }
+
     // MERGE
     if (node.type === 'merge') {
       const d = node.data as MergeNodeData
@@ -556,6 +640,20 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       })
       continue
     }
+    const dnxMember = members.find((node) =>
+      node.type === 'transfer' ||
+      (node.type === 'tool' && (node.data as ToolNodeData).backend === 'dnx'),
+    )
+    if (dnxMember) {
+      issues.push({
+        severity: 'error',
+        nodeId: dnxMember.id,
+        code: 'GROUP_MIXED_EXECUTION',
+        message: `Group "${group.label}" contains a DNAnexus-backed step or Transfer node.`,
+        suggestion: 'Grouped execution currently supports SSH-backed tool, merge, and transform nodes only.',
+      })
+      continue
+    }
 
     const internalEdges = snapshot.edges.filter((edge) => groupNodeIds.has(edge.source) && groupNodeIds.has(edge.target))
     const counts = new Map<string, { in: number; out: number }>()
@@ -609,6 +707,10 @@ function axisForNode(snapshot: PipelineSnapshot, nodeId: string, seen = new Set<
     const items = (split as { items?: unknown } | undefined)?.items
     return Array.isArray(items) && items.length > 0 ? split?.axis || undefined : undefined
   }
+  if (node.type === 'transfer') {
+    const input = snapshot.edges.find((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'input')
+    return input ? axisForNode(snapshot, input.source, seen) : undefined
+  }
   if (node.type === 'merge') return undefined
   const incoming = snapshot.edges.filter((edge) => edge.target === nodeId)
   const axes = new Set<string>()
@@ -653,10 +755,40 @@ function sourcePortType(
     // know it here without walking the graph, so skip strict checking.
     return 'any'
   }
+  if (node.type === 'transfer') {
+    return 'any'
+  }
   if (node.type === 'transform') {
     return (node.data as TransformNodeData).fileType
   }
   return null
+}
+
+function nodeBackend(
+  node: PipelineSnapshot['nodes'][number],
+  direction: 'input' | 'output',
+): 'local' | 'ssh' | 'dnx' | null {
+  if (node.type === 'tool') {
+    return (node.data as ToolNodeData).backend === 'dnx' ? 'dnx' : 'ssh'
+  }
+  if (node.type === 'file') {
+    const origin = (node.data as FileNodeData).origin
+    if (origin === 'dnx') return 'dnx'
+    if (origin === 'local') return 'local'
+    if (origin === 'ssh') return 'ssh'
+    return null
+  }
+  if (node.type === 'transfer') {
+    const data = node.data as TransferNodeData
+    return direction === 'input' ? data.from : data.to
+  }
+  return 'ssh'
+}
+
+function backendLabel(value: 'local' | 'ssh' | 'dnx'): string {
+  if (value === 'dnx') return 'DNAnexus'
+  if (value === 'local') return 'Local'
+  return 'Rorqual'
 }
 
 function mergeStrategyCompatible(strategy: MergeNodeData['strategy'], fileType: string): boolean {

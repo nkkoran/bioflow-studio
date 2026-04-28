@@ -24,6 +24,8 @@ import { Tooltip } from '@/components/ui/Tooltip'
 import { Breadcrumb } from './Breadcrumb'
 import { FileTreeNode } from './FileTreeNode'
 import { FileContextMenu } from './FileContextMenu'
+import { DnxFilePanel } from './DnxFilePanel'
+import { useDnxStore } from '@/stores/dnxStore'
 
 const SORT_OPTIONS: { label: string; field: SortField; direction: SortDirection }[] = [
   { label: 'Name A-Z', field: 'name', direction: 'asc' },
@@ -62,6 +64,16 @@ export function FileExplorer() {
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
+
+  const dnxAuthStatus = useDnxStore((s) => s.authStatus)
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const dnxReady = dnxAuthStatus === 'authenticated' && Boolean(dnxDefaultProjectId)
+
+  const [origin, setOrigin] = useState<'fs' | 'dnx'>('fs')
+  // If DNX becomes unavailable while we're on its tab, drop back to fs.
+  useEffect(() => {
+    if (origin === 'dnx' && !dnxReady) setOrigin('fs')
+  }, [origin, dnxReady])
 
   const [searchQuery, setSearchQuery] = useState('')
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
@@ -154,13 +166,17 @@ export function FileExplorer() {
       // and the user clicked a file. Directory-pick mode intentionally ignores
       // file clicks — the user selects via the banner's "Select this folder".
       if (filePickMode.active && filePickMode.target === 'file' && !entry.isDirectory) {
-        resolveFilePick(entry.path, inferFileType(entry.name))
+        resolveFilePick(
+          entry.path,
+          inferFileType(entry.name),
+          activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh',
+        )
         return
       }
       openPreview(entry.path, entry.name, classifyPreview(entry.name || entry.path))
       setBottomPanelMode('data')
     },
-    [filePickMode.active, filePickMode.target, resolveFilePick, openPreview, setBottomPanelMode],
+    [activeConnectionId, filePickMode.active, filePickMode.target, resolveFilePick, openPreview, setBottomPanelMode],
   )
 
   // Escape cancels an active pick.
@@ -224,20 +240,54 @@ export function FileExplorer() {
     }
   }, [activeConnectionId, addFileNode, cwd, refresh, uploadPickerOpen, uploading])
 
+  const tabStrip = dnxReady ? (
+    <div className="flex shrink-0 items-center gap-1 border-b border-border bg-bg-secondary px-2 py-1 text-[11px]">
+      <button
+        type="button"
+        onClick={() => setOrigin('fs')}
+        className={`rounded px-2 py-0.5 ${origin === 'fs' ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'}`}
+      >
+        {activeConnectionId === LOCAL_CONNECTION_ID ? 'Local' : 'Rorqual'}
+      </button>
+      <button
+        type="button"
+        onClick={() => setOrigin('dnx')}
+        className={`rounded px-2 py-0.5 ${origin === 'dnx' ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'}`}
+      >
+        DNAnexus
+      </button>
+    </div>
+  ) : null
+
+  if (origin === 'dnx' && dnxReady) {
+    return (
+      <div className="flex h-full flex-col">
+        {tabStrip}
+        <div className="min-h-0 flex-1">
+          <DnxFilePanel />
+        </div>
+      </div>
+    )
+  }
+
   // Not connected state
   if (!isConnected) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-        <ServerOff className="h-10 w-10 text-text-muted" />
-        <p className="text-sm text-text-muted">
-          Connect to a server to browse files
-        </p>
+      <div className="flex h-full flex-col">
+        {tabStrip}
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+          <ServerOff className="h-10 w-10 text-text-muted" />
+          <p className="text-sm text-text-muted">
+            Connect to a server to browse files
+          </p>
+        </div>
       </div>
     )
   }
 
   return (
     <div className="flex h-full flex-col">
+      {tabStrip}
       {/* Pick-mode banner — file or directory. */}
       {filePickMode.active && (
         <div className="border-b border-accent bg-accent/10 px-3 py-1.5 flex items-center gap-2">
@@ -247,7 +297,7 @@ export function FileExplorer() {
           </span>
           {filePickMode.target === 'directory' && (
             <button
-              onClick={() => resolveFilePick(cwd)}
+              onClick={() => resolveFilePick(cwd, undefined, activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')}
               className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
               title="Use the current folder"
             >

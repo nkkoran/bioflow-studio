@@ -37,7 +37,7 @@ export function ResultsPanel() {
         const downstreamConsumers = snapshotEdges.filter((edge) => {
           if (edge.source !== nodeId) return false
           const targetNode = snapshotNodes.find((candidate) => candidate.id === edge.target)
-          return targetNode?.type === 'tool' || targetNode?.type === 'merge' || targetNode?.type === 'transform'
+          return targetNode?.type === 'tool' || targetNode?.type === 'merge' || targetNode?.type === 'transform' || targetNode?.type === 'transfer'
         })
         return {
           nodeId,

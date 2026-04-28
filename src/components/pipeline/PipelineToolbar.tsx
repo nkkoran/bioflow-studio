@@ -8,20 +8,20 @@
  * shown (fix required). If there are only warnings the modal offers "Run
  * anyway". If everything is clean the run starts immediately.
  */
-import { useState, useCallback, useEffect } from 'react'
-import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate } from 'lucide-react'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate, CheckSquare, CheckCircle2, Info, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useRunStore } from '@/stores/runStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
-import { ValidationBadge } from './ValidationBadge'
 import { validatePipeline, type ValidationIssue, type ValidationResult } from '@/lib/pipelineValidator'
 import { mergeReadinessIntoValidation } from '@/lib/workflowReadiness'
-import type { DryRunScript, PipelineSnapshot } from '@/types/pipeline'
+import type { PipelineSnapshot, ToolNodeData } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import { Dialog } from '@/components/ui/Dialog'
@@ -30,8 +30,11 @@ import { useDialogStore } from '@/stores/dialogStore'
 import { useClusterDoctorStore } from '@/stores/clusterDoctorStore'
 import { ClusterDoctorDialog } from '@/components/connection/ClusterDoctorDialog'
 import type { ClusterDoctorReport } from '@/types/workspace'
-import { WorkflowReadinessBadge } from './WorkflowReadinessBadge'
 import { useWorkflowReadinessStore } from '@/stores/readinessStore'
+import { buildRunManifest } from '@/lib/runManifest'
+import type { RunManifest } from '@/types/workspace'
+import type { DryRunScript } from '@/types/pipeline'
+import { RunReportModal } from './RunReportModal'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -132,6 +135,34 @@ function ModalIssueRow({ issue, color }: { issue: ValidationIssue; color: string
   )
 }
 
+function groupIssues(issues: ValidationIssue[]): Record<'Pipeline structure' | 'Files and columns' | 'Cluster readiness', ValidationIssue[]> {
+  const groups = {
+    'Pipeline structure': [] as ValidationIssue[],
+    'Files and columns': [] as ValidationIssue[],
+    'Cluster readiness': [] as ValidationIssue[],
+  }
+  for (const issue of issues) {
+    if (issue.code.startsWith('CLUSTER_')) groups['Cluster readiness'].push(issue)
+    else if (/(FILE|INPUT|OUTPUT|COLUMN|READINESS|ROLE|SAMPLE|EXPORT|OPTION_FILE)/i.test(issue.code)) groups['Files and columns'].push(issue)
+    else groups['Pipeline structure'].push(issue)
+  }
+  return groups
+}
+
+function snapshotNeedsSsh(snapshot: PipelineSnapshot): boolean {
+  return snapshot.nodes.some((node) => {
+    if (node.type === 'merge' || node.type === 'transform') return true
+    if (node.type === 'transfer') {
+      const data = node.data as { from?: string; to?: string }
+      return data.from === 'ssh' || data.to === 'ssh'
+    }
+    if (node.type === 'tool') {
+      return (node.data as ToolNodeData).backend !== 'dnx'
+    }
+    return false
+  })
+}
+
 // ── Toolbar ─────────────────────────────────────────────────────────────────
 
 export function PipelineToolbar() {
@@ -150,6 +181,7 @@ export function PipelineToolbar() {
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const loadSnapshot = usePipelineStore((s) => s.loadSnapshot)
   const markSaved = usePipelineStore((s) => s.markSaved)
+  const insertTransferNodeForEdge = usePipelineStore((s) => s.insertTransferNodeForEdge)
   const nodes = usePipelineStore((s) => s.nodes)
   const schemas = useDataPreviewStore((s) => s.schemas)
 
@@ -158,28 +190,98 @@ export function PipelineToolbar() {
   const activeRun = useRunStore((s) => s.activeRunId ? s.runs[s.activeRunId] : null)
   const startRun = useRunStore((s) => s.startRun)
   const settings = useSettingsStore((s) => s.settings)
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const dnxAuthenticated = useDnxStore((s) => s.authStatus === 'authenticated')
   const confirmOnLoginNodeRun = useSettingsStore((s) => s.settings.confirmOnLoginNodeRun)
+  const skipPreRunFileCheck = useSettingsStore((s) => s.settings.skipPreRunFileCheck)
+  const skipPreRunDoctorCheck = useSettingsStore((s) => s.settings.skipPreRunDoctorCheck)
   const cancelRun = useRunStore((s) => s.cancelRun)
   const promptDialog = useDialogStore((s) => s.prompt)
   const confirmAction = useDialogStore((s) => s.confirm)
   const runDoctorReport = useClusterDoctorStore((s) => s.runReport)
   const evaluateReadiness = useWorkflowReadinessStore((s) => s.evaluateSnapshot)
+  const lastReadinessReport = useWorkflowReadinessStore((s) => s.lastReport)
 
   const [editingName, setEditingName] = useState(false)
   const [savedMessage, setSavedMessage] = useState<{ text: string; isError: boolean } | null>(null)
   const [running, setRunning] = useState(false)
+  const [runStatus, setRunStatus] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [scriptPreview, setScriptPreview] = useState<DryRunScript[] | null>(null)
+  const [reportPreview, setReportPreview] = useState<RunManifest | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
   const [doctorDialog, setDoctorDialog] = useState<ClusterDoctorReport | null>(null)
+  const [checkReport, setCheckReport] = useState<ValidationResult | null>(null)
+  const [checkOpen, setCheckOpen] = useState(false)
   const [openPicker, setOpenPicker] = useState<Array<{ id: string; name: string }> | null>(null)
   const [templatePicker, setTemplatePicker] = useState(false)
   const activeRunIsCancellable = activeRun?.status === 'queued' || activeRun?.status === 'running'
+  const checkRef = useRef<HTMLDivElement | null>(null)
 
   const flashMessage = useCallback((msg: string, isError = false) => {
     setSavedMessage({ text: msg, isError })
     setTimeout(() => setSavedMessage(null), isError ? 7000 : 2000)
   }, [])
+
+  useEffect(() => {
+    if (!checkOpen) return
+    const onDown = (event: MouseEvent) => {
+      if (checkRef.current && !checkRef.current.contains(event.target as Node)) setCheckOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [checkOpen])
+
+  const runChecks = useCallback(async (
+    snapshot: PipelineSnapshot,
+    opts: { includeDoctor?: boolean; onProgress?: (msg: string) => void } = {},
+  ) => {
+    opts.onProgress?.('Validating pipeline...')
+    let result = validatePipeline(snapshot, {
+      schemas,
+      annotationDefaults: {
+        annovarDbPath: settings.annovarDbPath,
+        annovarScriptsPath: settings.annovarScriptsPath,
+        vepCachePath: settings.vepCachePath,
+        vepPath: settings.vepPath,
+      },
+      dnx: {
+        defaultProjectId: dnxDefaultProjectId,
+        authenticated: dnxAuthenticated,
+      },
+    })
+
+    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
+      if (!skipPreRunFileCheck) {
+        opts.onProgress?.('Checking input files...')
+        const readiness = await evaluateReadiness(activeConnectionId, snapshot)
+        result = mergeReadinessIntoValidation(result, readiness)
+      } else if (lastReadinessReport) {
+        result = mergeReadinessIntoValidation(result, lastReadinessReport)
+      }
+      if (opts.includeDoctor && !skipPreRunDoctorCheck) {
+        opts.onProgress?.('Checking cluster...')
+        const doctor = await runDoctorReport(activeConnectionId, { force: true })
+        if (doctor.checks.length > 0) {
+          const doctorIssues: ValidationIssue[] = doctor.checks.map((check) => ({
+            code: `CLUSTER_${check.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`,
+            severity: check.status === 'error' ? 'error' : check.status === 'warning' ? 'warning' : 'info',
+            message: check.detail,
+            suggestion: check.suggestion,
+          }))
+          result = {
+            ok: false,
+            issues: [...result.issues, ...doctorIssues],
+            errorCount: result.errorCount + doctorIssues.filter((issue) => issue.severity === 'error').length,
+            warningCount: result.warningCount + doctorIssues.filter((issue) => issue.severity === 'warning').length,
+            infoCount: result.infoCount + doctorIssues.filter((issue) => issue.severity === 'info').length,
+          }
+        }
+      }
+    }
+
+    return result
+  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, lastReadinessReport, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, skipPreRunDoctorCheck, skipPreRunFileCheck])
 
   const handleNew = useCallback(async () => {
     if (dirty) {
@@ -323,7 +425,7 @@ export function PipelineToolbar() {
   /** Actually submit the run (called directly if no issues, or via modal "Run anyway"). */
   const submitRun = useCallback(async (snapshot: PipelineSnapshot) => {
     if (!activeConnectionId) { flashMessage('No active connection', true); return }
-    if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
+    if (snapshotNeedsSsh(snapshot) && activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
     const loginNodes = snapshot.nodes.filter((node) => node.type === 'tool' && (node.data as any).executionMode === 'login')
     if (confirmOnLoginNodeRun && loginNodes.length > 0) {
       const ok = await confirmAction({
@@ -337,7 +439,7 @@ export function PipelineToolbar() {
     }
     setRunning(true)
     try {
-      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
+      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
       await startRun(activeConnectionId, snapshot)
       flashMessage(`Submitting ${runnable.length} node${runnable.length === 1 ? '' : 's'}...`)
     } catch (err: any) {
@@ -351,67 +453,50 @@ export function PipelineToolbar() {
   const handleRun = useCallback(async () => {
     try {
       const snapshot = exportSnapshot()
-      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
+      const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
       if (runnable.length === 0) { flashMessage('No tools to run'); return }
       if (!activeConnectionId) { flashMessage('No active connection'); return }
-      if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection'); return }
+      if (snapshotNeedsSsh(snapshot) && activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection'); return }
 
-      // Validation is pure but still wrapped — a throw here used to bubble out
-      // of the async click handler as an unhandled rejection, which on its own
-      // isn't fatal, but combined with other state updates before the throw it
-      // left the toolbar in an inconsistent state.
+      setRunning(true)
       let result
       try {
-        result = validatePipeline(snapshot, {
-          schemas,
-          annotationDefaults: {
-            annovarDbPath: settings.annovarDbPath,
-            annovarScriptsPath: settings.annovarScriptsPath,
-            vepCachePath: settings.vepCachePath,
-            vepPath: settings.vepPath,
-          },
+        result = await runChecks(snapshot, {
+          includeDoctor: true,
+          onProgress: setRunStatus,
         })
       } catch (err: any) {
         console.error('[PipelineToolbar] validatePipeline threw:', err)
         flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
+        setRunning(false)
         return
+      } finally {
+        setRunStatus(null)
       }
 
-      if (result.errorCount > 0) {
+      // Checks done — clear running before any modal or handoff to submitRun.
+      setRunning(false)
+
+      if (result.errorCount > 0 || result.issues.length > 0) {
         setConfirmDialog({ result, snapshot })
         return
       }
 
-      const readiness = await evaluateReadiness(activeConnectionId, snapshot, { force: true })
-      result = mergeReadinessIntoValidation(result, readiness)
-
-      const doctor = await runDoctorReport(activeConnectionId, { force: true })
-      if (doctor.checks.some((check) => check.status === 'error')) {
-        setDoctorDialog(doctor)
-        flashMessage('Cluster doctor found blocking issues', true)
-        return
-      }
-
       // No issues → run immediately.
-      if (result.issues.length === 0) {
-        await submitRun(snapshot)
-        return
-      }
-
-      // Issues exist → show confirmation modal; the modal handles the "run anyway" path.
-      setConfirmDialog({ result, snapshot })
+      await submitRun(snapshot)
     } catch (err: any) {
       console.error('[PipelineToolbar] handleRun threw:', err)
       flashMessage(err?.message ?? String(err), true)
+      setRunning(false)
     }
-  }, [activeConnectionId, evaluateReadiness, exportSnapshot, flashMessage, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, submitRun])
+  }, [activeConnectionId, exportSnapshot, flashMessage, runChecks, submitRun])
 
   const handlePreviewScripts = useCallback(async () => {
     const snapshot = exportSnapshot()
-    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform')
+    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
     if (runnable.length === 0) { flashMessage('No tools to preview'); return }
     if (!activeConnectionId) { flashMessage('No active connection', true); return }
-    if (activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Script preview requires an SSH connection', true); return }
+    if (snapshotNeedsSsh(snapshot) && activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Script preview requires an SSH connection', true); return }
 
     let result
     try {
@@ -422,6 +507,10 @@ export function PipelineToolbar() {
           annovarScriptsPath: settings.annovarScriptsPath,
           vepCachePath: settings.vepCachePath,
           vepPath: settings.vepPath,
+        },
+        dnx: {
+          defaultProjectId: dnxDefaultProjectId,
+          authenticated: dnxAuthenticated,
         },
       })
     } catch (err: any) {
@@ -443,7 +532,100 @@ export function PipelineToolbar() {
     } finally {
       setPreviewLoading(false)
     }
-  }, [activeConnectionId, exportSnapshot, flashMessage, schemas, settings.annovarDbPath, settings.vepCachePath])
+  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, exportSnapshot, flashMessage, schemas, settings.annovarDbPath, settings.vepCachePath])
+
+  const handlePreviewReport = useCallback(async () => {
+    const snapshot = exportSnapshot()
+    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
+    if (runnable.length === 0) { flashMessage('No tools to report'); return }
+    if (!activeConnectionId) { flashMessage('No active connection', true); return }
+    if (snapshotNeedsSsh(snapshot) && activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run report requires an SSH connection', true); return }
+
+    let result
+    try {
+      result = validatePipeline(snapshot, {
+        schemas,
+        annotationDefaults: {
+          annovarDbPath: settings.annovarDbPath,
+          annovarScriptsPath: settings.annovarScriptsPath,
+          vepCachePath: settings.vepCachePath,
+          vepPath: settings.vepPath,
+        },
+        dnx: {
+          defaultProjectId: dnxDefaultProjectId,
+          authenticated: dnxAuthenticated,
+        },
+      })
+    } catch (err: any) {
+      flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
+      return
+    }
+    if (result.errorCount > 0) {
+      setConfirmDialog({ result, snapshot })
+      return
+    }
+
+    setPreviewLoading(true)
+    try {
+      const readiness = snapshotNeedsSsh(snapshot) && activeConnectionId !== LOCAL_CONNECTION_ID
+        ? await evaluateReadiness(activeConnectionId, snapshot)
+        : null
+      const scripts = await window.api.pipeline.generateScriptsDry(activeConnectionId, snapshot)
+      const report = buildRunManifest({
+        runId: 'preview',
+        pipelineId: snapshot.id,
+        pipelineName: snapshot.name,
+        snapshot,
+        workspace: null,
+        connectionId: activeConnectionId,
+        arrayChainMode: snapshot.execution?.arrayChainMode,
+        fileLifecyclePolicy: snapshot.execution?.fileLifecyclePolicy,
+        workDir: '(preview)',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        status: 'queued',
+        nodes: {},
+      }, snapshot, null, { scripts, validation: result, readiness })
+      setReportPreview(report)
+    } catch (err: any) {
+      console.error('Run report preview failed:', err)
+      flashMessage(err?.message ?? String(err), true)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, exportSnapshot, flashMessage, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath])
+
+  const handleCheck = useCallback(() => {
+    const snapshot = exportSnapshot()
+    let result = validatePipeline(snapshot, {
+      schemas,
+      annotationDefaults: {
+        annovarDbPath: settings.annovarDbPath,
+        annovarScriptsPath: settings.annovarScriptsPath,
+        vepCachePath: settings.vepCachePath,
+        vepPath: settings.vepPath,
+      },
+      dnx: {
+        defaultProjectId: dnxDefaultProjectId,
+        authenticated: dnxAuthenticated,
+      },
+    })
+    if (lastReadinessReport) {
+      result = mergeReadinessIntoValidation(result, lastReadinessReport)
+    }
+    setCheckReport(result)
+    setCheckOpen(true)
+  }, [dnxAuthenticated, dnxDefaultProjectId, exportSnapshot, lastReadinessReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath])
+
+  const applyValidationQuickFix = useCallback((issue: ValidationIssue) => {
+    if (issue.code !== 'BACKEND_MISMATCH_NEEDS_TRANSFER' || !issue.edgeId) return
+    const inserted = insertTransferNodeForEdge(issue.edgeId)
+    if (inserted) {
+      setCheckOpen(false)
+      setCheckReport(null)
+      flashMessage('Inserted Transfer node')
+    }
+  }, [flashMessage, insertTransferNodeForEdge])
 
   const handleCancelRun = useCallback(async () => {
     if (!activeRunId || !activeRunIsCancellable) return
@@ -529,8 +711,77 @@ export function PipelineToolbar() {
               <option value="delete-intermediates-on-success">Clean up</option>
             </select>
           </div>
-          <ValidationBadge />
-          <WorkflowReadinessBadge />
+          <div className="relative" ref={checkRef}>
+            <button
+              onClick={handleCheck}
+              className={classNames(
+                'inline-flex items-center gap-1.5 rounded px-2 h-6 text-[10px] font-medium transition-colors',
+                !checkReport
+                  ? 'text-text-muted hover:text-text-primary hover:bg-bg-tertiary'
+                  : checkReport.errorCount > 0
+                    ? 'bg-error/15 text-error'
+                    : checkReport.warningCount > 0
+                      ? 'bg-warning/15 text-warning'
+                      : checkReport.infoCount > 0
+                        ? 'bg-accent/10 text-accent'
+                        : 'bg-success/10 text-success',
+              )}
+              title="Check pipeline structure (file readiness updates when you run)"
+            >
+              {checkReport ? (
+                checkReport.errorCount > 0 ? <XCircle size={12} /> : checkReport.warningCount > 0 ? <AlertTriangle size={12} /> : checkReport.infoCount > 0 ? <Info size={12} /> : <CheckCircle2 size={12} />
+              ) : <CheckSquare size={11} />}
+              {checkReport
+                ? checkReport.errorCount > 0
+                  ? `${checkReport.errorCount} errors`
+                  : checkReport.warningCount > 0
+                    ? `${checkReport.warningCount} warnings`
+                    : checkReport.infoCount > 0
+                      ? `${checkReport.infoCount} notes`
+                      : 'Checked'
+                : 'Check'}
+            </button>
+            {checkOpen && checkReport && (
+              <div className="absolute left-0 top-full z-50 mt-1 max-h-[420px] w-[420px] overflow-auto rounded-lg border border-border bg-bg-secondary py-1 shadow-lg">
+                {(['Pipeline structure', 'Files and columns', 'Cluster readiness'] as const).map((group) => {
+                  const issues = groupIssues(checkReport.issues)[group]
+                  if (issues.length === 0) return null
+                  return (
+                    <div key={group}>
+                      <div className="border-b border-border-light px-3 py-1 text-[9px] uppercase tracking-wider text-text-muted">
+                        {group} ({issues.length})
+                      </div>
+                      {issues.map((issue, index) => (
+                        <div key={`${group}-${index}`} className="px-4 py-2 border-b border-border-light/50 last:border-0 flex items-start gap-2">
+                          <span className={`text-[10px] font-mono shrink-0 mt-px ${issue.severity === 'error' ? 'text-error' : issue.severity === 'warning' ? 'text-warning' : 'text-accent'}`}>
+                            {issue.code}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs text-text-primary leading-snug">{issue.message}</div>
+                            {issue.suggestion && (
+                              <div className="text-[10px] text-text-muted mt-0.5 leading-snug">{issue.suggestion}</div>
+                            )}
+                          </div>
+                          {issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER' && issue.edgeId && (
+                            <button
+                              type="button"
+                              onClick={() => applyValidationQuickFix(issue)}
+                              className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+                            >
+                              Insert
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })}
+                {checkReport.issues.length === 0 && (
+                  <div className="px-3 py-2 text-xs text-text-secondary">Pipeline structure, files, and cluster checks look ready.</div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Feedback message — errors shown in red for 7s, info in accent for 2s */}
@@ -631,16 +882,29 @@ export function PipelineToolbar() {
             <FileCode2 size={12} className="mr-1" />
             {previewLoading ? 'Previewing...' : 'Preview'}
           </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handlePreviewReport}
+            disabled={previewLoading}
+            className="h-7 px-2.5 text-xs"
+          >
+            <FileText size={12} className="mr-1" />
+            {previewLoading ? 'Building...' : 'Report'}
+          </Button>
 
           <Button
             variant="primary"
             size="sm"
             onClick={handleRun}
             disabled={running}
-            className="h-7 px-2.5 text-xs"
+            className="h-7 px-2.5 text-xs min-w-[72px] justify-center"
+            title={runStatus ?? undefined}
           >
-            <Play size={12} className="mr-1" />
-            {running ? 'Starting...' : 'Run'}
+            <Play size={12} className="mr-1 shrink-0" />
+            {runStatus
+              ? <span className="truncate max-w-[140px]">{runStatus}</span>
+              : running ? 'Running...' : 'Run'}
           </Button>
           {activeRunId && activeRunIsCancellable && (
             <Button
@@ -672,12 +936,10 @@ export function PipelineToolbar() {
       {scriptPreview && (
         <ScriptPreviewModal scripts={scriptPreview} onClose={() => setScriptPreview(null)} />
       )}
-      <ClusterDoctorDialog
-        open={Boolean(doctorDialog)}
-        onClose={() => setDoctorDialog(null)}
-        connectionId={activeConnectionId}
-        report={doctorDialog}
-      />
+      {reportPreview && (
+        <RunReportModal report={reportPreview} onClose={() => setReportPreview(null)} />
+      )}
+      <ClusterDoctorDialog open={Boolean(doctorDialog)} onClose={() => setDoctorDialog(null)} connectionId={activeConnectionId} report={doctorDialog} />
 
       <Dialog
         open={openPicker !== null}

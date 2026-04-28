@@ -6,6 +6,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { CUSTOM_FLAG_ID, createCustomFlagBlock, ensureFlagBlocks, flagBlocksToParamValues } from '@/lib/flagRegistry'
 import { analysisOptionsToParamValues, normalizeAnalysisOptions } from '@/lib/analysisOptions'
 import { getTool } from '@/lib/toolRegistry'
+import { exportBugReport } from '@/lib/bugReport'
 
 interface Props {
   nodeId: string
@@ -96,6 +97,22 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
           {diagnostic.fix.kind === 'flags' ? 'Apply suggested flag and rerun' : 'Apply fix and rerun'}
         </Button>
       )}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="mb-2 ml-2 h-6 text-xs"
+        onClick={() => void exportBugReport({
+          title: `job-failure-${nodeId}`,
+          reason: diagnostic.cause,
+          extra: {
+            nodeId,
+            suggestion: diagnostic.suggestion,
+            stderrTail: diagnostic.tail,
+          },
+        })}
+      >
+        Create bug report
+      </Button>
       <details className="text-[10px] text-text-muted">
         <summary className="cursor-pointer">Last stderr lines</summary>
         <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded bg-bg-primary p-2 font-mono">

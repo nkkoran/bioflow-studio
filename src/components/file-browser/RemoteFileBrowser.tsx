@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Folder, FileText, RefreshCw, Clock3, Star, EyeOff, Loader2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ChevronUp, Clock3, FileText, Folder, Home, Loader2, RefreshCw, Star, EyeOff } from 'lucide-react'
 
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
+import { useDnxStore } from '@/stores/dnxStore'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { collapseHomePath, expandHomePath, pathDirname } from '@/lib/remotePath'
 import type { RemoteFileEntry } from '@/types'
 import { RemotePathInput } from './RemotePathInput'
+import type { FileOrigin } from '@/constants/connections'
 
 const RECENTS_KEY = 'fileBrowser:recents:v1'
 const FAVORITES_KEY = 'fileBrowser:favorites:v1'
@@ -19,7 +21,7 @@ interface RemoteFileBrowserProps {
   mode: 'file' | 'directory' | 'multi-file'
   initialPath?: string
   accept?: string[]
-  onSelect: (paths: string[]) => void
+  onSelect: (paths: string[], origin?: FileOrigin) => void
 }
 
 function matchesAcceptedType(accept: string[] | undefined, entry: RemoteFileEntry): boolean {
@@ -44,7 +46,11 @@ export function RemoteFileBrowser({
 }: RemoteFileBrowserProps) {
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const defaultDirectory = useConnectionStore((s) => activeConnectionId ? s.connections[activeConnectionId]?.config.defaultDirectory ?? '' : '')
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const dnxAvailableProjects = useDnxStore((s) => s.availableProjects)
+  const refreshDnxProjects = useDnxStore((s) => s.refreshProjects)
   const [cwd, setCwd] = useState(initialPath ?? '')
+  const [origin, setOrigin] = useState<FileOrigin>('local')
   const [homeDir, setHomeDir] = useState<string | null>(null)
   const [entries, setEntries] = useState<RemoteFileEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -55,54 +61,86 @@ export function RemoteFileBrowser({
   const [recents, setRecents] = useState<string[]>([])
   const [favoritePaths, setFavoritePaths] = useState<string[]>([])
   const [reloadNonce, setReloadNonce] = useState(0)
+  const [backStack, setBackStack] = useState<string[]>([])
+  const [forwardStack, setForwardStack] = useState<string[]>([])
 
   useEffect(() => {
     if (!open) return
     void window.api.store.get<string[]>(RECENTS_KEY).then((value) => setRecents(value ?? []))
     void window.api.store.get<string[]>(FAVORITES_KEY).then((value) => setFavoritePaths(value ?? []))
-  }, [open])
+    if (dnxAvailableProjects.length === 0 && dnxDefaultProjectId) {
+      void refreshDnxProjects().catch(() => undefined)
+    }
+  }, [dnxAvailableProjects.length, dnxDefaultProjectId, open, refreshDnxProjects])
 
   useEffect(() => {
-    if (!open || !activeConnectionId) return
-    const connectionId = activeConnectionId
+    if (!open) return
     let cancelled = false
     async function loadHome() {
-      if (connectionId === LOCAL_CONNECTION_ID) {
+      if (origin === 'dnx') {
+        if (!cancelled) setHomeDir(null)
+        return
+      }
+      if (origin === 'local' || activeConnectionId === LOCAL_CONNECTION_ID) {
         const home = await window.api.local.homedir()
         if (!cancelled) setHomeDir(home)
         return
       }
-      const result = await window.api.ssh.exec(connectionId, 'printf %s "$HOME"')
+      if (!activeConnectionId) return
+      const result = await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')
       if (!cancelled) setHomeDir(result.stdout.trim() || null)
     }
     void loadHome().catch(() => {
       if (!cancelled) setHomeDir(null)
     })
     return () => { cancelled = true }
-  }, [activeConnectionId, open])
+  }, [activeConnectionId, open, origin])
 
   useEffect(() => {
     if (!open) return
-    if (initialPath) {
-      setCwd(mode === 'directory' ? initialPath : pathDirname(initialPath) || initialPath)
+    if (dnxDefaultProjectId && origin === 'dnx') return
+    if (activeConnectionId === LOCAL_CONNECTION_ID || !activeConnectionId) {
+      setOrigin('local')
       return
     }
-    if (defaultDirectory) {
-      setCwd(defaultDirectory)
-      return
-    }
-    if (homeDir) setCwd(collapseHomePath(homeDir, homeDir))
-  }, [defaultDirectory, homeDir, initialPath, open])
+    setOrigin('ssh')
+  }, [activeConnectionId, dnxDefaultProjectId, open, origin])
 
   useEffect(() => {
-    if (!open || !activeConnectionId || !cwd) return
-    const path = expandHomePath(cwd, homeDir)
+    setSelected([])
+  }, [origin])
+
+  useEffect(() => {
+    if (!open) return
+    const defaultPath = origin === 'dnx'
+      ? '/'
+      : defaultDirectory || (homeDir ? collapseHomePath(homeDir, homeDir) : '')
+    if (initialPath) {
+      setCwd(mode === 'directory' ? initialPath : pathDirname(initialPath) || initialPath)
+      setBackStack([])
+      setForwardStack([])
+      return
+    }
+    if (defaultPath) {
+      setCwd(defaultPath)
+      setBackStack([])
+      setForwardStack([])
+    }
+  }, [defaultDirectory, homeDir, initialPath, open, origin])
+
+  useEffect(() => {
+    if (!open || !cwd) return
+    if (origin === 'ssh' && !activeConnectionId) return
+    if (origin === 'dnx' && !dnxDefaultProjectId) return
+    const path = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, homeDir)
     let cancelled = false
     setLoading(true)
     setError(null)
-    const promise = activeConnectionId === LOCAL_CONNECTION_ID
+    const promise = origin === 'local'
       ? window.api.local.ls(path)
-      : window.api.sftp.ls(activeConnectionId, path)
+      : origin === 'dnx'
+        ? window.api.dnx.listFiles({ projectId: dnxDefaultProjectId!, path })
+        : window.api.sftp.ls(activeConnectionId!, path)
     const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
       window.setTimeout(() => reject(new Error('Listing timed out. Try Refresh.')), 15000)
     })
@@ -117,17 +155,19 @@ export function RemoteFileBrowser({
       setLoading(false)
     })
     return () => { cancelled = true }
-  }, [activeConnectionId, cwd, homeDir, open, reloadNonce])
+  }, [activeConnectionId, cwd, dnxDefaultProjectId, homeDir, open, origin, reloadNonce])
 
   const favorites = useMemo(() => {
-    const base = [
-      homeDir ? collapseHomePath(homeDir, homeDir) : '',
-      defaultDirectory ? collapseHomePath(defaultDirectory, homeDir) : '',
-      '~/scratch',
-      '~/projects',
-    ].filter(Boolean)
+    const base = origin === 'dnx'
+      ? ['/']
+      : [
+          homeDir ? collapseHomePath(homeDir, homeDir) : '',
+          defaultDirectory ? collapseHomePath(defaultDirectory, homeDir) : '',
+          '~/scratch',
+          '~/projects',
+        ].filter(Boolean)
     return [...new Set([...favoritePaths.map((path) => collapseHomePath(path, homeDir)), ...base])]
-  }, [defaultDirectory, favoritePaths, homeDir])
+  }, [defaultDirectory, favoritePaths, homeDir, origin])
 
   const toggleFavorite = async (path: string) => {
     const next = favoritePaths.includes(path)
@@ -154,6 +194,90 @@ export function RemoteFileBrowser({
       return a.name.localeCompare(b.name, undefined, { numeric: true })
     }), [accept, entries, hideDotfiles, typeFilter])
 
+  const navigateTo = (nextPath: string, opts: { pushHistory?: boolean } = {}) => {
+    const normalized = origin === 'dnx'
+      ? normalizeDnxPath(nextPath)
+      : collapseHomePath(expandHomePath(nextPath, homeDir), homeDir)
+    setSelected([])
+    setCwd((current) => {
+      if (current !== normalized && opts.pushHistory !== false) {
+        setBackStack((prev) => [...prev, current].filter(Boolean).slice(-40))
+        setForwardStack([])
+      }
+      return normalized
+    })
+  }
+
+  const goBack = () => {
+    setBackStack((prev) => {
+      const next = prev[prev.length - 1]
+      if (!next) return prev
+      setForwardStack((forward) => [...forward, cwd].slice(-40))
+      setCwd(next)
+      return prev.slice(0, -1)
+    })
+  }
+
+  const goForward = () => {
+    setForwardStack((prev) => {
+      const next = prev[prev.length - 1]
+      if (!next) return prev
+      setBackStack((back) => [...back, cwd].slice(-40))
+      setCwd(next)
+      return prev.slice(0, -1)
+    })
+  }
+
+  const goUp = () => {
+    const currentPath = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, homeDir)
+    const parent = pathDirname(currentPath)
+    if (!parent || parent === currentPath) return
+    navigateTo(parent)
+  }
+
+  const goHome = () => {
+    if (origin === 'dnx') {
+      navigateTo('/')
+      return
+    }
+    if (!homeDir) return
+    navigateTo(homeDir)
+  }
+
+  const breadcrumbs = useMemo(() => {
+    if (origin === 'dnx') {
+      const normalized = normalizeDnxPath(cwd)
+      const parts = normalized.replace(/^\/+/, '').split('/').filter(Boolean)
+      const crumbs: Array<{ label: string; path: string }> = [{ label: '/', path: '/' }]
+      let running = ''
+      for (const part of parts) {
+        running = `${running}/${part}`.replace(/\/{2,}/g, '/')
+        crumbs.push({ label: part, path: running })
+      }
+      return crumbs
+    }
+    const expanded = expandHomePath(cwd, homeDir)
+    const prefix = homeDir && expanded.startsWith(homeDir) ? '~' : ''
+    const relative = prefix && homeDir ? expanded.slice(homeDir.length).replace(/^\/+/, '') : expanded.replace(/^\/+/, '')
+    const parts = relative ? relative.split('/').filter(Boolean) : []
+    const crumbs: Array<{ label: string; path: string }> = [{ label: prefix || '/', path: prefix || '/' }]
+    let running = prefix || ''
+    for (const part of parts) {
+      running = running === '/' ? `/${part}` : `${running}/${part}`.replace(/\/{2,}/g, '/')
+      crumbs.push({ label: part, path: running })
+    }
+    return crumbs
+  }, [cwd, homeDir, origin])
+
+  const originLabel = useMemo(() => {
+    if (origin === 'dnx') {
+      const activeProject = dnxAvailableProjects.find((project) => project.id === dnxDefaultProjectId)
+      return activeProject ? `DNX: ${activeProject.name}` : 'DNX'
+    }
+    if (origin === 'local') return 'Local'
+    return 'Rorqual (SSH)'
+  }, [dnxAvailableProjects, dnxDefaultProjectId, origin])
+
   const footer = (
     <>
       <Button variant="secondary" onClick={onClose}>Cancel</Button>
@@ -161,15 +285,15 @@ export function RemoteFileBrowser({
         variant="primary"
         onClick={async () => {
           const picked = mode === 'directory'
-            ? [expandHomePath(cwd, homeDir)]
+            ? [selected[0] ? normalizeSelectedPath(selected[0], origin, homeDir) : normalizeSelectedPath(cwd, origin, homeDir)]
             : selected.length > 0 ? selected : []
           if (picked.length === 0) return
           const nextRecents = [...new Set([...picked, ...recents])].slice(0, 12)
           await window.api.store.set(RECENTS_KEY, nextRecents)
-          onSelect(picked)
+          onSelect(picked, origin)
           onClose()
         }}
-        disabled={mode !== 'directory' && selected.length === 0}
+        disabled={(mode !== 'directory' && selected.length === 0) || (mode === 'directory' && !cwd)}
       >
         Select
       </Button>
@@ -180,6 +304,27 @@ export function RemoteFileBrowser({
     <Dialog open={open} onClose={onClose} title={title} width="max-w-4xl" footer={footer}>
       <div className="grid min-h-[420px] grid-cols-[180px_1fr] gap-4">
         <div className="border-r border-border pr-3">
+          <div className="mb-3 flex flex-col gap-1">
+            {([
+              { key: 'local', label: 'Local', disabled: false },
+              { key: 'ssh', label: 'Rorqual (SSH)', disabled: !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID },
+              { key: 'dnx', label: originLabel, disabled: !dnxDefaultProjectId },
+            ] as const).map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                disabled={tab.disabled}
+                onClick={() => setOrigin(tab.key)}
+                className={`rounded px-2 py-1 text-left text-xs ${
+                  origin === tab.key
+                    ? 'bg-accent/10 text-text-primary'
+                    : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                } disabled:opacity-50`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
           <div className="mb-3">
             <div className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-muted">
               <Star size={11} />
@@ -190,7 +335,7 @@ export function RemoteFileBrowser({
                 <button
                   key={path}
                   type="button"
-                  onClick={() => setCwd(path)}
+                  onClick={() => navigateTo(path)}
                   className="truncate rounded px-2 py-1 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary"
                 >
                   {path}
@@ -209,7 +354,7 @@ export function RemoteFileBrowser({
                   key={path}
                   type="button"
                   onClick={() => {
-                    if (mode === 'directory') setCwd(collapseHomePath(path, homeDir))
+                    if (mode === 'directory') navigateTo(path)
                     else setSelected([path])
                   }}
                   className="truncate rounded px-2 py-1 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary"
@@ -223,27 +368,54 @@ export function RemoteFileBrowser({
 
         <div className="flex min-w-0 flex-col gap-3">
           <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goBack} disabled={backStack.length === 0}>
+              <ChevronLeft size={12} />
+            </Button>
+            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goForward} disabled={forwardStack.length === 0}>
+              <ChevronRight size={12} />
+            </Button>
+            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goUp}>
+              <ChevronUp size={12} />
+            </Button>
+            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goHome} disabled={origin !== 'dnx' && !homeDir}>
+              <Home size={12} />
+            </Button>
             <RemotePathInput
               value={cwd}
               onChange={setCwd}
-              placeholder="~/project/data"
+              placeholder={origin === 'dnx' ? '/folder/on/project' : '~/project/data'}
               mode="directory"
               minPrefixChars={2}
+              origin={origin}
+              projectId={dnxDefaultProjectId}
               className="flex-1"
             />
             <Button
               variant="secondary"
               size="sm"
               className="h-8 px-2"
-              title={favoritePaths.includes(expandHomePath(cwd, homeDir)) ? 'Remove current folder from favorites' : 'Add current folder to favorites'}
+              title={favoritePaths.includes(normalizeSelectedPath(cwd, origin, homeDir)) ? 'Remove current folder from favorites' : 'Add current folder to favorites'}
               disabled={!cwd}
-              onClick={() => void toggleFavorite(expandHomePath(cwd, homeDir))}
+              onClick={() => void toggleFavorite(normalizeSelectedPath(cwd, origin, homeDir))}
             >
-              <Star size={12} className={favoritePaths.includes(expandHomePath(cwd, homeDir)) ? 'fill-current' : ''} />
+              <Star size={12} className={favoritePaths.includes(normalizeSelectedPath(cwd, origin, homeDir)) ? 'fill-current' : ''} />
             </Button>
             <Button variant="secondary" size="sm" onClick={() => setReloadNonce((value) => value + 1)}>
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
             </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-bg-tertiary/30 px-2 py-1 text-[11px] text-text-muted">
+            {breadcrumbs.map((crumb, index) => (
+              <button
+                key={`${crumb.path}-${index}`}
+                type="button"
+                className="truncate rounded px-1 py-0.5 hover:bg-bg-hover hover:text-text-primary"
+                onClick={() => navigateTo(crumb.path)}
+              >
+                {crumb.label}
+              </button>
+            ))}
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -288,8 +460,7 @@ export function RemoteFileBrowser({
                         type="button"
                         onClick={() => {
                           if (entry.isDirectory) {
-                            setCwd(collapseHomePath(entry.path, homeDir))
-                            if (mode === 'directory') setSelected([entry.path])
+                            setSelected([entry.path])
                             return
                           }
                           if (mode === 'multi-file') {
@@ -300,11 +471,11 @@ export function RemoteFileBrowser({
                         }}
                         onDoubleClick={() => {
                           if (entry.isDirectory) {
-                            setCwd(collapseHomePath(entry.path, homeDir))
+                            navigateTo(entry.path)
                             return
                           }
                           setSelected([entry.path])
-                          onSelect([entry.path])
+                          onSelect([entry.path], origin)
                           onClose()
                         }}
                         className={`flex w-full items-center gap-2 px-3 py-2 pr-16 text-left text-xs ${
@@ -339,7 +510,7 @@ export function RemoteFileBrowser({
 
           <div className="rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
             {mode === 'directory'
-              ? `Current folder: ${cwd || (homeDir ? collapseHomePath(homeDir, homeDir) : '/')}`
+              ? `Current ${originLabel} folder: ${cwd || (homeDir ? collapseHomePath(homeDir, homeDir) : '/')}`
               : selected.length > 0
                 ? selected.map((path) => collapseHomePath(path, homeDir)).join(', ')
                 : 'Select a file to continue.'}
@@ -348,4 +519,14 @@ export function RemoteFileBrowser({
       </div>
     </Dialog>
   )
+}
+
+function normalizeDnxPath(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) return '/'
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
+function normalizeSelectedPath(path: string, origin: FileOrigin, homeDir: string | null): string {
+  return origin === 'dnx' ? normalizeDnxPath(path) : expandHomePath(path, homeDir)
 }

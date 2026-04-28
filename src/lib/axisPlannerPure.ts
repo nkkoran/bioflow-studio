@@ -54,6 +54,13 @@ export function edgeAxisChips(snapshot: PipelineSnapshot): Record<string, EdgeAx
       continue
     }
 
+    if (node.type === 'transfer') {
+      outputsByNode.set(nodeId, {
+        output: inputAxisFor(nodeId, 'input', incoming, outputsByNode),
+      })
+      continue
+    }
+
     if (node.type === 'tool') {
       const data = node.data as ToolNodeData
       const tool = getTool(data.toolId)

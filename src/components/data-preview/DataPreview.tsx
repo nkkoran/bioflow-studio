@@ -13,6 +13,7 @@ import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDe
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
 import { joinRemotePath, pathBasename, pathDirname } from '@/lib/remotePath'
 import { useDialogStore } from '@/stores/dialogStore'
+import { exportBugReport } from '@/lib/bugReport'
 
 export function DataPreview() {
   const {
@@ -327,6 +328,24 @@ export function DataPreview() {
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
           )}
+          <button
+            type="button"
+            className="ml-auto shrink-0 text-[11px] text-text-muted hover:text-accent"
+            title="Save a bug report with the current file state and app context"
+            onClick={() => void exportBugReport({
+              title: 'data-preview-issue',
+              reason: errors[activeTab.id] ?? 'Data preview issue reported by user',
+              extra: {
+                filePath: activeTab.filePath,
+                detectedDelimiter: activeTab.data?.delimiter,
+                headers: activeTab.data?.headers,
+                rowCount: activeTab.data?.rows.length,
+                errorMessage: errors[activeTab.id] ?? null,
+              },
+            })}
+          >
+            Report issue
+          </button>
         </div>
       )}
 

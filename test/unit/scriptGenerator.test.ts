@@ -284,4 +284,58 @@ describe('ScriptGenerator', () => {
     expect(generated.script).toContain('artifact_mode == "keep-file"')
     expect(generated.script).toContain('writer.writerow([fid, iid])')
   })
+
+  it('does not emit ANNOVAR --remove unless explicitly enabled', () => {
+    const tool = getTool('annovar.table_annovar')
+    if (!tool) throw new Error('missing tool')
+    const nodeData: ToolNodeData = {
+      toolId: tool.id,
+      label: 'ANNOVAR',
+      paramValues: {},
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'annovar',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        { input: { kind: 'single', path: '/data/input.vcf' } },
+        { output: { kind: 'single', path: '/work/annotated.tsv' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+      connectionDefaults: {
+        annovarScriptsPath: '/tools/annovar',
+        annovarDbPath: '/tools/annovar/humandb',
+      },
+    })
+
+    expect(generated.script).not.toContain('--remove')
+  })
+
+  it('uses a command override when one is set', () => {
+    const tool = getTool('plink2.qc')
+    if (!tool) throw new Error('missing tool')
+    const generated = generateToolScript({
+      nodeId: 'qc',
+      tool,
+      nodeData: {
+        toolId: tool.id,
+        label: 'QC',
+        paramValues: {},
+        status: 'idle',
+        commandOverride: 'plink2 --pfile /data/custom --make-bed --out /work/custom',
+      },
+      axisPlan: singleAxisPlan(
+        { input: { kind: 'single', path: '/data/cohort.pgen' } },
+        { output: { kind: 'single', path: '/work/qc.pgen' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.script).toContain('plink2 --pfile /data/custom --make-bed --out /work/custom')
+    expect(generated.script).not.toContain('--maf 0.01')
+  })
 })

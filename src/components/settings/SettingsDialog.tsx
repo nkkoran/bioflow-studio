@@ -6,12 +6,25 @@ import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { classNames } from '@/lib/utils'
 import { AnnovarSetupWizard } from './AnnovarSetupWizard'
+import { DnanexusSettingsPanel } from './DnanexusSettingsPanel'
 
-const SECTIONS = ['General', 'Paths', 'Tools', 'Notifications', 'Advanced'] as const
+const SECTIONS = ['General', 'Paths', 'Tools', 'DNAnexus', 'Notifications', 'Advanced'] as const
 type Section = typeof SECTIONS[number]
 
-export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [section, setSection] = useState<Section>('General')
+export function SettingsDialog({
+  open,
+  onClose,
+  initialSection,
+}: {
+  open: boolean
+  onClose: () => void
+  initialSection?: Section
+}) {
+  const [section, setSection] = useState<Section>(initialSection ?? 'General')
+
+  useEffect(() => {
+    if (open && initialSection) setSection(initialSection)
+  }, [open, initialSection])
   const [annovarWizardOpen, setAnnovarWizardOpen] = useState(false)
   const settings = useSettingsStore((s) => s.settings)
   const load = useSettingsStore((s) => s.load)
@@ -92,6 +105,19 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 checked={settings.confirmOnLoginNodeRun}
                 onChange={(value) => toggle('settings:confirmOnLoginNodeRun', value)}
               />
+              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
+                <p className="text-[11px] font-medium text-text-secondary">Pre-run checks</p>
+                <Checkbox
+                  label="Skip input file checks (faster, uses last known result)"
+                  checked={settings.skipPreRunFileCheck}
+                  onChange={(value) => toggle('settings:skipPreRunFileCheck', value)}
+                />
+                <Checkbox
+                  label="Skip cluster doctor check before run"
+                  checked={settings.skipPreRunDoctorCheck}
+                  onChange={(value) => toggle('settings:skipPreRunDoctorCheck', value)}
+                />
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="mb-1 block text-text-secondary text-xs font-medium">Array chain mode</label>
@@ -239,6 +265,8 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               />
             </div>
           )}
+
+          {section === 'DNAnexus' && <DnanexusSettingsPanel />}
 
           {section === 'Advanced' && (
             <div className="flex flex-col gap-3">

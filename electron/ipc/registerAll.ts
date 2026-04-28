@@ -9,6 +9,7 @@ import { registerSlurmHandlers } from './slurmHandlers'
 import { registerFsHandlers } from './fsHandlers'
 import { registerClusterHandlers } from './clusterHandlers'
 import { registerAnnovarHandlers } from './annovarHandlers'
+import { registerDnanexusHandlers } from './dnanexusHandlers'
 
 export function registerAllHandlers(): void {
   registerSshHandlers()
@@ -22,4 +23,5 @@ export function registerAllHandlers(): void {
   registerFsHandlers()
   registerClusterHandlers()
   registerAnnovarHandlers()
+  registerDnanexusHandlers()
 }

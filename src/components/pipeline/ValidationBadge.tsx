@@ -15,6 +15,7 @@ import { CheckSquare, CheckCircle2, AlertTriangle, XCircle, Info } from 'lucide-
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useUIStore } from '@/stores/uiStore'
 import { validatePipeline, type ValidationIssue, type ValidationResult, type ValidationSeverity } from '@/lib/pipelineValidator'
 
 export function ValidationBadge() {
@@ -22,6 +23,8 @@ export function ValidationBadge() {
   const edges = usePipelineStore((s) => s.edges)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
+  const insertTransferNodeForEdge = usePipelineStore((s) => s.insertTransferNodeForEdge)
+  const openSettings = useUIStore((s) => s.openSettings)
   const schemas = useDataPreviewStore((s) => s.schemas)
   const settings = useSettingsStore((s) => s.settings)
 
@@ -73,6 +76,25 @@ export function ValidationBadge() {
     setOpen(false)
   }
 
+  const handleInsertTransfer = (edgeId: string) => {
+    const transferId = insertTransferNodeForEdge(edgeId)
+    if (transferId) {
+      setSelectedNode(transferId)
+      // Re-validate so the warning clears in place.
+      const next = validatePipeline(exportSnapshot(), {
+        schemas,
+        annotationDefaults: {
+          annovarDbPath: settings.annovarDbPath,
+          annovarScriptsPath: settings.annovarScriptsPath,
+          vepCachePath: settings.vepCachePath,
+          vepPath: settings.vepPath,
+        },
+      })
+      setResult(next)
+      validatedAt.current = { nodeCount: nodes.length + 1, edgeCount: edges.length + 1 }
+    }
+  }
+
   // ── Idle state ────────────────────────────────────────────────────────────
   if (!result) {
     return (
@@ -121,7 +143,16 @@ export function ValidationBadge() {
                   {sev}s ({list.length})
                 </div>
                 {list.map((issue, i) => (
-                  <IssueRow key={`${sev}-${i}`} issue={issue} onJump={handleJump} />
+                  <IssueRow
+                    key={`${sev}-${i}`}
+                    issue={issue}
+                    onJump={handleJump}
+                    onInsertTransfer={handleInsertTransfer}
+                    onOpenDnxSettings={() => {
+                      openSettings('DNAnexus')
+                      setOpen(false)
+                    }}
+                  />
                 ))}
               </div>
             )
@@ -138,11 +169,23 @@ export function ValidationBadge() {
   )
 }
 
-function IssueRow({ issue, onJump }: { issue: ValidationIssue; onJump: (nodeId?: string) => void }) {
+function IssueRow({
+  issue,
+  onJump,
+  onInsertTransfer,
+  onOpenDnxSettings,
+}: {
+  issue: ValidationIssue
+  onJump: (nodeId?: string) => void
+  onInsertTransfer: (edgeId: string) => void
+  onOpenDnxSettings: () => void
+}) {
   const color =
     issue.severity === 'error' ? 'text-error'
     : issue.severity === 'warning' ? 'text-warning'
     : 'text-accent'
+  const canInsertTransfer = issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER' && Boolean(issue.edgeId)
+  const canOpenDnxSettings = issue.code === 'DNX_NO_PROJECT' || issue.code === 'DNX_NOT_AUTHENTICATED'
   return (
     <div className="px-3 py-2 border-b border-border-light/50 last:border-0">
       <div className="flex items-start gap-2">
@@ -151,6 +194,22 @@ function IssueRow({ issue, onJump }: { issue: ValidationIssue; onJump: (nodeId?:
           <div className="text-xs text-text-primary leading-tight">{issue.message}</div>
           {issue.suggestion && (
             <div className="text-[10px] text-text-muted mt-0.5 leading-snug">{issue.suggestion}</div>
+          )}
+          {canInsertTransfer && (
+            <button
+              onClick={() => onInsertTransfer(issue.edgeId!)}
+              className="mt-1 inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent transition-colors hover:bg-accent/20"
+            >
+              Insert Transfer node
+            </button>
+          )}
+          {canOpenDnxSettings && (
+            <button
+              onClick={onOpenDnxSettings}
+              className="mt-1 inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent transition-colors hover:bg-accent/20"
+            >
+              Open DNAnexus settings
+            </button>
           )}
         </div>
         {issue.nodeId && (

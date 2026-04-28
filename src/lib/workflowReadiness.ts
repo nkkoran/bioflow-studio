@@ -333,7 +333,10 @@ function checkSampleOverlap(
   issues: WorkflowReadinessIssue[],
 ): void {
   const tool = node.type === 'tool' ? getTool((node.data as ToolNodeData).toolId) : null
-  const ports = (tool ? getActiveToolInputs(tool, node.data as ToolNodeData) : []).filter((port) => {
+  const connectedPortIds = snapshot.edges
+    .filter((edge) => edge.target === node.id)
+    .map((edge) => edge.targetHandle ?? 'input')
+  const ports = (tool ? getActiveToolInputs(tool, node.data as ToolNodeData, { connectedPortIds }) : []).filter((port) => {
     if (port.contract?.family === 'plink-fileset') return true
     return (port.contract?.tabular?.sampleIdRoleIds?.length ?? 0) > 0
   }) ?? []
@@ -399,7 +402,8 @@ function checkParameterRules(
 
     for (const portId of rule.requiresPortsWithIndexes ?? []) {
       const probe = fileProbeForPort(snapshot, node.id, portId, probes)
-      const port = getActiveToolInputs(tool, data).find((candidate) => candidate.id === portId)
+      const connected = snapshot.edges.filter((edge) => edge.target === node.id).map((edge) => edge.targetHandle ?? 'input')
+      const port = getActiveToolInputs(tool, data, { connectedPortIds: connected }).find((candidate) => candidate.id === portId)
       const missingIndexes = (port?.contract?.requiresIndexes ?? []).filter((suffix) => !probe?.indexes?.[suffix])
       if (missingIndexes.length > 0) {
         pushIssue(issues, {
@@ -650,7 +654,8 @@ export function evaluateWorkflowReadiness(
     if (node.type === 'tool') {
       const tool = getTool((node.data as ToolNodeData).toolId)
       if (!tool) continue
-      for (const port of getActiveToolInputs(tool, node.data as ToolNodeData)) {
+      const connected = snapshot.edges.filter((edge) => edge.target === node.id).map((edge) => edge.targetHandle ?? 'input')
+      for (const port of getActiveToolInputs(tool, node.data as ToolNodeData, { connectedPortIds: connected })) {
         if (port.contract) {
           checkPortContract(snapshot, node, port.id, port.contract, probes, schemas, roleMappings, issues)
         }

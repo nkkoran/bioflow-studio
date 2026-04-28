@@ -1,4 +1,4 @@
-import type { FileNodeData, FileType, PipelineSnapshot, ToolNodeData, TransformNodeData } from '@/types/pipeline'
+import type { FileNodeData, FileType, PipelineSnapshot, ToolNodeData, TransferNodeData, TransformNodeData } from '@/types/pipeline'
 import type { PathSettings } from '@/stores/settingsStore'
 import { getTool } from '@/lib/toolRegistry'
 import { joinRemotePath, pathBasename, pathDirname, trimTrailingSlash } from '@/lib/remotePath'
@@ -39,6 +39,13 @@ export function computeNodeOutputPreview(
     const sink = connectedOutputSink(snapshot, nodeId, 'output')
     const fallback = `${outputDir}/${slug}.output`
     return sink ? sinkPath(sink, outputDir, fallback) : fallback
+  }
+
+  if (node.type === 'transfer') {
+    const data = node.data as TransferNodeData
+    const outputDir = previewOutputDir(data.sshFolder || data.dnxFolder, outputRoot, slug)
+    const name = data.outputName?.trim() || `${slug}.output`
+    return `${outputDir}/${name}`
   }
 
   return null

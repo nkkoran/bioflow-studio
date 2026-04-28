@@ -29,6 +29,7 @@ import { ToolNode } from './nodes/ToolNode'
 import { FileNode } from './nodes/FileNode'
 import { NoteNode } from './nodes/NoteNode'
 import { MergeNode } from './nodes/MergeNode'
+import { TransferNode } from './nodes/TransferNode'
 import { TransformNode } from './nodes/TransformNode'
 import { AxedEdge } from './edges/AxedEdge'
 import { GroupOverlay } from './GroupOverlay'
@@ -57,6 +58,7 @@ const nodeTypes: NodeTypes = {
   file: FileNode,
   note: NoteNode,
   merge: MergeNode,
+  transfer: TransferNode,
   transform: TransformNode,
 }
 
@@ -81,6 +83,7 @@ function CanvasInner() {
   const addFileNode = usePipelineStore((s) => s.addFileNode)
   const addNoteNode = usePipelineStore((s) => s.addNoteNode)
   const addMergeNode = usePipelineStore((s) => s.addMergeNode)
+  const addTransferNode = usePipelineStore((s) => s.addTransferNode)
   const addTransformNode = usePipelineStore((s) => s.addTransformNode)
   const addNodesAndEdges = usePipelineStore((s) => s.addNodesAndEdges)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
@@ -190,6 +193,7 @@ function CanvasInner() {
     const label = pathBasename(rawPath)
     let resolvedPath = rawPath
     let source: 'local' | 'remote' = localDrop ? 'local' : 'remote'
+    let origin: 'local' | 'ssh' = localDrop ? 'local' : 'ssh'
     try {
       setDropMessage(localDrop ? `Adding ${label}…` : 'Adding file…')
       if (localDrop && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
@@ -209,19 +213,21 @@ function CanvasInner() {
           await window.api.sftp.upload(activeConnectionId, rawPath, remotePath)
           resolvedPath = remotePath
           source = 'remote'
+          origin = 'ssh'
         }
       }
       const target = findDropTargetTool(nodes, position)
       if (!target) {
-        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
         setDropMessage(source === 'remote' && localDrop ? `Uploaded ${label} and added it to the canvas.` : `Added ${label} to the canvas.`)
         return
       }
 
       const tool = getTool((target.data as any).toolId)
-      const activeInputs = tool ? getActiveToolInputs(tool, target.data as any) : []
+      const connectedPortIds = edges.filter((edge) => edge.target === target.id).map((edge) => edge.targetHandle ?? 'input')
+      const activeInputs = tool ? getActiveToolInputs(tool, target.data as any, { connectedPortIds }) : []
       if (!tool || activeInputs.length === 0) {
-        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
         setDropMessage(`Added ${label} to the canvas.`)
         return
       }
@@ -234,7 +240,7 @@ function CanvasInner() {
       const attach = (portId: string) => {
         const fileId = addFileNode(
           { x: target.position.x - 220, y: target.position.y },
-          { isInput: true, label, path: resolvedPath, fileType, source },
+          { isInput: true, label, path: resolvedPath, fileType, source, origin },
         )
         onConnect({
           source: fileId,
@@ -252,7 +258,7 @@ function CanvasInner() {
       })
 
       if (compatible.length === 0) {
-        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
         setDropMessage(`Added ${label} to the canvas.`)
         return
       }
@@ -338,12 +344,13 @@ function CanvasInner() {
         else if (kind === 'file-output') addFileNode(position, { isInput: false, label: 'Output file' })
         else if (kind === 'note') addNoteNode(position)
         else if (kind === 'merge') addMergeNode(position)
+        else if (kind === 'transfer') addTransferNode(position)
         else if (kind === 'transform') addTransformNode(position)
       } else {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, handleDroppedPath, addToolNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges],
+    [screenToFlowPosition, handleDroppedPath, addToolNode, addNoteNode, addMergeNode, addTransferNode, addTransformNode, addNodesAndEdges],
   )
 
   useEffect(() => {
@@ -380,6 +387,8 @@ function CanvasInner() {
         sourceType = (sourceNode.data as any).fileType
       } else if (sourceNode.type === 'transform') {
         sourceType = (sourceNode.data as any).fileType
+      } else if (sourceNode.type === 'transfer') {
+        sourceType = 'any'
       }
       // merge nodes pass through — their output type matches upstream
 
@@ -387,12 +396,17 @@ function CanvasInner() {
       let targetType = 'any'
       if (targetNode.type === 'tool') {
         const tool = getTool((targetNode.data as any).toolId)
-        const port = tool ? getActiveToolInputs(tool, targetNode.data as any).find((p) => p.id === conn.targetHandle) : undefined
+        const connectedPortIds = nodes
+          ? edges.filter((edge) => edge.target === targetNode.id).map((edge) => edge.targetHandle ?? 'input')
+          : []
+        const port = tool ? getActiveToolInputs(tool, targetNode.data as any, { connectedPortIds }).find((p) => p.id === conn.targetHandle) : undefined
         if (port) targetType = port.fileType
         else return false
       } else if (targetNode.type === 'file') {
         targetType = (targetNode.data as any).fileType
       } else if (targetNode.type === 'transform') {
+        targetType = 'any'
+      } else if (targetNode.type === 'transfer') {
         targetType = 'any'
       }
       // merge nodes accept any input — validation happens at plan time
@@ -518,6 +532,7 @@ function CanvasInner() {
             if (n.type === 'file') return '#f59e0b'
             if (n.type === 'note') return '#fbbf24'
             if (n.type === 'merge') return '#818cf8'
+            if (n.type === 'transfer') return '#22d3ee'
             if (n.type === 'transform') return '#2dd4bf'
             return '#888'
           }}

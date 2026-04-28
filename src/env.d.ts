@@ -59,6 +59,25 @@ interface Window {
       setSecret: (key: string, value: string) => Promise<void>
       deleteSecret: (key: string) => Promise<void>
     }
+    dnx: {
+      bootstrap: (options?: { force?: boolean }) => Promise<{ ok: boolean }>
+      auth: (args: { token?: string; projectId?: string }) => Promise<{ ok: boolean }>
+      listProjects: () => Promise<import('./types/dnx').DnxProject[]>
+      listInstanceTypes: () => Promise<import('./types/dnx').DnxInstanceSpec[]>
+      listFiles: (args: { projectId: string; path: string }) => Promise<import('./types/dnx').DnxRemoteFileEntry[]>
+      stat: (args: { projectId: string; path: string }) => Promise<import('./types/dnx').DnxFileStat>
+      upload: (args: { projectId: string; localPath: string; folder: string }) => Promise<{ fileId: string }>
+      download: (args: { projectId: string; fileId: string; localPath: string }) => Promise<{ path: string }>
+      run: (args: Record<string, unknown>) => Promise<{ jobId: string }>
+      jobStatus: (args: { jobId: string }) => Promise<import('./types/dnx').DnxJobStatus>
+      cancel: (args: { jobId: string }) => Promise<{ ok: boolean }>
+      ensureApplet: (args: Record<string, unknown>) => Promise<{ appletId: string; hash: string }>
+      sparkExtract: (args: Record<string, unknown>) => Promise<{ jobId: string }>
+      onBridgeStatus: (callback: (data: import('./types/dnx').DnxBridgeStatusEvent) => void) => () => void
+      onBootstrapProgress: (callback: (data: import('./types/dnx').DnxBridgeStatusEvent) => void) => () => void
+      onTransferProgress: (callback: (data: import('./types/dnx').DnxTransferProgress) => void) => () => void
+      onAppletInstallProgress: (callback: (data: import('./types/dnx').DnxAppletInstallProgress) => void) => () => void
+    }
     local: {
       ls: (dirPath: string) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (filePath: string) => Promise<import('./types/files').FileStat>

@@ -157,6 +157,12 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
   }
 
+  if (nodeData.commandOverride?.trim()) {
+    lines.push(nodeData.commandOverride.trim())
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
   // Compose the command invocation.
   const cmdParts: string[] = [tool.command]
   const commandNodeData: ToolNodeData = {
@@ -295,7 +301,7 @@ function renderAnnovarCommand(opts: {
   if (booleanParam(nodeData, 'polish', true)) parts.push('--polish')
   if (intronhgvs) parts.push('--intronhgvs', shellQuote(intronhgvs))
   if (booleanParam(nodeData, 'otherinfo', false)) parts.push('--otherinfo')
-  if (nodeData.paramValues?.remove !== false) parts.push('--remove')
+  if (nodeData.paramValues?.remove === true) parts.push('--remove')
   if (nodeData.paramValues?.vcfinput !== false) parts.push('--vcfinput')
   return parts.join(' \\\n  ')
 }
