@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type React from 'react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
@@ -13,6 +13,7 @@ const STEPS = ['Welcome', 'SSH', 'Test', 'Slurm', 'Folders', 'DNAnexus', 'Done']
 
 export function WelcomeWizard() {
   const settings = useSettingsStore((s) => s.settings)
+  const loaded = useSettingsStore((s) => s.loaded)
   const setSetting = useSettingsStore((s) => s.setSetting)
   const devMode = useSettingsStore((s) => s.devMode)
   const openConnectionDialog = useUIStore((s) => s.openConnectionDialog)
@@ -24,8 +25,25 @@ export function WelcomeWizard() {
   const [account, setAccount] = useState('')
   const [message, setMessage] = useState<string | null>(null)
   const [testing, setTesting] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
+  const [forceOpen, setForceOpen] = useState(false)
 
-  if (settings.onboardingComplete) return null
+  useEffect(() => {
+    const open = () => {
+      setStep(0)
+      setMessage(null)
+      setDismissed(false)
+      setForceOpen(true)
+    }
+    window.addEventListener('bioflow:open-onboarding', open)
+    return () => window.removeEventListener('bioflow:open-onboarding', open)
+  }, [])
+
+  useEffect(() => {
+    if (!settings.onboardingComplete) setDismissed(false)
+  }, [settings.onboardingComplete])
+
+  if (!loaded || (!forceOpen && (settings.onboardingComplete || dismissed))) return null
   const visibleSteps = devMode ? STEPS : STEPS.filter((item) => item !== 'DNAnexus')
   const current = visibleSteps[Math.min(step, visibleSteps.length - 1)]
   const activeEntry = activeConnectionId ? connections[activeConnectionId] : null
@@ -36,6 +54,13 @@ export function WelcomeWizard() {
       await window.api.store.set(`connection:${activeConnectionId}:slurmAccount`, account.trim())
     }
     await setSetting('settings:onboardingComplete', true)
+    setForceOpen(false)
+  }
+
+  const dismissForNow = () => {
+    setMessage(null)
+    setForceOpen(false)
+    setDismissed(true)
   }
 
   const next = () => {
@@ -51,7 +76,7 @@ export function WelcomeWizard() {
   return (
     <Dialog
       open
-      onClose={() => void finish()}
+      onClose={dismissForNow}
       title="Welcome to BioFlow Studio"
       width="max-w-2xl"
       footer={(

@@ -34,8 +34,11 @@ export interface AppSettings {
   dnxAuthTokenStored: boolean
   dnxDefaultProjectId: string | null
   onboardingComplete: boolean
+  onboardingVersionComplete: number
   telemetryOptIn: boolean
 }
+
+export const CURRENT_ONBOARDING_VERSION = 1
 
 export const DEFAULT_SETTINGS: AppSettings = {
   paths: {
@@ -69,6 +72,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dnxAuthTokenStored: false,
   dnxDefaultProjectId: null,
   onboardingComplete: false,
+  onboardingVersionComplete: 0,
   telemetryOptIn: false,
 }
 
@@ -93,6 +97,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   devMode: false,
 
   load: async () => {
+    const onboardingVersionComplete = await readSetting('settings:onboardingVersionComplete', DEFAULT_SETTINGS.onboardingVersionComplete)
     const settings: AppSettings = {
       paths: {
         scriptsSubfolder: await readSetting('settings:paths:scriptsSubfolder', DEFAULT_SETTINGS.paths.scriptsSubfolder),
@@ -124,7 +129,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       skipPreRunDoctorCheck: await readSetting('settings:skipPreRunDoctorCheck', DEFAULT_SETTINGS.skipPreRunDoctorCheck),
       dnxAuthTokenStored: Boolean(await window.api.store.getSecret('dnx:authToken')),
       dnxDefaultProjectId: await readSetting('dnx:defaultProjectId', DEFAULT_SETTINGS.dnxDefaultProjectId),
-      onboardingComplete: await readSetting('settings:onboardingComplete', DEFAULT_SETTINGS.onboardingComplete),
+      onboardingComplete: onboardingVersionComplete >= CURRENT_ONBOARDING_VERSION,
+      onboardingVersionComplete,
       telemetryOptIn: await readSetting('settings:telemetryOptIn', DEFAULT_SETTINGS.telemetryOptIn),
     }
     set({ settings, loaded: true })
@@ -132,6 +138,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setSetting: async (key, value) => {
     await window.api.store.set(key, value)
+    if (key === 'settings:onboardingComplete') {
+      await window.api.store.set('settings:onboardingVersionComplete', value ? CURRENT_ONBOARDING_VERSION : 0)
+    }
     const current = get().settings
     const next: AppSettings = structuredClone(current)
     switch (key) {
@@ -177,7 +186,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:skipPreRunFileCheck': next.skipPreRunFileCheck = Boolean(value); break
       case 'settings:skipPreRunDoctorCheck': next.skipPreRunDoctorCheck = Boolean(value); break
       case 'dnx:defaultProjectId': next.dnxDefaultProjectId = value ? String(value) : null; break
-      case 'settings:onboardingComplete': next.onboardingComplete = Boolean(value); break
+      case 'settings:onboardingComplete':
+        next.onboardingComplete = Boolean(value)
+        next.onboardingVersionComplete = value ? CURRENT_ONBOARDING_VERSION : 0
+        break
+      case 'settings:onboardingVersionComplete': {
+        const parsed = Number(value)
+        next.onboardingVersionComplete = Number.isFinite(parsed) ? Math.max(0, parsed) : 0
+        next.onboardingComplete = next.onboardingVersionComplete >= CURRENT_ONBOARDING_VERSION
+        break
+      }
       case 'settings:telemetryOptIn': next.telemetryOptIn = Boolean(value); break
     }
     set({ settings: next, loaded: true })
