@@ -1,7 +1,7 @@
 {
   "name": "bioflow-studio",
   "productName": "BioFlow Studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "./out/main/index.js",
   "repository": {
     "type": "git",
@@ -19,7 +19,7 @@
     "test:watch": "vitest",
     "release:patch": "npm version patch -m \"v%s\" && git push origin HEAD --tags",
     "release:minor": "npm version minor -m \"v%s\" && git push origin HEAD --tags",
-    "release:beta":  "npm version prerelease --preid=beta -m \"v%s\" && git push origin HEAD --tags"
+    "release:beta": "npm version prerelease --preid=beta -m \"v%s\" && git push origin HEAD --tags"
   },
   "keywords": [],
   "author": "",
