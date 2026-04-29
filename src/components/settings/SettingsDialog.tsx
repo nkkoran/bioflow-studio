@@ -76,6 +76,13 @@ export function SettingsDialog({
     setPinError('Incorrect PIN.')
   }
 
+  const runStartupWizard = () => {
+    void setSetting('settings:onboardingComplete', false).then(() => {
+      onClose()
+      window.dispatchEvent(new CustomEvent('bioflow:open-onboarding'))
+    })
+  }
+
   return (
     <Dialog open={open} onClose={onClose} title="Settings" width="max-w-3xl">
       <div className="grid min-h-[420px] grid-cols-[150px_1fr] gap-4">
@@ -168,6 +175,12 @@ export function SettingsDialog({
                 checked={settings.telemetryOptIn}
                 onChange={(value) => toggle('settings:telemetryOptIn', value)}
               />
+              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5">
+                <p className="mb-2 text-[11px] font-medium text-text-secondary">Setup</p>
+                <Button variant="secondary" size="sm" onClick={runStartupWizard}>
+                  Run startup wizard
+                </Button>
+              </div>
               <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
                 <p className="text-[11px] font-medium text-text-secondary">Pre-run checks</p>
                 <Checkbox

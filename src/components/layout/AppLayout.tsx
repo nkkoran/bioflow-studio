@@ -110,7 +110,12 @@ export function AppLayout() {
         })
       }
       void window.api.store.get<'dark' | 'light' | 'simple'>('settings:theme').then((stored) => {
-        if (stored === 'dark' || stored === 'light' || stored === 'simple') setTheme(stored)
+        if (stored === 'dark' || stored === 'light' || stored === 'simple') {
+          setTheme(stored)
+          return
+        }
+        setTheme('dark')
+        void window.api.store.set('settings:theme', 'dark')
       })
     }).catch((err) => {
       console.error('[AppLayout] load settings failed:', err)
