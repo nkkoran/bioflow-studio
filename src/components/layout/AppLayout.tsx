@@ -13,8 +13,13 @@ import { MfaPrompt } from '@/components/connection/MfaPrompt'
 import { LoginPolicyToast } from '@/components/connection/LoginPolicyToast'
 import { DnxBridgeBanner } from '@/components/connection/DnxBridgeBanner'
 import { AppDialogs } from '@/components/ui/AppDialogs'
+import { Toaster } from '@/components/ui/Toaster'
+import { WelcomeWizard } from '@/components/onboarding/WelcomeWizard'
+import { GuidedTour } from '@/components/onboarding/GuidedTour'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
+import { useCustomNodesStore } from '@/stores/customNodesStore'
 import { savePipelineSnapshot } from '@/lib/pipelinePersistence'
+import { exportBugReport } from '@/lib/bugReport'
 
 const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 480
@@ -28,6 +33,10 @@ export function AppLayout() {
   const bottomPanelHeight = useUIStore((s) => s.bottomPanelHeight)
   const setBottomPanelHeight = useUIStore((s) => s.setBottomPanelHeight)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const theme = useUIStore((s) => s.theme)
+  const setTheme = useUIStore((s) => s.setTheme)
+  const devMode = useSettingsStore((s) => s.devMode)
+  const [tourRun, setTourRun] = useState(false)
 
   const dragging = useRef<'sidebar' | 'bottom' | null>(null)
   const dragDepth = useRef(0)
@@ -100,8 +109,14 @@ export function AppLayout() {
           fileLifecyclePolicy: settings.fileLifecyclePolicy,
         })
       }
+      void window.api.store.get<'dark' | 'light' | 'simple'>('settings:theme').then((stored) => {
+        if (stored === 'dark' || stored === 'light' || stored === 'simple') setTheme(stored)
+      })
     }).catch((err) => {
       console.error('[AppLayout] load settings failed:', err)
+    })
+    void useCustomNodesStore.getState().load().catch((err) => {
+      console.error('[AppLayout] load custom nodes failed:', err)
     })
     void useWorkspaceStore.getState().load().then(() => {
       void useWorkspaceStore.getState().applyActiveWorkspace(useConnectionStore.getState().activeConnectionId)
@@ -120,6 +135,10 @@ export function AppLayout() {
       try { unsubscribeDnx() } catch (e) { console.error(e) }
     }
   }, [])
+
+  useEffect(() => {
+    document.body.dataset.theme = theme
+  }, [theme])
 
   useEffect(() => {
     void useWorkspaceStore.getState().applyActiveWorkspace(activeConnectionId).catch((err) => {
@@ -181,6 +200,28 @@ export function AppLayout() {
   useEffect(() => {
     if (!window.api.app?.onMenuCommand) return
     return window.api.app.onMenuCommand((data) => {
+      if (data.command === 'tour') {
+        setTourRun(true)
+        return
+      }
+      if (data.command === 'bugReport') {
+        void exportBugReport({ title: 'BioFlow Studio bug report', reason: 'User exported from Help menu' })
+          .then((dir) => {
+            if (dir) window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'success', message: `Bug report saved to ${dir}` } }))
+          })
+          .catch((err) => {
+            window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'error', message: `Bug report failed: ${err instanceof Error ? err.message : String(err)}` } }))
+          })
+        return
+      }
+      if (data.command === 'settings') {
+        useUIStore.getState().openSettings('General')
+        return
+      }
+      if (data.command === 'addConnection') {
+        useUIStore.getState().openConnectionDialog()
+        return
+      }
       window.dispatchEvent(new CustomEvent('bioflow:menu-command', { detail: data }))
     })
   }, [])
@@ -254,9 +295,12 @@ export function AppLayout() {
     <div className="flex flex-col h-screen w-screen bg-bg-primary text-text-primary overflow-hidden">
       <TopBar />
       <AppDialogs />
+      <Toaster />
+      <WelcomeWizard />
+      <GuidedTour run={tourRun} onDone={() => setTourRun(false)} />
       <MfaPrompt />
       <LoginPolicyToast />
-      <DnxBridgeBanner />
+      {devMode && <DnxBridgeBanner />}
       {windowDragActive && (
         <div className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-accent/10 backdrop-blur-[1px]">
           <div className="rounded-2xl border border-accent/30 bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">

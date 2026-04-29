@@ -142,7 +142,8 @@ interface Window {
       ) => Promise<{ items: Array<{ key: string; path: string }>; missing: string[] }>
     }
     app: {
-      onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' }) => void) => () => void
+      checkForUpdates: () => Promise<{ ok: boolean }>
+      onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection' }) => void) => () => void
     }
   }
 }

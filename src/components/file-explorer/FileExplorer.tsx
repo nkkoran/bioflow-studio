@@ -16,6 +16,7 @@ import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStor
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { classifyPreview } from '@/lib/filePreviewClassifier'
@@ -64,10 +65,11 @@ export function FileExplorer() {
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const devMode = useSettingsStore((s) => s.devMode)
 
   const dnxAuthStatus = useDnxStore((s) => s.authStatus)
   const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
-  const dnxReady = dnxAuthStatus === 'authenticated' && Boolean(dnxDefaultProjectId)
+  const dnxReady = devMode && dnxAuthStatus === 'authenticated' && Boolean(dnxDefaultProjectId)
 
   const [origin, setOrigin] = useState<'fs' | 'dnx'>('fs')
   // If DNX becomes unavailable while we're on its tab, drop back to fs.

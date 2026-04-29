@@ -65,6 +65,16 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
 
   load: async () => {
     if (!window.api?.store) return
+    if (!useSettingsStore.getState().devMode) {
+      set({
+        authStatus: 'unauthenticated',
+        defaultProjectId: null,
+        availableProjects: [],
+        authToken: null,
+        loaded: true,
+      })
+      return
+    }
     const [defaultProjectId, fieldPresets, installedAppletHash, installedAppletId, authToken] = await Promise.all([
       window.api.store.get<string>(DEFAULT_PROJECT_KEY),
       window.api.store.get<DnxFieldPreset[]>(FIELD_PRESETS_KEY),
@@ -158,6 +168,7 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
   },
 
   runBootstrap: async () => {
+    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP is under development.')
     if (!window.api?.dnx) throw new Error('DNAnexus preload API is unavailable.')
     set({ bootstrapStatus: 'bootstrapping', bridgeStatus: null })
     try {
@@ -176,6 +187,7 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
   },
 
   authenticate: async (opts) => {
+    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP is under development.')
     if (!window.api?.dnx) throw new Error('DNAnexus preload API is unavailable.')
     const token = opts?.token ?? get().authToken
     const projectId = opts?.projectId ?? get().defaultProjectId
@@ -199,6 +211,7 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
   },
 
   refreshProjects: async () => {
+    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP is under development.')
     if (!window.api?.dnx) throw new Error('DNAnexus preload API is unavailable.')
     const currentProjectId = get().defaultProjectId
     const projects = await window.api.dnx.listProjects()

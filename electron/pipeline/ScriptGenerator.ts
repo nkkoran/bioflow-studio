@@ -157,6 +157,15 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
   }
 
+  const customTemplate = typeof (tool as ToolDef & { customCommandTemplate?: unknown }).customCommandTemplate === 'string'
+    ? String((tool as ToolDef & { customCommandTemplate?: unknown }).customCommandTemplate)
+    : ''
+  if (customTemplate.trim()) {
+    lines.push(renderCommandTemplate(customTemplate, nodeData, axisPlan, outputDir, slug, isArray))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
   if (nodeData.commandOverride?.trim()) {
     lines.push(nodeData.commandOverride.trim())
     lines.push('')
@@ -203,6 +212,30 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
 
   const outputs: Record<string, AxedValue> = axisPlan.outputs
   return { script: lines.join('\n'), outputs, arraySize }
+}
+
+function renderCommandTemplate(
+  template: string,
+  nodeData: ToolNodeData,
+  axisPlan: AxisPlan,
+  outputDir: string,
+  slug: string,
+  isArray: boolean,
+): string {
+  const firstInput = Object.values(axisPlan.inputs)[0]
+  const input =
+    !firstInput ? ''
+    : isArray && firstInput.kind === 'array' ? '$i_input'
+    : firstInput.kind === 'single' ? firstInput.path
+    : firstInput.paths[0] ?? ''
+  const output = resolveShellOutputPath(axisPlan, outputDir, slug, isArray) ?? `${outputDir}/${slug}.output`
+  return template
+    .replaceAll('{{input}}', shellQuote(input))
+    .replaceAll('{{output}}', shellQuote(output))
+    .replace(/\{\{param:([^}]+)\}\}/g, (_match, name) => {
+      const value = nodeData.paramValues?.[String(name).trim()]
+      return value == null || value === '' ? '' : shellQuote(String(value))
+    })
 }
 
 function renderCustomShellScript(opts: {
@@ -1318,6 +1351,7 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
   const outExt =
     strategy === 'bcftools-concat' ? '.vcf.gz'
     : strategy === 'plink-pmerge-list' ? ''
+    : strategy === 'tabular-inner' || strategy === 'tabular-outer' || strategy === 'tabular-left' ? '.tsv'
     : strategy === 'tsv-concat-header' ? '.tsv'
     : '.txt'
   const outPath = opts.outputPath ?? `${outputDir}/${slug}.output${outExt}`
@@ -1361,6 +1395,55 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
     }
     case 'cat':
       lines.push(`cat "\${INPUTS[@]}" > ${shellQuote(outPath)}`)
+      break
+    case 'tabular-inner':
+    case 'tabular-outer':
+    case 'tabular-left':
+      lines.push(`python3 - <<'PY'`)
+      lines.push(`import csv`)
+      lines.push(`inputs = ${JSON.stringify(inputs)}`)
+      lines.push(`out = ${JSON.stringify(outPath)}`)
+      lines.push(`strategy = ${JSON.stringify(strategy.replace('tabular-', ''))}`)
+      lines.push(`tables = []`)
+      lines.push(`for path in inputs:`)
+      lines.push(`    with open(path, newline='') as fh:`)
+      lines.push(`        sample = fh.read(4096); fh.seek(0)`)
+      lines.push(`        dialect = csv.Sniffer().sniff(sample, delimiters='\\t,') if sample else csv.excel_tab`)
+      lines.push(`        rows = list(csv.DictReader(fh, dialect=dialect))`)
+      lines.push(`        tables.append((path, rows, rows[0].keys() if rows else []))`)
+      lines.push(`shared = set(tables[0][2]) if tables else set()`)
+      lines.push(`for _, _, cols in tables[1:]: shared &= set(cols)`)
+      lines.push(`key = next((c for c in ['eid','sample','sample_id','id','IID','FID'] if c in shared), None)`)
+      lines.push(`if not key:`)
+      lines.push(`    key = next(iter(shared), None)`)
+      lines.push(`all_cols = []`)
+      lines.push(`for _, _, cols in tables:`)
+      lines.push(`    for col in cols:`)
+      lines.push(`        if col not in all_cols: all_cols.append(col)`)
+      lines.push(`if not key:`)
+      lines.push(`    with open(out, 'w', newline='') as fh:`)
+      lines.push(`        writer = csv.DictWriter(fh, fieldnames=all_cols, delimiter='\\t', extrasaction='ignore')`)
+      lines.push(`        writer.writeheader()`)
+      lines.push(`        for _, rows, _ in tables:`)
+      lines.push(`            writer.writerows(rows)`)
+      lines.push(`    raise SystemExit`)
+      lines.push(`indexed = []`)
+      lines.push(`for _, rows, _ in tables:`)
+      lines.push(`    indexed.append({row.get(key, ''): row for row in rows if row.get(key, '')})`)
+      lines.push(`keys = set(indexed[0])`)
+      lines.push(`if strategy == 'inner':`)
+      lines.push(`    for item in indexed[1:]: keys &= set(item)`)
+      lines.push(`elif strategy == 'outer':`)
+      lines.push(`    for item in indexed[1:]: keys |= set(item)`)
+      lines.push(`with open(out, 'w', newline='') as fh:`)
+      lines.push(`    writer = csv.DictWriter(fh, fieldnames=all_cols, delimiter='\\t', extrasaction='ignore')`)
+      lines.push(`    writer.writeheader()`)
+      lines.push(`    for k in sorted(keys):`)
+      lines.push(`        merged = {key: k}`)
+      lines.push(`        for item in indexed:`)
+      lines.push(`            merged.update(item.get(k, {}))`)
+      lines.push(`        writer.writerow(merged)`)
+      lines.push(`PY`)
       break
   }
 

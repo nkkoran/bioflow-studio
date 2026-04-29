@@ -398,7 +398,9 @@ const api = {
       ipcRenderer.invoke('split:resolve', connectionId, pattern, manualItems),
   },
   app: {
-    onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' }) => void): (() => void) => {
+    checkForUpdates: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('app:check-updates'),
+    onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection' }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('app:menu-command', handler)
       return () => ipcRenderer.removeListener('app:menu-command', handler)

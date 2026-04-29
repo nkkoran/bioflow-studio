@@ -33,6 +33,8 @@ export interface AppSettings {
   skipPreRunDoctorCheck: boolean
   dnxAuthTokenStored: boolean
   dnxDefaultProjectId: string | null
+  onboardingComplete: boolean
+  telemetryOptIn: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -66,13 +68,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
   skipPreRunDoctorCheck: false,
   dnxAuthTokenStored: false,
   dnxDefaultProjectId: null,
+  onboardingComplete: false,
+  telemetryOptIn: false,
 }
 
 interface SettingsState {
   settings: AppSettings
   loaded: boolean
+  devMode: boolean
   load: () => Promise<void>
   setSetting: <T>(key: string, value: T) => Promise<void>
+  unlockDevMode: (pin: string) => boolean
+  lockDevMode: () => void
 }
 
 async function readSetting<T>(key: string, fallback: T): Promise<T> {
@@ -83,6 +90,7 @@ async function readSetting<T>(key: string, fallback: T): Promise<T> {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   loaded: false,
+  devMode: false,
 
   load: async () => {
     const settings: AppSettings = {
@@ -116,6 +124,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       skipPreRunDoctorCheck: await readSetting('settings:skipPreRunDoctorCheck', DEFAULT_SETTINGS.skipPreRunDoctorCheck),
       dnxAuthTokenStored: Boolean(await window.api.store.getSecret('dnx:authToken')),
       dnxDefaultProjectId: await readSetting('dnx:defaultProjectId', DEFAULT_SETTINGS.dnxDefaultProjectId),
+      onboardingComplete: await readSetting('settings:onboardingComplete', DEFAULT_SETTINGS.onboardingComplete),
+      telemetryOptIn: await readSetting('settings:telemetryOptIn', DEFAULT_SETTINGS.telemetryOptIn),
     }
     set({ settings, loaded: true })
   },
@@ -167,7 +177,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:skipPreRunFileCheck': next.skipPreRunFileCheck = Boolean(value); break
       case 'settings:skipPreRunDoctorCheck': next.skipPreRunDoctorCheck = Boolean(value); break
       case 'dnx:defaultProjectId': next.dnxDefaultProjectId = value ? String(value) : null; break
+      case 'settings:onboardingComplete': next.onboardingComplete = Boolean(value); break
+      case 'settings:telemetryOptIn': next.telemetryOptIn = Boolean(value); break
     }
     set({ settings: next, loaded: true })
   },
+  unlockDevMode: (pin) => {
+    const ok = pin === '7755'
+    if (ok) set({ devMode: true })
+    return ok
+  },
+  lockDevMode: () => set({ devMode: false }),
 }))

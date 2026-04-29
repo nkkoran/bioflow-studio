@@ -18,7 +18,11 @@ interface ConnectionStatusProps {
 
 export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
-  const [dialogOpen, setDialogOpen] = useState(false)
+  const dialogOpen = useUIStore((s) => s.connectionDialogOpen)
+  const setDialogOpen = (open: boolean) => {
+    if (open) useUIStore.getState().openConnectionDialog()
+    else useUIStore.getState().closeConnectionDialog()
+  }
   const [slurmOpen, setSlurmOpen] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
   const [doctorOpen, setDoctorOpen] = useState(false)

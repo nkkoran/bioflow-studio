@@ -41,6 +41,7 @@ import { Button } from '@/components/ui/Button'
 import { usePipelineStore, type BioflowNode } from '@/stores/pipelineStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useUIStore } from '@/stores/uiStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
 import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { getToolBundle } from '@/lib/toolBundles'
@@ -73,6 +74,7 @@ function CanvasInner() {
   const { screenToFlowPosition } = useReactFlow()
 
   const nodes = usePipelineStore((s) => s.nodes)
+  const theme = useUIStore((s) => s.theme)
   const edges = usePipelineStore((s) => s.edges)
   const groups = usePipelineStore((s) => s.groups)
   const onNodesChange = usePipelineStore((s) => s.onNodesChange)
@@ -289,6 +291,54 @@ function CanvasInner() {
     }
   }, [activeConnectionId, addFileNode, confirmDialog, edges, nodes, onConnect, uploadsSubfolder])
 
+  const handleDroppedFolder = useCallback(async (
+    folderPath: string,
+    position: { x: number; y: number },
+  ) => {
+    setDropBusy(true)
+    try {
+      setDropMessage('Creating split input from folder…')
+      const entries = (await window.api.local.ls(folderPath)).filter((entry) => !entry.isDirectory)
+      if (entries.length === 0) {
+        setDropMessage('Folder has no files to split.')
+        return
+      }
+      const items = entries.map((entry) => ({ key: entry.name, path: entry.path }))
+      const firstType = inferFileType(entries[0].name) as FileType
+      const allSameType = entries.every((entry) => inferFileType(entry.name) === firstType)
+      const label = pathBasename(folderPath) || 'Folder split'
+      const fileId = addFileNode(position, {
+        isInput: true,
+        label,
+        path: folderPath,
+        fileType: allSameType ? firstType : 'any',
+        source: 'local',
+        origin: 'local',
+        split: {
+          axis: 'file',
+          items,
+          pattern: { kind: 'manual' },
+        },
+      })
+      const target = findDropTargetTool(nodes, position)
+      if (target) {
+        const tool = getTool((target.data as any).toolId)
+        const connectedPortIds = edges.filter((edge) => edge.target === target.id).map((edge) => edge.targetHandle ?? 'input')
+        const activeInputs = tool ? getActiveToolInputs(tool, target.data as any, { connectedPortIds }) : []
+        const compatible = activeInputs.find((port) => areTypesCompatible(allSameType ? firstType : 'any', port.fileType))
+        if (compatible) {
+          onConnect({ source: fileId, sourceHandle: 'output', target: target.id, targetHandle: compatible.id })
+        }
+      }
+      setDropMessage(`Added ${items.length} files as an axis-split input.`)
+    } catch (err) {
+      setDropMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDropBusy(false)
+      window.setTimeout(() => setDropMessage(null), 3000)
+    }
+  }, [addFileNode, edges, nodes, onConnect])
+
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
       event.preventDefault()
@@ -298,24 +348,33 @@ function CanvasInner() {
       const droppedLocalPaths = readLocalDropPaths(event)
       if (!payload && !bundlePayload && !filePath && droppedLocalPaths.length === 0) return
 
-      if (droppedLocalPaths.length > 1) {
-        setDropMessage('Drag one file at a time for now.')
-        window.setTimeout(() => setDropMessage(null), 3000)
-        return
-      }
-
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       })
+
+      if (droppedLocalPaths.length > 1) {
+        const items = droppedLocalPaths.map((path) => ({ key: pathBasename(path), path }))
+        addFileNode(position, {
+          isInput: true,
+          label: 'Dropped file split',
+          path: '',
+          fileType: 'any',
+          source: 'local',
+          origin: 'local',
+          split: { axis: 'file', items, pattern: { kind: 'manual' } },
+        })
+        setDropMessage(`Added ${items.length} files as an axis-split input.`)
+        window.setTimeout(() => setDropMessage(null), 3000)
+        return
+      }
 
       const droppedLocalPath = droppedLocalPaths[0]
       if (droppedLocalPath) {
         try {
           const stat = await window.api.local.stat(droppedLocalPath)
           if (stat.isDirectory) {
-            setDropMessage('Dropping folders is not supported yet. Drop a single file instead.')
-            window.setTimeout(() => setDropMessage(null), 3000)
+            await handleDroppedFolder(droppedLocalPath, position)
             return
           }
         } catch (err) {
@@ -350,7 +409,7 @@ function CanvasInner() {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, handleDroppedPath, addToolNode, addNoteNode, addMergeNode, addTransferNode, addTransformNode, addNodesAndEdges],
+    [screenToFlowPosition, handleDroppedPath, handleDroppedFolder, addFileNode, addToolNode, addNoteNode, addMergeNode, addTransferNode, addTransformNode, addNodesAndEdges],
   )
 
   useEffect(() => {
@@ -358,11 +417,27 @@ function CanvasInner() {
       const detail = (event as CustomEvent<{ clientX: number; clientY: number; paths: string[] }>).detail
       if (!detail?.paths?.[0]) return
       const position = screenToFlowPosition({ x: detail.clientX, y: detail.clientY })
-      void handleDroppedPath(detail.paths[0], position, true)
+      if (detail.paths.length > 1) {
+        const items = detail.paths.map((path) => ({ key: pathBasename(path), path }))
+        addFileNode(position, {
+          isInput: true,
+          label: 'Dropped file split',
+          path: '',
+          fileType: 'any',
+          source: 'local',
+          origin: 'local',
+          split: { axis: 'file', items, pattern: { kind: 'manual' } },
+        })
+        return
+      }
+      void window.api.local.stat(detail.paths[0]).then((stat) => {
+        if (stat.isDirectory) return handleDroppedFolder(detail.paths[0], position)
+        return handleDroppedPath(detail.paths[0], position, true)
+      })
     }
     window.addEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)
     return () => window.removeEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)
-  }, [handleDroppedPath, screenToFlowPosition])
+  }, [addFileNode, handleDroppedFolder, handleDroppedPath, screenToFlowPosition])
 
   /**
    * Validate a proposed connection. Rejects connections where the source
@@ -496,7 +571,7 @@ function CanvasInner() {
   }, [deleteEdge])
 
   return (
-    <div ref={wrapperRef} className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
+    <div ref={wrapperRef} data-tour="canvas" className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
       <ReactFlow
         nodes={displayNodes}
         edges={visibleEdges}
@@ -519,7 +594,7 @@ function CanvasInner() {
         snapGrid={[16, 16]}
         deleteKeyCode={['Delete', 'Backspace']}
         multiSelectionKeyCode={['Meta', 'Control']}
-        colorMode="dark"
+        colorMode={theme === 'light' ? 'light' : 'dark'}
       >
         <Background gap={16} size={1} />
         <Controls position="bottom-right" showInteractive={false} />
@@ -546,6 +621,19 @@ function CanvasInner() {
           onToggleCollapse={(group) => updateGroup(group.id, { collapsed: !group.collapsed })}
         />
       </ReactFlow>
+      {nodes.length === 0 && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+          <div className="rounded-lg border border-dashed border-border bg-bg-secondary/70 px-6 py-5 text-center shadow-xl backdrop-blur-sm">
+            <div className="text-sm font-medium text-text-primary">Build a pipeline</div>
+            <div className="mt-1 text-xs text-text-secondary">
+              Drag a file or folder here, or pick a tool from the left sidebar.
+            </div>
+            <div className="mt-1 text-[11px] text-text-muted">
+              Folders become axis-split inputs. Help → Build Your First Pipeline for a guided tour.
+            </div>
+          </div>
+        </div>
+      )}
       {dropMessage && (
         <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded border border-accent/40 bg-bg-secondary px-3 py-1 text-xs text-text-primary shadow">
           <div className="flex items-center gap-2">

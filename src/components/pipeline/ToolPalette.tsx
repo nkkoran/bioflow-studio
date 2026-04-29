@@ -6,9 +6,10 @@
  * The drag payload uses the dataTransfer API with a "application/bioflow-tool"
  * MIME type carrying the tool id.
  */
-import { useState, useMemo } from 'react'
-import { ChevronRight, Search } from 'lucide-react'
+import { useEffect, useState, useMemo } from 'react'
+import { ChevronRight, Plus, Search } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
+import { Button } from '@/components/ui/Button'
 import { classNames } from '@/lib/utils'
 import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
 import { TOOL_BUNDLES } from '@/lib/toolBundles'
@@ -16,6 +17,9 @@ import { iconForBundle, iconForCategory, iconForNodeType } from '@/lib/toolIcons
 import type { ToolCategory, ToolDef } from '@/types/pipeline'
 import type { ToolBundle } from '@/lib/toolBundles'
 import { ToolHoverCard } from './ToolHoverCard'
+import { CustomNodeActions, CustomNodeBuilder } from './CustomNodeBuilder'
+import { useCustomNodesStore } from '@/stores/customNodesStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 export const DRAG_MIME = 'application/bioflow-tool'
 export const BUNDLE_DRAG_MIME = 'application/bioflow-bundle'
@@ -111,6 +115,11 @@ function SpecialItem({ type, label, icon }: SpecialItemProps) {
 export function ToolPalette() {
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [customBuilderOpen, setCustomBuilderOpen] = useState(false)
+  const customNodes = useCustomNodesStore((s) => s.nodes)
+  const loadCustomNodes = useCustomNodesStore((s) => s.load)
+  const customLoaded = useCustomNodesStore((s) => s.loaded)
+  const devMode = useSettingsStore((s) => s.devMode)
   const FileIcon = iconForNodeType('file')
   const TransformIcon = iconForNodeType('transform')
   const MergeIcon = iconForNodeType('merge')
@@ -118,10 +127,22 @@ export function ToolPalette() {
   const NoteIcon = iconForNodeType('note')
   const BundleIcon = iconForBundle()
 
+  useEffect(() => {
+    if (!customLoaded) void loadCustomNodes()
+  }, [customLoaded, loadCustomNodes])
+
   const groups = useMemo(() => {
-    if (!search.trim()) return getToolsByCategory()
+    const visibleTools = TOOLS.filter((tool) => devMode || (!(tool.backends?.length === 1 && tool.backends.includes('dnx')) && !tool.dnxApplet && !tool.id.includes('ukb')))
+    if (!search.trim()) {
+      const groupMap = new Map<string, ToolDef[]>()
+      for (const tool of visibleTools) {
+        if (!groupMap.has(tool.category)) groupMap.set(tool.category, [])
+        groupMap.get(tool.category)!.push(tool)
+      }
+      return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
+    }
     const q = search.toLowerCase()
-    const matches = TOOLS.filter(
+    const matches = visibleTools.filter(
       (t) =>
         t.name.toLowerCase().includes(q) ||
         t.description.toLowerCase().includes(q) ||
@@ -134,7 +155,7 @@ export function ToolPalette() {
       groupMap.get(t.category)!.push(t)
     }
     return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
-  }, [search])
+  }, [devMode, search])
 
   const bundles = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -166,6 +187,15 @@ export function ToolPalette() {
           onChange={(e) => setSearch(e.target.value)}
           icon={<Search size={12} />}
         />
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<Plus size={12} />}
+          className="mt-2 w-full justify-center"
+          onClick={() => setCustomBuilderOpen(true)}
+        >
+          New Custom Node
+        </Button>
       </div>
 
       {/* Special items */}
@@ -196,6 +226,33 @@ export function ToolPalette() {
         )}
         {groups.length === 0 && bundles.length === 0 && (
           <div className="px-3 py-4 text-xs text-text-muted text-center">No matching tools</div>
+        )}
+        {customNodes.length > 0 && (
+          <div className="mb-1">
+            <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+              Custom
+              <span className="ml-auto text-text-muted">{customNodes.length}</span>
+            </div>
+            <div className="px-2 flex flex-col gap-0.5">
+              {customNodes.map((custom) => (
+                <div key={custom.id} className="flex items-center">
+                  <div className="min-w-0 flex-1">
+                    <PaletteItem tool={{
+                      id: custom.id,
+                      name: custom.name,
+                      category: 'custom',
+                      description: custom.description,
+                      command: 'bash',
+                      inputs: custom.inputs,
+                      outputs: custom.outputs,
+                      params: custom.params,
+                    }} />
+                  </div>
+                  <CustomNodeActions node={custom} />
+                </div>
+              ))}
+            </div>
+          </div>
         )}
         {groups.map(({ category, tools }) => {
           const isCollapsed = collapsed.has(category)
@@ -230,6 +287,7 @@ export function ToolPalette() {
       <div className="px-3 py-2 border-t border-border text-[10px] text-text-muted">
         Drag tools onto the canvas to build your pipeline.
       </div>
+      <CustomNodeBuilder open={customBuilderOpen} onClose={() => setCustomBuilderOpen(false)} />
     </div>
   )
 }

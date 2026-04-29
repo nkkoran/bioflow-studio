@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 
 import { useDnxStore } from '@/stores/dnxStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { useUIStore } from '@/stores/uiStore'
 
 /**
@@ -11,6 +12,7 @@ import { useUIStore } from '@/stores/uiStore'
  */
 export function DnxBridgeBanner() {
   const bridgeStatus = useDnxStore((s) => s.bridgeStatus)
+  const devMode = useSettingsStore((s) => s.devMode)
   const openSettings = useUIStore((s) => s.openSettings)
   const [dismissedKey, setDismissedKey] = useState<string | null>(null)
 
@@ -24,7 +26,7 @@ export function DnxBridgeBanner() {
     if (key && key !== dismissedKey) setDismissedKey(null)
   }, [key, dismissedKey])
 
-  if (!bridgeStatus || bridgeStatus.level !== 'error') return null
+  if (!devMode || !bridgeStatus || bridgeStatus.level !== 'error') return null
   if (key && key === dismissedKey) return null
 
   return (

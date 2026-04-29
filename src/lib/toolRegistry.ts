@@ -1060,14 +1060,25 @@ export const TOOL_MAP: Record<string, ToolDef> = Object.fromEntries(
   TOOLS.map((t) => [t.id, t]),
 )
 
+const CUSTOM_TOOL_MAP: Record<string, ToolDef> = {}
+
+export function registerCustomToolDefs(tools: ToolDef[]): void {
+  for (const key of Object.keys(CUSTOM_TOOL_MAP)) delete CUSTOM_TOOL_MAP[key]
+  for (const tool of tools) CUSTOM_TOOL_MAP[tool.id] = tool
+}
+
+export function listRegisteredCustomTools(): ToolDef[] {
+  return Object.values(CUSTOM_TOOL_MAP)
+}
+
 export function getTool(id: string): ToolDef | undefined {
-  return TOOL_MAP[id]
+  return TOOL_MAP[id] ?? CUSTOM_TOOL_MAP[id]
 }
 
 /** Group tools by category, preserving registry order within each group. */
 export function getToolsByCategory(): Array<{ category: string; tools: ToolDef[] }> {
   const groups = new Map<string, ToolDef[]>()
-  for (const tool of TOOLS) {
+  for (const tool of [...TOOLS, ...listRegisteredCustomTools()]) {
     if (!groups.has(tool.category)) groups.set(tool.category, [])
     groups.get(tool.category)!.push(tool)
   }

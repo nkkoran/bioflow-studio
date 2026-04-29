@@ -438,13 +438,14 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
       const fallbackOut = `${mergeOutDir}/${slug}.output${outExt}`
       const outPath = resolveSinkPath(sink, mergeOutDir, fallbackOut, ctx.homeDir)
+      const mergeInput = collapseMergeInputs(resolvedInputs)
       plans.set(nodeId, {
         nodeId,
         nodeType: 'merge',
         mode,
         dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
         dependsOnNodeIds: [...directRunnableDeps],
-        inputs: resolvedInputs,
+        inputs: { ...resolvedInputs, input: mergeInput },
         outputs: { output: { kind: 'single', path: outPath } },
         upstreamFileType: upstreamFt,
         resolvedMergeStrategy: resolvedStrategy,
@@ -630,8 +631,7 @@ function portIsMulti(
   ctx: PlannerContext,
 ): boolean {
   if (node.type === 'merge') {
-    // Merge has a single, implicitly multi input port.
-    return portId === 'input'
+    return portId === 'input' || portId.startsWith('input-')
   }
   if (node.type === 'tool') {
     const toolData = node.data as ToolNodeData
@@ -653,11 +653,27 @@ function resolveMergeStrategyStatic(strategy: MergeStrategy, ft: FileType): Excl
   return 'cat'
 }
 
+function collapseMergeInputs(inputs: Record<string, AxedValue>): AxedValue {
+  const values = Object.values(inputs)
+  if (values.length === 0) return { kind: 'multi', paths: [] }
+  if (values.length === 1) return values[0]
+  const paths: string[] = []
+  for (const value of values) {
+    if (value.kind === 'single') paths.push(value.path)
+    else paths.push(...value.paths)
+  }
+  return { kind: 'multi', paths }
+}
+
 function mergeOutputExt(strategy: Exclude<MergeStrategy, 'auto'>): string {
   switch (strategy) {
     case 'bcftools-concat': return '.vcf.gz'
     case 'plink-pmerge-list': return ''
-    case 'tsv-concat-header': return '.tsv'
+    case 'tsv-concat-header':
+    case 'tabular-inner':
+    case 'tabular-outer':
+    case 'tabular-left':
+      return '.tsv'
     default: return '.txt'
   }
 }

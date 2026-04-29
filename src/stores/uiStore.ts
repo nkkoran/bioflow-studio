@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { FileOrigin } from '@/constants/connections'
 
 type BottomPanelMode = 'terminal' | 'data' | 'jobs' | 'queue' | 'results'
-type Theme = 'dark'
+type Theme = 'dark' | 'light' | 'simple'
 
 export type FilePickTarget = 'file' | 'directory'
 
@@ -54,6 +54,8 @@ interface UIStore {
    * setting back to null indicates the dialog has been opened/closed.
    */
   settingsOpenRequest: { section: SettingsSection; nonce: number } | null
+  /** Global request to open the Connection dialog (used by the welcome wizard). */
+  connectionDialogOpen: boolean
 
   setSidebarWidth: (width: number) => void
   setBottomPanelHeight: (height: number) => void
@@ -85,6 +87,10 @@ interface UIStore {
   openSettings: (section?: SettingsSection) => void
   /** Clear the open-request once the dialog has consumed it. */
   consumeSettingsOpen: () => void
+  /** Open the global Connection dialog. */
+  openConnectionDialog: () => void
+  /** Close the global Connection dialog. */
+  closeConnectionDialog: () => void
 }
 
 const IDLE_PICK: FilePickMode = { active: false, target: 'file', nodeId: null }
@@ -100,6 +106,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   filePickMode: IDLE_PICK,
   advancedExpanded: {},
   settingsOpenRequest: null,
+  connectionDialogOpen: false,
 
   setSidebarWidth: (width) => set({ sidebarWidth: width }),
   setBottomPanelHeight: (height) => set({ bottomPanelHeight: height }),
@@ -160,4 +167,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
     set({ settingsOpenRequest: { section, nonce: Date.now() } })
   },
   consumeSettingsOpen: () => set({ settingsOpenRequest: null }),
+
+  openConnectionDialog: () => set({ connectionDialogOpen: true }),
+  closeConnectionDialog: () => set({ connectionDialogOpen: false }),
 }))

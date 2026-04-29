@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { HelpButton } from '@/components/ui/HelpButton'
 import { AnalysisOptionsPanel } from '@/components/pipeline/inspector/AnalysisOptionsPanel'
 import { UkbFieldBuilder } from '@/components/pipeline/inspector/UkbFieldBuilder'
 import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
@@ -452,7 +453,9 @@ function ParamLabel({ param }: { param: ToolParam }) {
       {param.required && <span className="text-error ml-0.5">*</span>}
     </>
   )
-  if (!param.description && !param.docUrl) return <>{text}</>
+  if (!param.description && !param.docUrl) {
+    return <span className="inline-flex items-center gap-1">{text}<HelpButton id="params.row" /></span>
+  }
   return (
     <Tooltip
       side="right"
@@ -478,6 +481,7 @@ function ParamLabel({ param }: { param: ToolParam }) {
       <span className="inline-flex cursor-help items-center gap-1">
         <span>{text}</span>
         <Info size={11} className="text-text-muted" />
+        <HelpButton id={param.name.toLowerCase().includes('flag') ? 'params.customFlags' : 'params.row'} />
       </span>
     </Tooltip>
   )
@@ -1289,6 +1293,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const dnxCatalog = useDnxStore((s) => s.instanceCatalog)
   const refreshDnxCatalog = useDnxStore((s) => s.refreshInstanceCatalog)
   const settings = useSettingsStore((s) => s.settings)
+  const devMode = useSettingsStore((s) => s.devMode)
   const loadModules = useClusterInfoStore((s) => s.loadModules)
   const loadingModules = useClusterInfoStore((s) => activeConnectionId ? s.loadingModules[activeConnectionId] : false)
   const schemas = useDataPreviewStore((s) => s.schemas)
@@ -1450,18 +1455,18 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   }, [activeConnectionId, axedInputPorts, data, learnedEstimate, nodeId, settings.partitionMaxMemGB, snapshot, tool])
 
   useEffect(() => {
-    const supported = tool?.backends ?? ['ssh']
+    const supported = (tool?.backends ?? ['ssh']).filter((backend) => devMode || backend !== 'dnx')
     const currentBackend = supported.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supported[0] === 'dnx' ? 'dnx' : 'ssh'
     if (currentBackend !== 'dnx' || dnxCatalog?.specs?.length) return
     void refreshDnxCatalog().catch(() => undefined)
-  }, [data.backend, dnxCatalog?.specs?.length, refreshDnxCatalog, tool])
+  }, [data.backend, devMode, dnxCatalog?.specs?.length, refreshDnxCatalog, tool])
 
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
   const ToolIcon = iconForTool(data.toolId)
-  const supportedBackends = tool.backends ?? ['ssh']
+  const supportedBackends = (tool.backends ?? ['ssh']).filter((item) => devMode || item !== 'dnx')
   const backend = supportedBackends.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supportedBackends[0] === 'dnx' ? 'dnx' : 'ssh'
   const dnxInstanceOptions = dnxCatalog?.specs?.length ? dnxCatalog.specs : SPARK_INSTANCE_TYPES
   const slurm = { ...tool.slurm, ...data.slurmOverride }
@@ -3236,6 +3241,9 @@ function isPlinkLikeSplit(split: FileNodeSplit): boolean {
 
 const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] = [
   { value: 'auto', label: 'Auto (by upstream type)', hint: 'Picks the best strategy from the upstream file type.' },
+  { value: 'tabular-inner', label: 'Tabular inner merge', hint: 'Join tabular files on a shared id column and keep rows present in every file.' },
+  { value: 'tabular-outer', label: 'Tabular outer merge', hint: 'Join tabular files on a shared id column and keep every row.' },
+  { value: 'tabular-left', label: 'Tabular left merge', hint: 'Join tabular files on a shared id column and keep rows from the first file.' },
   { value: 'tsv-concat-header', label: 'TSV concat (keep header)', hint: 'Keep first header, append data rows from each task.' },
   { value: 'bcftools-concat', label: 'bcftools concat', hint: 'VCF/BCF per-chrom outputs → single VCF.' },
   { value: 'plink-pmerge-list', label: 'plink2 --pmerge-list', hint: 'Merge per-chrom PLINK2 filesets.' },
@@ -3244,6 +3252,10 @@ const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] 
 
 function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const handles = data.inputHandles?.length ? data.inputHandles : [{ id: 'input', label: 'Input 1' }]
 
   const setSlurm = useCallback(
     (patch: Partial<NonNullable<MergeNodeData['slurmOverride']>>) => {
@@ -3256,6 +3268,47 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
 
   const selectedStrategy = MERGE_STRATEGIES.find((s) => s.value === data.strategy)
 
+  useEffect(() => {
+    let cancelled = false
+    const connectedFiles = edges
+      .filter((edge) => edge.target === nodeId)
+      .flatMap((edge) => {
+        const source = nodes.find((node) => node.id === edge.source)
+        if (source?.type !== 'file') return []
+        const file = source.data as FileNodeData
+        if (file.split?.items?.length) return file.split.items.map((item) => ({ path: item.path, label: item.key }))
+        return file.path ? [{ path: file.path, label: file.label || pathBasename(file.path) }] : []
+      })
+    if (connectedFiles.length === 0) return
+    void Promise.all(connectedFiles.map(async (file) => {
+      try {
+        const sourceNode = nodes.find((node) => node.type === 'file' && ((node.data as FileNodeData).path === file.path || (node.data as FileNodeData).split?.items?.some((item) => item.path === file.path)))
+        const origin = sourceNode?.type === 'file' ? (sourceNode.data as FileNodeData).origin : 'ssh'
+        const text = origin === 'local'
+          ? await window.api.local.head(file.path, 1)
+          : activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID
+            ? await window.api.sftp.head(activeConnectionId, file.path, 1)
+            : ''
+        return { ...file, columns: parseHeader(text, file.path).columns }
+      } catch {
+        return { ...file, columns: [] }
+      }
+    })).then((files) => {
+      if (cancelled) return
+      const columnSets = files.map((file) => new Set(file.columns))
+      const sharedColumns = files[0]?.columns.filter((column) => columnSets.every((set) => set.has(column))) ?? []
+      const allColumns = [...new Set(files.flatMap((file) => file.columns))]
+      const divergentColumns = allColumns
+        .filter((column) => !sharedColumns.includes(column))
+        .map((name) => ({ name, files: files.filter((file) => file.columns.includes(name)).map((file) => file.label) }))
+      const next = { files, sharedColumns, divergentColumns }
+      if (JSON.stringify(data.columnPreview ?? null) !== JSON.stringify(next)) {
+        updateNodeData(nodeId, { columnPreview: next })
+      }
+    })
+    return () => { cancelled = true }
+  }, [activeConnectionId, data.columnPreview, edges, nodeId, nodes, updateNodeData])
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -3265,7 +3318,11 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <p className="text-xs text-text-muted mt-2">
-          Combines many upstream outputs into one file. Use axed fan-in for
+          <span className="inline-flex items-center gap-1">
+            Combines many upstream outputs into one file.
+            <HelpButton id="inspector.merge" />
+          </span>{' '}
+          Use axed fan-in for
           per-chromosome arrays, or parallel branches for independent branches
           that should converge.
         </p>
@@ -3298,8 +3355,32 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
       </div>
 
       <div>
+        <div className="mb-2 flex items-center justify-between">
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">Inputs</h4>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Plus size={12} />}
+            onClick={() => updateNodeData(nodeId, { inputHandles: [...handles, { id: `input-${handles.length + 1}`, label: `Input ${handles.length + 1}` }] })}
+          >
+            Add input
+          </Button>
+        </div>
+        <div className="space-y-1">
+          {handles.map((handle, index) => (
+            <Input
+              key={handle.id}
+              label={`Handle ${index + 1}`}
+              value={handle.label}
+              onChange={(e) => updateNodeData(nodeId, { inputHandles: handles.map((item) => item.id === handle.id ? { ...item, label: e.target.value } : item) })}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
-          Strategy
+          Strategy <HelpButton id="merge.columns" />
         </h4>
         <select
           value={data.strategy}
@@ -3313,6 +3394,36 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
         {selectedStrategy && (
           <p className="text-[10px] text-text-muted mt-1">{selectedStrategy.hint}</p>
         )}
+      </div>
+
+      <div className="rounded-md border border-border bg-bg-tertiary p-3">
+        <div className="mb-2 flex items-center gap-1 text-xs font-medium text-text-primary">
+          Column assignment preview
+          <HelpButton id="merge.columns" />
+        </div>
+        <div className="space-y-2 text-[11px]">
+          <div>
+            <div className="text-text-muted">Shared columns</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(data.columnPreview?.sharedColumns ?? []).map((column) => (
+                <span key={column} className="rounded bg-success/10 px-1.5 py-0.5 text-success">{column}</span>
+              ))}
+              {(!data.columnPreview?.sharedColumns?.length) && <span className="text-text-muted">No shared columns detected yet.</span>}
+            </div>
+          </div>
+          <div>
+            <div className="text-text-muted">Divergent columns</div>
+            <div className="mt-1 max-h-28 overflow-auto space-y-1">
+              {(data.columnPreview?.divergentColumns ?? []).map((column) => (
+                <div key={column.name} className="rounded border border-border bg-bg-secondary px-2 py-1">
+                  <span className="font-mono text-text-primary">{column.name}</span>
+                  <span className="ml-2 text-text-muted">from {column.files.join(', ')}</span>
+                </div>
+              ))}
+              {(!data.columnPreview?.divergentColumns?.length) && <span className="text-text-muted">No divergent columns detected yet.</span>}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div>
@@ -3403,6 +3514,7 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
 function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const devMode = useSettingsStore((s) => s.devMode)
 
   return (
     <div className="flex flex-col gap-4">
@@ -3413,7 +3525,7 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <p className="text-xs text-text-muted mt-2">
-          Use Transfer to make cross-backend copies explicit. The runner will move the upstream output between Rorqual and DNAnexus before downstream work continues.
+          Use Transfer to make cross-backend copies explicit.
         </p>
       </div>
 
@@ -3424,19 +3536,19 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
         <div className="grid grid-cols-2 gap-2">
           <select
             value={data.from}
-            onChange={(e) => updateNodeData(nodeId, { from: e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            onChange={(e) => updateNodeData(nodeId, { from: devMode && e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
             <option value="ssh">From Rorqual</option>
-            <option value="dnx">From DNAnexus</option>
+            {devMode && <option value="dnx">From DNAnexus</option>}
           </select>
           <select
             value={data.to}
-            onChange={(e) => updateNodeData(nodeId, { to: e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            onChange={(e) => updateNodeData(nodeId, { to: devMode && e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
             <option value="ssh">To Rorqual</option>
-            <option value="dnx">To DNAnexus</option>
+            {devMode && <option value="dnx">To DNAnexus</option>}
           </select>
         </div>
       </div>
@@ -3458,7 +3570,7 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
         />
       )}
 
-      {data.to === 'dnx' && (
+      {devMode && data.to === 'dnx' && (
         <div className="flex flex-col gap-2">
           <Input
             label="DNAnexus folder"
@@ -4034,7 +4146,7 @@ export function NodeInspector() {
 
   if (!node) {
     return (
-      <div className="w-80 h-full bg-bg-secondary border-l border-border flex items-center justify-center">
+      <div data-tour="inspector" className="w-80 h-full bg-bg-secondary border-l border-border flex items-center justify-center">
         <p className="text-xs text-text-muted text-center px-6">
           Select a node on the canvas to edit its properties.
         </p>
@@ -4043,12 +4155,13 @@ export function NodeInspector() {
   }
 
   return (
-    <div className="w-80 h-full bg-bg-secondary border-l border-border flex flex-col">
+    <div data-tour="inspector" className="w-80 h-full bg-bg-secondary border-l border-border flex flex-col">
       {/* Header */}
       <div className="px-3 py-2 border-b border-border flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
           {node.type} inspector
         </div>
+        <HelpButton id={node.type === 'merge' ? 'inspector.merge' : node.type === 'tool' ? 'inspector.tool' : node.type === 'file' ? 'inspector.file' : 'inspector.custom'} />
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => duplicateNode(node.id)}

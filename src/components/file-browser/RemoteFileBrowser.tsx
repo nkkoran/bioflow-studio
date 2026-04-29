@@ -5,6 +5,7 @@ import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useDnxStore } from '@/stores/dnxStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { collapseHomePath, expandHomePath, pathDirname } from '@/lib/remotePath'
 import type { RemoteFileEntry } from '@/types'
@@ -48,6 +49,7 @@ export function RemoteFileBrowser({
   const defaultDirectory = useConnectionStore((s) => activeConnectionId ? s.connections[activeConnectionId]?.config.defaultDirectory ?? '' : '')
   const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
   const dnxAvailableProjects = useDnxStore((s) => s.availableProjects)
+  const devMode = useSettingsStore((s) => s.devMode)
   const refreshDnxProjects = useDnxStore((s) => s.refreshProjects)
   const [cwd, setCwd] = useState(initialPath ?? '')
   const [origin, setOrigin] = useState<FileOrigin>('local')
@@ -308,7 +310,7 @@ export function RemoteFileBrowser({
             {([
               { key: 'local', label: 'Local', disabled: false },
               { key: 'ssh', label: 'Rorqual (SSH)', disabled: !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID },
-              { key: 'dnx', label: originLabel, disabled: !dnxDefaultProjectId },
+              ...(devMode ? [{ key: 'dnx' as const, label: originLabel, disabled: !dnxDefaultProjectId }] : []),
             ] as const).map((tab) => (
               <button
                 key={tab.key}

@@ -1,0 +1,43 @@
+appId: com.koran.bioflowstudio
+productName: BioFlow Studio
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - package.json
+  - "!src/**"
+  - "!electron/**"
+  - "!**/.vscode/**"
+asar: true
+asarUnpack:
+  - "**/node_modules/ssh2/**"
+  - "**/node_modules/cpu-features/**"
+extraResources:
+  - from: resources/python-bridge
+    to: python-bridge
+  - from: resources/dx-applets
+    to: dx-applets
+  - from: docs
+    to: docs
+mac:
+  identity: null
+  singleArchFiles: "{**/node_modules/cpu-features/**/*.node,**/node_modules/ssh2/**/*.node}"
+  x64ArchFiles: "{**/node_modules/cpu-features/**/*.node,**/node_modules/ssh2/**/*.node}"
+  target:
+    - target: dmg
+      arch: [universal]
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+publish:
+  provider: github
+  owner: nkkoran
+  repo: bioflow-studio
+  private: false
+  releaseType: draft

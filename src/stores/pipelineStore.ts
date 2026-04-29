@@ -202,6 +202,7 @@ function migrateMergeNodeData(data: MergeNodeData): MergeNodeData {
   return {
     ...data,
     convergeMode: data.convergeMode ?? 'axed-fan-in',
+    inputHandles: data.inputHandles?.length ? data.inputHandles : [{ id: 'input', label: 'Input 1' }],
   }
 }
 
@@ -420,6 +421,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         label: data?.label ?? 'Merge',
         strategy: data?.strategy ?? 'auto',
         convergeMode: data?.convergeMode ?? 'axed-fan-in',
+        inputHandles: data?.inputHandles ?? [{ id: 'input', label: 'Input 1' }],
+        columnPreview: data?.columnPreview,
         slurmOverride: data?.slurmOverride,
         status: 'idle',
       },

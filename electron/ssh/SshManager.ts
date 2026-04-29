@@ -486,9 +486,12 @@ export class SshManager {
       await execFilePromise('ssh-add', [keyPath])
       agentAdded = true
     }
-    if (request.addToKeychain) {
+    if (request.addToKeychain && process.platform === 'darwin') {
       await execFilePromise('ssh-add', ['--apple-use-keychain', keyPath])
       keychainAdded = true
+    } else if (request.addToKeychain && process.env.SSH_AUTH_SOCK && !agentAdded) {
+      await execFilePromise('ssh-add', [keyPath]).catch(() => undefined)
+      agentAdded = true
     }
 
     let alias: string | undefined

@@ -293,6 +293,9 @@ export type MergeStrategy =
   | 'bcftools-concat'
   | 'plink-pmerge-list'
   | 'cat'
+  | 'tabular-inner'
+  | 'tabular-outer'
+  | 'tabular-left'
 
 /**
  * Data for a merge node — a dedicated fan-in that collapses an axed edge
@@ -303,6 +306,8 @@ export interface MergeNodeData {
   label: string
   strategy: MergeStrategy
   convergeMode?: 'axed-fan-in' | 'parallel-branches'
+  inputHandles?: Array<{ id: string; label: string }>
+  columnPreview?: MergeColumnPreview
   outputIntermediate?: Record<string, boolean>
   /** See ToolNodeData.outputDirOverride. */
   outputDirOverride?: string
@@ -316,6 +321,12 @@ export interface MergeNodeData {
   jobId?: string
   error?: string
   [key: string]: unknown
+}
+
+export interface MergeColumnPreview {
+  files: Array<{ path: string; label: string; columns: string[] }>
+  sharedColumns: string[]
+  divergentColumns: Array<{ name: string; files: string[] }>
 }
 
 export interface TransferNodeData {

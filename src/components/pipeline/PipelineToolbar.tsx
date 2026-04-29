@@ -661,7 +661,7 @@ export function PipelineToolbar() {
 
   return (
     <>
-      <div className="h-10 px-3 bg-bg-secondary border-b border-border flex items-center gap-2 shrink-0">
+      <div data-tour="run-toolbar" className="h-10 px-3 bg-bg-secondary border-b border-border flex items-center gap-2 shrink-0">
         {/* Pipeline name */}
         <div className="flex items-center gap-2 min-w-0">
           {editingName ? (

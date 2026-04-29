@@ -1,27 +1,42 @@
 {
   "name": "bioflow-studio",
+  "productName": "BioFlow Studio",
   "version": "0.1.0",
   "main": "./out/main/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nkkoran/bioflow-studio.git"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "dist": "electron-vite build && electron-builder",
+    "dist:mac": "electron-vite build && electron-builder --mac",
+    "dist:win": "electron-vite build && electron-builder --win --x64 -c.npmRebuild=false",
     "preview": "electron-vite preview",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "release:patch": "npm version patch -m \"v%s\" && git push origin HEAD --tags",
+    "release:minor": "npm version minor -m \"v%s\" && git push origin HEAD --tags",
+    "release:beta":  "npm version prerelease --preid=beta -m \"v%s\" && git push origin HEAD --tags"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@tailwindcss/vite": "^4.2.4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/ssh2": "^1.15.5",
     "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^34.5.8",
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
+    "tailwindcss": "^4.2.4",
     "typescript": "^6.0.2",
     "vite": "^6.4.2",
     "vitest": "^4.1.5"
@@ -29,7 +44,6 @@
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
-    "@tailwindcss/vite": "^4.2.2",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.23",
     "@xterm/addon-fit": "^0.11.0",
@@ -37,11 +51,12 @@
     "@xterm/xterm": "^6.0.0",
     "@xyflow/react": "^12.10.2",
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.3",
     "lucide-react": "^1.8.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "react-joyride": "^3.0.2",
     "ssh2": "^1.17.0",
-    "tailwindcss": "^4.2.2",
     "zod": "^4.3.6",
     "zustand": "^5.0.12"
   }

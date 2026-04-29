@@ -36,6 +36,7 @@ function StatusBadge({ status = 'idle' }: StatusBadgeProps) {
 function MergeNodeInner({ data, selected }: NodeProps) {
   const nodeData = data as MergeNodeData
   const convergeLabel = (nodeData.convergeMode ?? 'axed-fan-in') === 'parallel-branches' ? 'branches' : 'axis'
+  const handles = nodeData.inputHandles?.length ? nodeData.inputHandles : [{ id: 'input', label: 'input' }]
 
   return (
     <div
@@ -63,22 +64,28 @@ function MergeNodeInner({ data, selected }: NodeProps) {
       <div className="px-3 py-2 text-[11px] text-text-secondary">
         <span className="text-text-muted">strategy: </span>
         <span className="font-mono truncate" title={nodeData.strategy}>{nodeData.strategy}</span>
+        {handles.length > 1 && (
+          <div className="mt-1 text-[10px] text-text-muted">{handles.length} inputs</div>
+        )}
       </div>
 
-      <Handle
-        type="target"
-        position={Position.Left}
-        id="input"
-        style={{
-          left: -8,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          width: 10,
-          height: 10,
-          background: 'var(--color-accent)',
-          border: '2px solid var(--color-bg-secondary)',
-        }}
-      />
+      {handles.map((handle, index) => (
+        <Handle
+          key={handle.id}
+          type="target"
+          position={Position.Left}
+          id={handle.id}
+          style={{
+            left: -8,
+            top: `${((index + 1) / (handles.length + 1)) * 100}%`,
+            transform: 'translateY(-50%)',
+            width: 10,
+            height: 10,
+            background: 'var(--color-accent)',
+            border: '2px solid var(--color-bg-secondary)',
+          }}
+        />
+      ))}
       <Handle
         type="source"
         position={Position.Right}

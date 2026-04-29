@@ -350,6 +350,7 @@ export function normalizeAnalysisOptions(
   const defs = getAnalysisOptionDefs(tool)
   const connectedPortIds = new Set(opts.connectedPortIds ?? [])
   const existing = nodeData.analysisOptions ?? statesFromFlagBlocks(tool, nodeData.flagBlocks, nodeData.paramValues ?? {})
+  const hasExplicitAnalysisOptions = Boolean(nodeData.analysisOptions)
   const byId = new Map(existing.map((state) => [state.optionId, state]))
   const next = defs.map((def) => {
     const current = byId.get(def.id)
@@ -358,7 +359,7 @@ export function normalizeAnalysisOptions(
       ? {
           ...fallback,
           ...current,
-          enabled: current.enabled || (Boolean(def.filePortId) && connectedPortIds.has(def.filePortId!)),
+          enabled: current.enabled || (!hasExplicitAnalysisOptions && Boolean(def.filePortId) && connectedPortIds.has(def.filePortId!)),
           source: current.source ?? fallback.source,
           subOptions: { ...(fallback.subOptions ?? {}), ...(current.subOptions ?? {}) },
         }
