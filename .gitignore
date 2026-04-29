@@ -7,8 +7,8 @@ dist-electron/
 out/
 release/
 
-# Electron-store data — contains your saved SSH credentials/passwords
-electron/store/
+# Electron-store runtime data, if generated in-tree. Keep source modules tracked.
+electron/store/*.json
 
 # macOS junk
 .DS_Store
