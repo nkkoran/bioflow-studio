@@ -23,6 +23,7 @@ CLAUDE.local.md
 
 # Local agent / workspace metadata
 .claude/
+AGENTS.md
 
 # Internal planning and release notes that should stay out of the public repo
 PHASE*_PLAN*.md
