@@ -143,6 +143,7 @@ interface Window {
     }
     app: {
       checkForUpdates: () => Promise<{ ok: boolean }>
+      onUpdateStatus: (callback: (data: { kind: 'info' | 'success' | 'error'; message: string; durationMs?: number }) => void) => () => void
       onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection' }) => void) => () => void
     }
   }

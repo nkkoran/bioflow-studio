@@ -18,8 +18,12 @@ extraResources:
     to: python-bridge
   - from: resources/dx-applets
     to: dx-applets
-  - from: docs
-    to: docs
+  - from: docs/gwas-quickstart.md
+    to: docs/gwas-quickstart.md
+  - from: docs/bcftools-workflow.md
+    to: docs/bcftools-workflow.md
+  - from: docs/ukb-extract-quickstart.md
+    to: docs/ukb-extract-quickstart.md
 mac:
   identity: null
   singleArchFiles: "{**/node_modules/cpu-features/**/*.node,**/node_modules/ssh2/**/*.node}"

@@ -400,6 +400,13 @@ const api = {
   app: {
     checkForUpdates: (): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('app:check-updates'),
+    onUpdateStatus: (
+      callback: (data: { kind: 'info' | 'success' | 'error'; message: string; durationMs?: number }) => void,
+    ): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('app:update-status', handler)
+      return () => ipcRenderer.removeListener('app:update-status', handler)
+    },
     onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection' }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('app:menu-command', handler)

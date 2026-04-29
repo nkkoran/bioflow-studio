@@ -20,3 +20,15 @@ electron/store/*.json
 
 # Claude personal overrides
 CLAUDE.local.md
+
+# Local agent / workspace metadata
+.claude/
+
+# Internal planning and release notes that should stay out of the public repo
+PHASE*_PLAN*.md
+phase*_plan*.md
+RAP_Implementation_Plan.md
+Packaging.md
+SHIPPING.md
+AUDIT_*.md
+CLAUDE.md
