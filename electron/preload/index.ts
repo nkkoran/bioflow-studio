@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern } from '../../src/types/pipeline'
 import type { AnnovarInstallRequest, AnnovarInstallProgress, AnnovarStatusResult } from '../../src/types/annotation'
+import type {
+  DnxAppletInstallProgress,
+  DnxBridgeStatusEvent,
+  DnxFileStat,
+  DnxInstanceSpec,
+  DnxJobStatus,
+  DnxProject,
+  DnxRemoteFileEntry,
+  DnxTransferProgress,
+} from '../../src/types/dnx'
 
 // Types matching src/types/
 export interface ConnectionConfig {
@@ -15,6 +25,10 @@ export interface ConnectionConfig {
   rememberPassword?: boolean
   generatedKeyPath?: string
   setupNote?: string
+  alias?: string
+  writeConfig?: boolean
+  controlPersistHours?: number
+  serverAliveIntervalSeconds?: number
   defaultDirectory?: string
 }
 
@@ -62,6 +76,17 @@ export interface FileStat {
   permissions: string
 }
 
+function normalizeRemoteFileEntries(value: unknown): RemoteFileEntry[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is RemoteFileEntry => {
+    if (!entry || typeof entry !== 'object') return false
+    const candidate = entry as Partial<RemoteFileEntry>
+    return typeof candidate.name === 'string'
+      && typeof candidate.path === 'string'
+      && typeof candidate.isDirectory === 'boolean'
+  })
+}
+
 export interface SshKeySetupRequest {
   host: string
   port: number
@@ -71,6 +96,10 @@ export interface SshKeySetupRequest {
   overwrite?: boolean
   addToAgent?: boolean
   addToKeychain?: boolean
+  alias?: string
+  writeConfig?: boolean
+  controlPersistHours?: number
+  serverAliveIntervalSeconds?: number
 }
 
 export interface SshKeySetupResult {
@@ -78,6 +107,8 @@ export interface SshKeySetupResult {
   publicKeyPath: string
   agentAdded: boolean
   keychainAdded: boolean
+  alias?: string
+  configPath?: string
   note?: string
 }
 
@@ -154,8 +185,8 @@ const api = {
     },
   },
   sftp: {
-    ls: (id: string, remotePath: string): Promise<RemoteFileEntry[]> =>
-      ipcRenderer.invoke('sftp:ls', id, remotePath),
+    ls: async (id: string, remotePath: string): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('sftp:ls', id, remotePath)),
     stat: (id: string, remotePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('sftp:stat', id, remotePath),
     read: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
@@ -214,9 +245,57 @@ const api = {
     deleteSecret: (key: string): Promise<void> =>
       ipcRenderer.invoke('store:delete-secret', key),
   },
+  dnx: {
+    bootstrap: (options?: { force?: boolean }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('dnx:bootstrap', options),
+    auth: (args: { token?: string; projectId?: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('dnx:auth', args),
+    listProjects: (): Promise<DnxProject[]> =>
+      ipcRenderer.invoke('dnx:list-projects'),
+    listInstanceTypes: (): Promise<DnxInstanceSpec[]> =>
+      ipcRenderer.invoke('dnx:list-instance-types'),
+    listFiles: (args: { projectId: string; path: string }): Promise<DnxRemoteFileEntry[]> =>
+      ipcRenderer.invoke('dnx:list-files', args),
+    stat: (args: { projectId: string; path: string }): Promise<DnxFileStat> =>
+      ipcRenderer.invoke('dnx:stat', args),
+    upload: (args: { projectId: string; localPath: string; folder: string }): Promise<{ fileId: string }> =>
+      ipcRenderer.invoke('dnx:upload', args),
+    download: (args: { projectId: string; fileId: string; localPath: string }): Promise<{ path: string }> =>
+      ipcRenderer.invoke('dnx:download', args),
+    run: (args: Record<string, unknown>): Promise<{ jobId: string }> =>
+      ipcRenderer.invoke('dnx:run', args),
+    jobStatus: (args: { jobId: string }): Promise<DnxJobStatus> =>
+      ipcRenderer.invoke('dnx:job-status', args),
+    cancel: (args: { jobId: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('dnx:cancel', args),
+    ensureApplet: (args: Record<string, unknown>): Promise<{ appletId: string; hash: string }> =>
+      ipcRenderer.invoke('dnx:ensure-applet', args),
+    sparkExtract: (args: Record<string, unknown>): Promise<{ jobId: string }> =>
+      ipcRenderer.invoke('dnx:spark-extract', args),
+    onBridgeStatus: (callback: (data: DnxBridgeStatusEvent) => void): (() => void) => {
+      const handler = (_event: any, data: DnxBridgeStatusEvent) => callback(data)
+      ipcRenderer.on('dnx:bridge-status', handler)
+      return () => ipcRenderer.removeListener('dnx:bridge-status', handler)
+    },
+    onBootstrapProgress: (callback: (data: DnxBridgeStatusEvent) => void): (() => void) => {
+      const handler = (_event: any, data: DnxBridgeStatusEvent) => callback(data)
+      ipcRenderer.on('dnx:bootstrap-progress', handler)
+      return () => ipcRenderer.removeListener('dnx:bootstrap-progress', handler)
+    },
+    onTransferProgress: (callback: (data: DnxTransferProgress) => void): (() => void) => {
+      const handler = (_event: any, data: DnxTransferProgress) => callback(data)
+      ipcRenderer.on('dnx:transfer-progress', handler)
+      return () => ipcRenderer.removeListener('dnx:transfer-progress', handler)
+    },
+    onAppletInstallProgress: (callback: (data: DnxAppletInstallProgress) => void): (() => void) => {
+      const handler = (_event: any, data: DnxAppletInstallProgress) => callback(data)
+      ipcRenderer.on('dnx:applet-install-progress', handler)
+      return () => ipcRenderer.removeListener('dnx:applet-install-progress', handler)
+    },
+  },
   local: {
-    ls: (dirPath: string): Promise<RemoteFileEntry[]> =>
-      ipcRenderer.invoke('local:ls', dirPath),
+    ls: async (dirPath: string): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('local:ls', dirPath)),
     stat: (filePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('local:stat', filePath),
     read: (filePath: string, offset?: number, length?: number): Promise<string> =>
@@ -247,8 +326,8 @@ const api = {
       ipcRenderer.invoke('dialog:openDirectory', options),
   },
   pipeline: {
-    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<{ runId: string }> =>
-      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir }),
+    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string, workspace?: RunState['workspace']): Promise<{ runId: string }> =>
+      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir, workspace }),
     cancel: (runId: string): Promise<void> =>
       ipcRenderer.invoke('pipeline:cancel', runId),
     cancelNode: (runId: string, nodeId: string): Promise<void> =>
@@ -296,6 +375,8 @@ const api = {
       ipcRenderer.invoke('cluster:getLearnedResources', connectionId, toolId, options),
     resetLearnedResources: (connectionId: string, toolId: string) =>
       ipcRenderer.invoke('cluster:resetLearnedResources', connectionId, toolId),
+    clearCaches: (connectionId: string) =>
+      ipcRenderer.invoke('cluster:clearCaches', connectionId),
   },
   annovar: {
     status: (connectionId: string, humandbPath: string, buildver: string, databases: string[]): Promise<AnnovarStatusResult> =>
@@ -317,7 +398,9 @@ const api = {
       ipcRenderer.invoke('split:resolve', connectionId, pattern, manualItems),
   },
   app: {
-    onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' }) => void): (() => void) => {
+    checkForUpdates: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('app:check-updates'),
+    onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection' }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('app:menu-command', handler)
       return () => ipcRenderer.removeListener('app:menu-command', handler)

@@ -2,6 +2,7 @@ import type { SFTPWrapper, FileEntry as SshFileEntry } from 'ssh2'
 import { SshManager } from './SshManager'
 import type { RemoteFileEntry, FileStat } from './types'
 import { createReadStream } from 'fs'
+import { promises as fs } from 'fs'
 
 interface PoolEntry {
   available: SFTPWrapper[]
@@ -132,7 +133,7 @@ export class SftpPool {
       const list = await new Promise<SshFileEntry[]>((resolve, reject) => {
         sftp.readdir(remotePath, (err, fileList) => {
           if (err) reject(err)
-          else resolve(fileList)
+          else resolve(Array.isArray(fileList) ? fileList : [])
         })
       })
 
@@ -374,6 +375,21 @@ export class SftpPool {
         readStream.pipe(writeStream)
       })
       this.invalidateCache(connectionId, parentDir(remotePath))
+    } finally {
+      this.release(connectionId, sftp)
+    }
+  }
+
+  async download(connectionId: string, remotePath: string, localPath: string): Promise<void> {
+    const sftp = await this.acquire(connectionId)
+    try {
+      await fs.mkdir(localPath.replace(/\/[^/]+$/, ''), { recursive: true }).catch(() => undefined)
+      await new Promise<void>((resolve, reject) => {
+        sftp.fastGet(remotePath, localPath, {}, (err) => {
+          if (err) reject(err)
+          else resolve()
+        })
+      })
     } finally {
       this.release(connectionId, sftp)
     }

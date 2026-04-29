@@ -13,9 +13,11 @@ import { LogViewer } from './LogViewer'
 import { JobSummary } from './JobSummary'
 import { QueueDetails } from './QueueDetails'
 import { FailureDiagnostic } from './FailureDiagnostic'
+import { RunRecoveryCard } from './RunRecoveryCard'
 import type { NodeRunState, RunState } from '@/types/pipeline'
 import { useFileStore } from '@/stores/fileStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
+import { useUIStore } from '@/stores/uiStore'
 
 export function JobsPanel() {
   const runs = useRunStore((s) => s.runs)
@@ -31,6 +33,7 @@ export function JobsPanel() {
   const pipelineNodes = usePipelineStore((s) => s.nodes)
   const navigate = useFileStore((s) => s.navigate)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
+  const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const [nodesCollapsed, setNodesCollapsed] = useState(false)
 
   // Sort runs most-recent-first for the selector
@@ -49,6 +52,16 @@ export function JobsPanel() {
   }, [sortedRuns])
   const activeRun = activeRunId ? runs[activeRunId] : null
   const isRunning = activeRun?.status === 'running' || activeRun?.status === 'queued'
+  const activeRunIsDnxOnly = useMemo(() => {
+    if (!activeRun?.snapshot) return false
+    return activeRun.snapshot.nodes.every((node: any) => {
+      if (node.type === 'tool') return node.data?.backend === 'dnx'
+      if (node.type === 'file') return node.data?.origin !== 'ssh'
+      if (node.type === 'merge' || node.type === 'transform') return false
+      return true
+    })
+  }, [activeRun])
+  const activeRunHasSshSteps = !activeRunIsDnxOnly && activeRun?.connectionId && activeRun.connectionId !== LOCAL_CONNECTION_ID
 
   useEffect(() => {
     if (!activeRunId && sortedRuns[0]) setActiveRun(sortedRuns[0].runId)
@@ -105,7 +118,7 @@ export function JobsPanel() {
           Refresh
         </Button>
 
-        {activeRun?.workDir && (
+        {activeRun?.workDir && activeRunHasSshSteps && (
           <Button
             variant="ghost"
             size="sm"
@@ -118,6 +131,18 @@ export function JobsPanel() {
             title="Open run folder in the file explorer"
           >
             Run folder
+          </Button>
+        )}
+
+        {activeRun && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setBottomPanelMode('results')}
+            className="h-6 text-xs"
+            title="Browse run outputs"
+          >
+            Results
           </Button>
         )}
 
@@ -178,10 +203,18 @@ export function JobsPanel() {
           <div className="flex-1 min-w-0 flex flex-col">
             <RunDetails run={activeRun} />
             <QueueDetails run={activeRun} />
+            <RunRecoveryCard
+              run={activeRun}
+              canRerun={activeRun.pipelineId === pipelineId}
+              onRerun={(nodeId) => {
+                if (activeRun.pipelineId !== pipelineId) return
+                void rerunNode(activeRun.runId, nodeId, exportSnapshot())
+              }}
+            />
             {selectedNodeId && activeRun.nodes[selectedNodeId] && (
               <SelectedNodeSummary
                 ns={activeRun.nodes[selectedNodeId]}
-                label={labelForNode(pipelineNodes, selectedNodeId)}
+                label={labelForNode(activeRun.snapshot?.nodes as Array<{ id: string; type?: string; data: Record<string, unknown> }> | undefined ?? pipelineNodes, selectedNodeId)}
               />
             )}
             {(() => {
@@ -199,7 +232,12 @@ export function JobsPanel() {
                 onRerun={() => void rerunNode(activeRun.runId, selectedNodeId, exportSnapshot())}
               />
             )}
-            {activeRun.connectionId ? (
+            {activeRunIsDnxOnly ? (
+              <div className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center text-xs text-text-muted">
+                <span>DNAnexus jobs stream their logs on the platform.</span>
+                <span className="text-[10px]">Open the job in the DNAnexus web UI for real-time stdout/stderr.</span>
+              </div>
+            ) : activeRun.connectionId && activeRun.connectionId !== LOCAL_CONNECTION_ID ? (
               <LogViewer run={activeRun} connectionId={activeRun.connectionId} />
             ) : (
               <div className="h-full flex items-center justify-center text-xs text-text-muted">

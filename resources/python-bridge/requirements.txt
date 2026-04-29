@@ -1,0 +1,5 @@
+# Local bridge dependencies.
+# `dxdata` and `pyspark` are intentionally absent because PySpark execution
+# happens inside the RAP Spark cluster, not in this local bridge process.
+dxpy
+

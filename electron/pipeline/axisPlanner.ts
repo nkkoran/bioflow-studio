@@ -10,12 +10,14 @@ import type {
   ToolNodeData,
   FileNodeData,
   MergeNodeData,
+  TransferNodeData,
   TransformNodeData,
   ToolDef,
   FileType,
   MergeStrategy,
 } from '../../src/types/pipeline'
 import { topoSort } from './topoSort'
+import { getActiveToolInputs, normalizeAnalysisOptions } from '../../src/lib/analysisOptions'
 
 export type AxedValue =
   | { kind: 'single'; path: string }
@@ -26,7 +28,7 @@ export type NodeMode = 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
 
 export interface AxisPlan {
   nodeId: string
-  nodeType: 'tool' | 'merge' | 'transform' | 'file' | 'note'
+  nodeType: 'tool' | 'merge' | 'transfer' | 'transform' | 'file' | 'note'
   mode: NodeMode
   /** For 'array': the axis being looped over. */
   axis?: string
@@ -212,6 +214,7 @@ export interface PlannerContext {
    * "node_abc12345"). If omitted, nodeId is used as-is.
    */
   nodeSlug?: (nodeId: string) => string
+  outputRootForNode?: (node: PipelineSnapshot['nodes'][number]) => string
   /**
    * Resolved `$HOME` on the remote. Used to expand `~` / `~/…` in user-provided
    * outputDirOverride values before they cross the SFTP boundary.
@@ -254,15 +257,18 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         nodeId, nodeType: 'file', mode: 'skip', dependsOnArrayNodeIds: [],
         inputs: {}, outputs: {},
       }
-      if (data.split && data.split.items.length > 0) {
+      const split = data.split
+      const rawSplitItems = (split as { items?: unknown } | undefined)?.items
+      const splitItems = Array.isArray(rawSplitItems) ? rawSplitItems : []
+      if (split && splitItems.length > 0) {
         plan.outputs.output = {
           kind: 'array',
-          axis: data.split.axis,
-          keys: data.split.items.map((i) => i.key),
-          paths: data.split.items.map((i) => i.path),
-          pathTemplate: splitPathTemplate(data.split),
+          axis: split.axis,
+          keys: splitItems.map((i) => i.key),
+          paths: splitItems.map((i) => i.path),
+          pathTemplate: splitPathTemplate(split),
         }
-      } else if (data.split && data.split.items.length === 0) {
+      } else if (split && splitItems.length === 0) {
         throw new AxisPlanError('EMPTY_SPLIT', nodeId, `File node "${data.label}" has split with zero items`)
       } else {
         plan.outputs.output = { kind: 'single', path: data.path }
@@ -285,6 +291,14 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
 
     // Resolve each target port
     for (const [portId, edges] of inEdges) {
+      if (node.type === 'tool') {
+        const data = node.data as ToolNodeData
+        const tool = ctx.getTool(data.toolId)
+        const dataWithConnectedOptions: ToolNodeData = tool
+          ? { ...data, analysisOptions: normalizeAnalysisOptions(tool, data, { connectedPortIds: inEdges.keys() }) }
+          : data
+        if (tool && !getActiveToolInputs(tool, dataWithConnectedOptions).some((port) => port.id === portId)) continue
+      }
       // Gather upstream values
       const upstreams = edges.map((e) => {
         const upstreamPlan = plans.get(e.source)
@@ -333,7 +347,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const data = node.data as TransformNodeData
       const input = resolvedInputs.input
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-      const outputDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const outputDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
       const fallbackOut = outputPath(outputDir, slug, 'output', null, data.fileType)
       if (input?.kind === 'array') {
@@ -420,20 +434,62 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const resolvedStrategy = resolveMergeStrategyStatic(data.strategy, upstreamFt)
       const outExt = mergeOutputExt(resolvedStrategy)
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-      const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+      const mergeOutDir = resolveNodeOutputDir(data.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
       const sink = connectedOutputSink(snapshot, nodeId, 'output')
       const fallbackOut = `${mergeOutDir}/${slug}.output${outExt}`
       const outPath = resolveSinkPath(sink, mergeOutDir, fallbackOut, ctx.homeDir)
+      const mergeInput = collapseMergeInputs(resolvedInputs)
       plans.set(nodeId, {
         nodeId,
         nodeType: 'merge',
         mode,
         dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
         dependsOnNodeIds: [...directRunnableDeps],
-        inputs: resolvedInputs,
+        inputs: { ...resolvedInputs, input: mergeInput },
         outputs: { output: { kind: 'single', path: outPath } },
         upstreamFileType: upstreamFt,
         resolvedMergeStrategy: resolvedStrategy,
+      })
+      continue
+    }
+
+    if (node.type === 'transfer') {
+      const data = node.data as TransferNodeData
+      const input = resolvedInputs.input
+      const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
+      const outputRoot = ctx.outputRootForNode?.(node) ?? ctx.outputRoot
+      const outputDir = resolveNodeOutputDir(undefined, outputRoot, slug, ctx.homeDir)
+      const nameFor = (index: number, sourcePath: string) => {
+        const explicit = data.outputName?.trim()
+        if (!explicit) return pathBasename(sourcePath) || `${slug}.${index + 1}`
+        if (index === 0) return explicit
+        const dot = explicit.lastIndexOf('.')
+        if (dot <= 0) return `${explicit}.${index + 1}`
+        return `${explicit.slice(0, dot)}.${index + 1}${explicit.slice(dot)}`
+      }
+      const outputValue: AxedValue = !input
+        ? { kind: 'single', path: `${outputDir}/${slug}.output` }
+        : input.kind === 'single'
+          ? { kind: 'single', path: `${outputDir}/${nameFor(0, input.path)}` }
+          : input.kind === 'multi'
+            ? { kind: 'multi', paths: input.paths.map((path, index) => `${outputDir}/${nameFor(index, path)}`) }
+            : {
+                kind: 'array',
+                axis: input.axis,
+                keys: input.keys,
+                paths: input.paths.map((path, index) => `${outputDir}/${nameFor(index, path)}`),
+              }
+      plans.set(nodeId, {
+        nodeId,
+        nodeType: 'transfer',
+        mode: input?.kind === 'array' ? 'array' : dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single',
+        axis: input?.kind === 'array' ? input.axis : undefined,
+        keys: input?.kind === 'array' ? input.keys : undefined,
+        arrayPortId: input?.kind === 'array' ? 'input' : undefined,
+        dependsOnArrayNodeIds: [...dependsOnArrayNodeIds],
+        dependsOnNodeIds: [...dependsOnNodeIds],
+        inputs: resolvedInputs,
+        outputs: { output: outputValue },
       })
       continue
     }
@@ -509,7 +565,7 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     const outputs: Record<string, AxedValue> = {}
     const implicitMerges: NonNullable<AxisPlan['implicitMerges']> = {}
     const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
-    const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRoot, slug, ctx.homeDir)
+    const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
       const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
       const fallbackOut = outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType)
@@ -575,13 +631,12 @@ function portIsMulti(
   ctx: PlannerContext,
 ): boolean {
   if (node.type === 'merge') {
-    // Merge has a single, implicitly multi input port.
-    return portId === 'input'
+    return portId === 'input' || portId.startsWith('input-')
   }
   if (node.type === 'tool') {
     const toolData = node.data as ToolNodeData
     const tool = ctx.getTool(toolData.toolId)
-    const portDef = tool?.inputs.find((p) => p.id === portId)
+    const portDef = tool ? getActiveToolInputs(tool, toolData).find((p) => p.id === portId) : undefined
     return Boolean(portDef?.multi)
   }
   if (node.type === 'transform') {
@@ -598,11 +653,27 @@ function resolveMergeStrategyStatic(strategy: MergeStrategy, ft: FileType): Excl
   return 'cat'
 }
 
+function collapseMergeInputs(inputs: Record<string, AxedValue>): AxedValue {
+  const values = Object.values(inputs)
+  if (values.length === 0) return { kind: 'multi', paths: [] }
+  if (values.length === 1) return values[0]
+  const paths: string[] = []
+  for (const value of values) {
+    if (value.kind === 'single') paths.push(value.path)
+    else paths.push(...value.paths)
+  }
+  return { kind: 'multi', paths }
+}
+
 function mergeOutputExt(strategy: Exclude<MergeStrategy, 'auto'>): string {
   switch (strategy) {
     case 'bcftools-concat': return '.vcf.gz'
     case 'plink-pmerge-list': return ''
-    case 'tsv-concat-header': return '.tsv'
+    case 'tsv-concat-header':
+    case 'tabular-inner':
+    case 'tabular-outer':
+    case 'tabular-left':
+      return '.tsv'
     default: return '.txt'
   }
 }

@@ -5,6 +5,7 @@ node_modules/
 dist/
 dist-electron/
 out/
+release/
 
 # Electron-store data — contains your saved SSH credentials/passwords
 electron/store/

@@ -1,0 +1,37 @@
+{
+  "name": "bioflow-ukb-extract",
+  "title": "BioFlow UKB Extract",
+  "summary": "Fixed Spark applet for UK Biobank field extraction.",
+  "version": "0.1.0",
+  "dxapi": "1.0.0",
+  "inputSpec": [
+    { "name": "fields_json", "class": "file", "optional": false },
+    { "name": "rename_json", "class": "file", "optional": false },
+    { "name": "coding_values", "class": "string", "optional": false, "default": "replace" },
+    { "name": "output_name", "class": "string", "optional": false, "default": "ukb_extracted_traits.tsv" }
+  ],
+  "outputSpec": [
+    { "name": "tsv", "class": "file" }
+  ],
+  "runSpec": {
+    "interpreter": "python3",
+    "file": "src/extract.py",
+    "distribution": "Ubuntu",
+    "release": "20.04",
+    "version": "0",
+    "systemRequirements": {
+      "*": {
+        "instanceType": "mem1_ssd1_v2_x8",
+        "clusterSpec": {
+          "type": "spark",
+          "version": "3.2.3",
+          "initialInstanceCount": 1
+        }
+      }
+    }
+  },
+  "regionalOptions": {
+    "aws:eu-west-2": {},
+    "aws:us-east-1": {}
+  }
+}

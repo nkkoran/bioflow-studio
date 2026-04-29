@@ -23,7 +23,7 @@ export function CenterPanel() {
     <div className="flex-1 flex flex-col bg-bg-primary min-h-0">
       <PipelineToolbar />
       <div className="flex-1 flex min-h-0">
-        <div className="w-56 shrink-0">
+        <div className="w-56 shrink-0" data-tour="tool-palette">
           <ToolPalette />
         </div>
         <PipelineCanvas />

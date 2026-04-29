@@ -6,7 +6,10 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useUIStore } from '@/stores/uiStore'
 import { useClusterInfoStore } from '@/stores/clusterInfoStore'
+import { useDataPreviewStore } from '@/stores/dataPreviewStore'
+import { useFileSizeStore } from '@/stores/fileSizeStore'
 import { ConnectionLogDrawer } from './ConnectionLogDrawer'
+import { ClusterDoctorDialog } from './ClusterDoctorDialog'
 
 interface ConnectionStatusProps {
   /** When true, collapse to an icon-only pill (used in narrow TopBar widths). */
@@ -15,12 +18,21 @@ interface ConnectionStatusProps {
 
 export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
-  const [dialogOpen, setDialogOpen] = useState(false)
+  const dialogOpen = useUIStore((s) => s.connectionDialogOpen)
+  const setDialogOpen = (open: boolean) => {
+    if (open) useUIStore.getState().openConnectionDialog()
+    else useUIStore.getState().closeConnectionDialog()
+  }
   const [slurmOpen, setSlurmOpen] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
+  const [doctorOpen, setDoctorOpen] = useState(false)
+  const [cacheRefreshing, setCacheRefreshing] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const { connections, activeConnectionId, disconnect, connectLocal } = useConnectionStore()
+  const clearClusterInfo = useClusterInfoStore((s) => s.clearConnection)
+  const clearSchemas = useDataPreviewStore((s) => s.clearSchemas)
+  const clearFileSizes = useFileSizeStore((s) => s.clear)
   const activeEntry = activeConnectionId ? connections[activeConnectionId] : null
   const status = activeEntry?.status ?? 'disconnected'
   const isLocal = activeConnectionId === LOCAL_CONNECTION_ID
@@ -67,6 +79,23 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
       setDropdownOpen(false)
     }
   }
+
+  const handleRefreshClusterCaches = useCallback(async () => {
+    if (!activeConnectionId || isLocal) return
+    setCacheRefreshing(true)
+    try {
+      await window.api.cluster.clearCaches(activeConnectionId)
+      clearClusterInfo(activeConnectionId)
+      clearFileSizes(activeConnectionId)
+      clearSchemas()
+      await Promise.allSettled([
+        useClusterInfoStore.getState().loadAccounts(activeConnectionId, { force: true }),
+        useClusterInfoStore.getState().loadModules(activeConnectionId, undefined, { force: true }),
+      ])
+    } finally {
+      setCacheRefreshing(false)
+    }
+  }, [activeConnectionId, clearClusterInfo, clearFileSizes, clearSchemas, isLocal])
 
   return (
     <>
@@ -187,6 +216,24 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
             <div className="p-2 flex flex-col gap-1">
               {!isLocal && (
                 <button
+                  onClick={() => setDoctorOpen(true)}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
+                >
+                  <Server size={14} />
+                  Cluster doctor
+                </button>
+              )}
+              {!isLocal && (
+                <button
+                  onClick={() => void handleRefreshClusterCaches()}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
+                >
+                  <RefreshCcw size={14} className={cacheRefreshing ? 'animate-spin' : ''} />
+                  Refresh cached cluster info
+                </button>
+              )}
+              {!isLocal && (
+                <button
                   onClick={() => setLogOpen(true)}
                   className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover rounded transition-colors"
                 >
@@ -234,6 +281,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
 
       <ConnectionDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
       <ConnectionLogDrawer open={logOpen} onClose={() => setLogOpen(false)} connectionId={activeConnectionId} />
+      <ClusterDoctorDialog open={doctorOpen} onClose={() => setDoctorOpen(false)} connectionId={activeConnectionId} />
     </>
   )
 }

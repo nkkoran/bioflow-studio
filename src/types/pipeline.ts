@@ -6,6 +6,15 @@
  * Edges represent data flow (output file → input file).
  */
 
+import type {
+  ArtifactRecipe,
+  OutputSchemaDef,
+  ParameterRule,
+  PortContract,
+  RoleMapping,
+} from './readiness'
+import type { FileOrigin } from '@/constants/connections'
+
 /** File-type categories used to validate connections between nodes. */
 export type FileType =
   | 'vcf' | 'bcf'            // variant calling
@@ -24,6 +33,8 @@ export interface ToolParam {
   label: string             // display label
   description?: string
   docUrl?: string
+  section?: 'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime'
+  core?: boolean
   advanced?: boolean
   type: 'string' | 'number' | 'boolean' | 'file' | 'select' | 'multi-select'
   default?: string | number | boolean
@@ -39,6 +50,8 @@ export interface ToolParam {
   columnSourcePortId?: string
   /** When true, render the column picker as add/remove chips instead of a single text field. */
   columnMulti?: boolean
+  /** When true, this param is managed by a dedicated UI section and should be hidden from the generic options panel. */
+  internal?: boolean
 }
 
 export type ValueSourceKind =
@@ -79,6 +92,38 @@ export interface ToolFlagBlock {
   flagId: string
   value?: unknown
   enabled: boolean
+  customFlag?: string
+  customLabel?: string
+  customInputKind?: 'text' | 'file'
+}
+
+export type AnalysisOptionKind =
+  | 'switch'
+  | 'text'
+  | 'number'
+  | 'enum'
+  | 'list'
+  | 'column'
+  | 'file'
+  | 'compound'
+  | 'custom'
+
+export type AnalysisOptionGroup = 'Input' | 'Model' | 'Filters' | 'Output' | 'Resources' | 'Advanced'
+
+export interface AnalysisSubOptionState {
+  enabled?: boolean
+  value?: unknown
+}
+
+export interface AnalysisOptionState {
+  optionId: string
+  enabled: boolean
+  value?: unknown
+  source?: ValueSource
+  subOptions?: Record<string, AnalysisSubOptionState>
+  customFlag?: string
+  customLabel?: string
+  customInputKind?: 'text' | 'file'
 }
 
 /** Input/output port on a tool. */
@@ -87,6 +132,8 @@ export interface ToolPort {
   label: string
   description?: string      // plain-language explanation shown in the inspector
   fileType: FileType
+  contract?: PortContract
+  outputSchema?: OutputSchemaDef
   autoMergeDefault?: MergeStrategy
   intermediate?: boolean
   required?: boolean
@@ -113,11 +160,14 @@ export interface ToolDef {
   name: string              // display name (e.g., "PLINK2 Association")
   category: ToolCategory
   description: string
+  docUrl?: string
   command: string           // binary name (e.g., "plink2")
   module?: string           // HPC module to load (e.g., "plink/2.00a3")
   inputs: ToolPort[]
   outputs: ToolPort[]
   params: ToolParam[]
+  artifactRecipes?: ArtifactRecipe[]
+  parameterRules?: ParameterRule[]
   /** Slurm defaults — can be overridden per-node */
   slurm?: {
     cpus?: number
@@ -127,6 +177,8 @@ export interface ToolDef {
   }
   /** Advisory metadata for tools that need local/reference databases. */
   requiresDatabase?: { name: string; guideKey: string }
+  backends?: Array<'ssh' | 'dnx'>
+  dnxApplet?: { id?: string; name?: string }
 }
 
 export type ToolCategory =
@@ -150,6 +202,11 @@ export interface ToolNodeData {
   label: string                                // user-editable display label
   paramValues: Record<string, unknown>         // name -> value
   flagBlocks?: ToolFlagBlock[]
+  analysisOptions?: AnalysisOptionState[]
+  commandOverride?: string
+  backend?: 'ssh' | 'dnx'
+  dnxInstanceType?: string
+  roleMappings?: Record<string, RoleMapping>
   outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
   outputIntermediate?: Record<string, boolean>
   /** Optional module name to load instead of the registry default. */
@@ -220,6 +277,7 @@ export interface FileNodeData {
   label: string
   path: string                  // remote path; used when split is absent
   source?: 'local' | 'remote'
+  origin?: FileOrigin
   fileType: FileType
   isInput: boolean              // true = source, false = sink
   outputFilename?: string
@@ -235,6 +293,9 @@ export type MergeStrategy =
   | 'bcftools-concat'
   | 'plink-pmerge-list'
   | 'cat'
+  | 'tabular-inner'
+  | 'tabular-outer'
+  | 'tabular-left'
 
 /**
  * Data for a merge node — a dedicated fan-in that collapses an axed edge
@@ -245,6 +306,8 @@ export interface MergeNodeData {
   label: string
   strategy: MergeStrategy
   convergeMode?: 'axed-fan-in' | 'parallel-branches'
+  inputHandles?: Array<{ id: string; label: string }>
+  columnPreview?: MergeColumnPreview
   outputIntermediate?: Record<string, boolean>
   /** See ToolNodeData.outputDirOverride. */
   outputDirOverride?: string
@@ -254,6 +317,26 @@ export interface MergeNodeData {
     timeHours?: number
     partition?: string
   }
+  status?: ToolNodeData['status']
+  jobId?: string
+  error?: string
+  [key: string]: unknown
+}
+
+export interface MergeColumnPreview {
+  files: Array<{ path: string; label: string; columns: string[] }>
+  sharedColumns: string[]
+  divergentColumns: Array<{ name: string; files: string[] }>
+}
+
+export interface TransferNodeData {
+  label: string
+  from: 'local' | 'ssh' | 'dnx'
+  to: 'local' | 'ssh' | 'dnx'
+  dnxProjectId?: string
+  dnxFolder?: string
+  sshFolder?: string
+  outputName?: string
   status?: ToolNodeData['status']
   jobId?: string
   error?: string
@@ -287,6 +370,9 @@ export interface TransformRenameRule {
 export interface TransformNodeData {
   label: string
   fileType: Extract<FileType, 'tsv' | 'csv' | 'txt' | 'any'>
+  preset?: ArtifactRecipe['preset']
+  roleMappings?: Record<string, RoleMapping>
+  presetConfig?: Record<string, unknown>
   selectedColumns?: string[]
   filters?: TransformFilterRule[]
   renames?: TransformRenameRule[]
@@ -306,7 +392,7 @@ export interface TransformNodeData {
   [key: string]: unknown
 }
 
-export type BioflowNodeType = 'tool' | 'file' | 'note' | 'merge' | 'transform'
+export type BioflowNodeType = 'tool' | 'file' | 'note' | 'merge' | 'transform' | 'transfer'
 
 /** Data payload for a note/comment node. */
 export interface NoteNodeData {
@@ -331,7 +417,7 @@ export interface PipelineSnapshot {
     id: string
     type: BioflowNodeType
     position: { x: number; y: number }
-    data: ToolNodeData | FileNodeData | NoteNodeData | MergeNodeData | TransformNodeData
+    data: ToolNodeData | FileNodeData | NoteNodeData | MergeNodeData | TransformNodeData | TransferNodeData
   }>
   edges: Array<{
     id: string
@@ -375,6 +461,24 @@ export interface RunState {
   pipelineId: string
   /** Human-readable pipeline name captured at submit time; survives rename. */
   pipelineName?: string
+  /** Snapshot captured at submit time for reproducibility/results views. */
+  snapshot?: PipelineSnapshot
+  /** Workspace context captured at submit time. */
+  workspace?: {
+    id?: string
+    name?: string
+    connectionName?: string
+    analysisRoot?: string
+    slurmAccount?: string
+    slurmPartition?: string
+    toolsRoot?: string
+    annovarScriptsPath?: string
+    annovarDbPath?: string
+    vepPath?: string
+    vepCachePath?: string
+    recommendedTemplateId?: string
+    notes?: string
+  } | null
   connectionId: string
   arrayChainMode?: 'task-level' | 'job-level'
   fileLifecyclePolicy?: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
@@ -396,6 +500,8 @@ export interface DryRunScript {
   label: string
   mode: 'single' | 'array' | 'fanIn' | 'branchFanIn' | 'skip'
   script: string
+  summary?: string
+  commands?: string[]
   outputPaths: string[]
   arraySize?: number
 }

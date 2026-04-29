@@ -10,6 +10,7 @@
 import { Component, type ReactNode, type ErrorInfo } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
+import { exportBugReport } from '@/lib/bugReport'
 
 interface Props { children: ReactNode }
 interface State { error: Error | null; info: ErrorInfo | null }
@@ -36,6 +37,20 @@ export class ErrorBoundary extends Component<Props, State> {
     this.setState({ error: null, info: null })
   }
 
+  handleBugReport = async (): Promise<void> => {
+    const reportDir = await exportBugReport({
+      title: 'render-crash',
+      reason: this.state.error?.message ?? 'Render crash',
+      extra: {
+        componentStack: this.state.info?.componentStack ?? '',
+        errorStack: this.state.error?.stack ?? '',
+      },
+    })
+    if (reportDir) {
+      window.alert(`Bug report written to:\n${reportDir}`)
+    }
+  }
+
   render() {
     if (!this.state.error) return this.props.children
 
@@ -53,6 +68,12 @@ export class ErrorBoundary extends Component<Props, State> {
             {this.state.info?.componentStack ? `\n\nComponent stack:${this.state.info.componentStack}` : ''}
           </pre>
           <div className="flex gap-2 mt-4 justify-end">
+            <button
+              onClick={() => void this.handleBugReport()}
+              className="px-3 py-1.5 text-xs rounded bg-bg-primary border border-border hover:bg-bg-hover"
+            >
+              Create bug report
+            </button>
             <button
               onClick={this.handleReset}
               className="px-3 py-1.5 text-xs rounded bg-bg-primary border border-border hover:bg-bg-hover"

@@ -14,7 +14,7 @@ function NoteNodeInner({ data, selected }: NodeProps) {
   return (
     <div
       className={classNames(
-        'rounded-md shadow-lg px-3 py-2 min-w-[160px] max-w-[280px] text-xs',
+        'rounded-md shadow-lg px-3 py-2 min-w-[160px] max-w-[320px] text-xs',
         selected ? 'ring-2 ring-accent/60' : '',
       )}
       style={{

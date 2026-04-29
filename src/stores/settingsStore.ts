@@ -29,6 +29,12 @@ export interface AppSettings {
   plinkFlagBuilderEnabled: boolean
   arrayChainMode: 'task-level' | 'job-level'
   fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
+  skipPreRunFileCheck: boolean
+  skipPreRunDoctorCheck: boolean
+  dnxAuthTokenStored: boolean
+  dnxDefaultProjectId: string | null
+  onboardingComplete: boolean
+  telemetryOptIn: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -58,13 +64,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
   plinkFlagBuilderEnabled: false,
   arrayChainMode: 'task-level',
   fileLifecyclePolicy: 'keep-all',
+  skipPreRunFileCheck: false,
+  skipPreRunDoctorCheck: false,
+  dnxAuthTokenStored: false,
+  dnxDefaultProjectId: null,
+  onboardingComplete: false,
+  telemetryOptIn: false,
 }
 
 interface SettingsState {
   settings: AppSettings
   loaded: boolean
+  devMode: boolean
   load: () => Promise<void>
   setSetting: <T>(key: string, value: T) => Promise<void>
+  unlockDevMode: (pin: string) => boolean
+  lockDevMode: () => void
 }
 
 async function readSetting<T>(key: string, fallback: T): Promise<T> {
@@ -75,6 +90,7 @@ async function readSetting<T>(key: string, fallback: T): Promise<T> {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   loaded: false,
+  devMode: false,
 
   load: async () => {
     const settings: AppSettings = {
@@ -104,6 +120,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       plinkFlagBuilderEnabled: await readSetting('settings:experimental:plinkFlagBuilderEnabled', DEFAULT_SETTINGS.plinkFlagBuilderEnabled),
       arrayChainMode: await readSetting('settings:execution:arrayChainMode', DEFAULT_SETTINGS.arrayChainMode),
       fileLifecyclePolicy: await readSetting('settings:fileLifecyclePolicy', DEFAULT_SETTINGS.fileLifecyclePolicy),
+      skipPreRunFileCheck: await readSetting('settings:skipPreRunFileCheck', DEFAULT_SETTINGS.skipPreRunFileCheck),
+      skipPreRunDoctorCheck: await readSetting('settings:skipPreRunDoctorCheck', DEFAULT_SETTINGS.skipPreRunDoctorCheck),
+      dnxAuthTokenStored: Boolean(await window.api.store.getSecret('dnx:authToken')),
+      dnxDefaultProjectId: await readSetting('dnx:defaultProjectId', DEFAULT_SETTINGS.dnxDefaultProjectId),
+      onboardingComplete: await readSetting('settings:onboardingComplete', DEFAULT_SETTINGS.onboardingComplete),
+      telemetryOptIn: await readSetting('settings:telemetryOptIn', DEFAULT_SETTINGS.telemetryOptIn),
     }
     set({ settings, loaded: true })
   },
@@ -149,10 +171,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:fileLifecyclePolicy':
         next.fileLifecyclePolicy =
           value === 'keep-outputs-only' || value === 'delete-intermediates-on-success'
-            ? value
+            ? String(value) as AppSettings['fileLifecyclePolicy']
             : 'keep-all'
         break
+      case 'settings:skipPreRunFileCheck': next.skipPreRunFileCheck = Boolean(value); break
+      case 'settings:skipPreRunDoctorCheck': next.skipPreRunDoctorCheck = Boolean(value); break
+      case 'dnx:defaultProjectId': next.dnxDefaultProjectId = value ? String(value) : null; break
+      case 'settings:onboardingComplete': next.onboardingComplete = Boolean(value); break
+      case 'settings:telemetryOptIn': next.telemetryOptIn = Boolean(value); break
     }
     set({ settings: next, loaded: true })
   },
+  unlockDevMode: (pin) => {
+    const ok = pin === '7755'
+    if (ok) set({ devMode: true })
+    return ok
+  },
+  lockDevMode: () => set({ devMode: false }),
 }))

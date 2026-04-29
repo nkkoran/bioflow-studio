@@ -1,6 +1,8 @@
 import { ipcMain } from 'electron'
 import { SshManager } from '../ssh/SshManager'
+import { SftpPool } from '../ssh/SftpPool'
 import { getSettingsStore } from '../store/settingsStore'
+import { PipelineRunner } from '../pipeline/PipelineRunner'
 import type { RunState } from '../../src/types/pipeline'
 import type { ClusterModuleSuggestion } from '../../src/types/ssh'
 import {
@@ -11,6 +13,8 @@ import {
 
 export function registerClusterHandlers(): void {
   const manager = SshManager.getInstance()
+  const sftp = SftpPool.getInstance()
+  const runner = PipelineRunner.getInstance()
 
   ipcMain.handle('cluster:loginPolicy', async (_event, connectionId: string) => {
     return manager.getLoginPolicy(connectionId)
@@ -96,6 +100,14 @@ export function registerClusterHandlers(): void {
     const store = getSettingsStore() as unknown as { delete: (key: string) => void }
     store.delete(learnedKey(connectionId, toolId))
   })
+
+  ipcMain.handle('cluster:clearCaches', async (_event, connectionId: string) => {
+    manager.clearCachedState(connectionId)
+    sftp.invalidateCache(connectionId)
+    runner.clearConnectionCache(connectionId)
+    clearLearnedResources(connectionId)
+    return { ok: true }
+  })
 }
 
 function uniqueLines(text: string): string[] {
@@ -138,6 +150,15 @@ function parseModuleSuggestions(text: string, query: string): ClusterModuleSugge
 
 function learnedKey(connectionId: string, toolId: string): string {
   return `resource-learning:${connectionId}:${toolId}`
+}
+
+function clearLearnedResources(connectionId: string): void {
+  const store = getSettingsStore() as unknown as { store?: Record<string, unknown>; delete: (key: string) => void }
+  for (const key of Object.keys(store.store ?? {})) {
+    if (key.startsWith(`resource-learning:${connectionId}:`)) {
+      store.delete(key)
+    }
+  }
 }
 
 function isLearnedSummary(value: unknown): value is NonNullable<ReturnType<typeof summarizeSacctSamples>> {

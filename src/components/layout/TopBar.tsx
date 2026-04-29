@@ -3,6 +3,8 @@ import { Settings } from 'lucide-react'
 import { ConnectionStatus } from '@/components/connection/ConnectionStatus'
 import { PipelineSwitcher } from './PipelineSwitcher'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
+import { WorkspaceSwitcher } from '@/components/workspace/WorkspaceSwitcher'
+import { useUIStore, type SettingsSection } from '@/stores/uiStore'
 
 // Width below which the TopBar switches to compact mode: title hides,
 // connection status collapses to an icon pill. Measured against the TopBar
@@ -13,6 +15,16 @@ export function TopBar() {
   const rootRef = useRef<HTMLDivElement>(null)
   const [compact, setCompact] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(undefined)
+  const settingsOpenRequest = useUIStore((s) => s.settingsOpenRequest)
+  const consumeSettingsOpen = useUIStore((s) => s.consumeSettingsOpen)
+
+  useEffect(() => {
+    if (!settingsOpenRequest) return
+    setSettingsSection(settingsOpenRequest.section)
+    setSettingsOpen(true)
+    consumeSettingsOpen()
+  }, [settingsOpenRequest, consumeSettingsOpen])
 
   useEffect(() => {
     const el = rootRef.current
@@ -36,6 +48,7 @@ export function TopBar() {
       <div className="w-[70px] shrink-0" />
 
       <PipelineSwitcher compact={compact} />
+      {!compact && <WorkspaceSwitcher />}
 
       <div className="flex-1 min-w-0" />
 
@@ -54,7 +67,11 @@ export function TopBar() {
       >
         <Settings size={16} />
       </button>
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        initialSection={settingsSection}
+      />
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import type { DelimiterOverride } from '@/stores/dataPreviewStore'
 import { headPreviewFile, readFileBase64, statFile } from '@/stores/fileStore'
 import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
@@ -10,7 +11,9 @@ import { RawTextView } from './RawTextView'
 import { SavedViewsMenu } from './SavedViewsMenu'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
 import { Table2, Loader2, AlertCircle } from 'lucide-react'
-import { pathBasename, pathDirname } from '@/lib/utils'
+import { joinRemotePath, pathBasename, pathDirname } from '@/lib/remotePath'
+import { useDialogStore } from '@/stores/dialogStore'
+import { exportBugReport } from '@/lib/bugReport'
 
 export function DataPreview() {
   const {
@@ -40,6 +43,10 @@ export function DataPreview() {
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const alertDialog = useDialogStore((s) => s.alert)
+  const promptDialog = useDialogStore((s) => s.prompt)
+  const confirmDialog = useDialogStore((s) => s.confirm)
 
   useEffect(() => {
     if (!savedViewsLoaded) void loadSavedViews()
@@ -161,7 +168,7 @@ export function DataPreview() {
   const selectedSavedViewId = activeTab ? activeSavedViewId[activeTab.filePath] : undefined
   const activeFilters = activeTab ? (filters[activeTab.filePath] ?? []) : []
 
-  const exportFiltered = () => {
+  const addFilteredToPipeline = () => {
     if (!activeTab || activeFilters.length === 0) return
     const offset = nodes.length * 16
     const inputId = addFileNode(
@@ -187,7 +194,7 @@ export function DataPreview() {
       {
         isInput: false,
         label: `${pathBasename(activeTab.filePath)} filtered`,
-        path: `${pathDirname(activeTab.filePath)}/${outputFilename}`,
+        path: joinRemotePath(pathDirname(activeTab.filePath), outputFilename),
         outputFilename,
         outputDir: pathDirname(activeTab.filePath),
         fileType: 'tsv',
@@ -195,6 +202,26 @@ export function DataPreview() {
     )
     onConnect({ source: inputId, sourceHandle: 'output', target: transformId, targetHandle: 'input' })
     onConnect({ source: transformId, sourceHandle: 'output', target: outputId, targetHandle: 'input' })
+  }
+
+  const exportFilteredFile = async (filteredRows: string[][]) => {
+    if (!activeTab || !activeConnectionId) return
+    const outputFilename = `${pathBasename(activeTab.filePath).replace(/(\.[^.]+)?$/, '')}.filtered.tsv`
+    const outputPath = joinRemotePath(pathDirname(activeTab.filePath), outputFilename)
+    const content = [
+      activeTab.data?.headers.join('\t') ?? '',
+      ...filteredRows.map((row) => row.join('\t')),
+    ].join('\n')
+    if (activeConnectionId === LOCAL_CONNECTION_ID) {
+      await window.api.local.write(outputPath, content)
+    } else {
+      await window.api.sftp.write(activeConnectionId, outputPath, content)
+    }
+    await alertDialog({
+      title: 'Filtered file saved',
+      message: 'BioFlow wrote the filtered preview output.',
+      detail: outputPath,
+    })
   }
 
   return (
@@ -259,8 +286,14 @@ export function DataPreview() {
                   else resetFreshView(activeTab.filePath)
                 }}
                 onSave={() => {
-                  const name = window.prompt('Save preview view as:')
-                  if (name) void saveView(activeTab.filePath, name)
+                  void promptDialog({
+                    title: 'Save preview view',
+                    message: 'Name this saved preview configuration.',
+                    placeholder: 'QC subset',
+                    confirmLabel: 'Save view',
+                  }).then((name) => {
+                    if (name) void saveView(activeTab.filePath, name)
+                  })
                 }}
                 onUpdate={() => {
                   if (selectedSavedViewId) void updateSavedView(activeTab.filePath, selectedSavedViewId)
@@ -268,14 +301,26 @@ export function DataPreview() {
                 onRename={() => {
                   if (!selectedSavedViewId) return
                   const current = activeViews.find((view) => view.id === selectedSavedViewId)
-                  const name = window.prompt('Rename saved view:', current?.name ?? '')
-                  if (name) void renameSavedView(activeTab.filePath, selectedSavedViewId, name)
+                  void promptDialog({
+                    title: 'Rename preview view',
+                    message: 'Choose a new name for this saved preview configuration.',
+                    defaultValue: current?.name ?? '',
+                    confirmLabel: 'Rename',
+                  }).then((name) => {
+                    if (name) void renameSavedView(activeTab.filePath, selectedSavedViewId, name)
+                  })
                 }}
                 onDelete={() => {
                   if (!selectedSavedViewId) return
-                  if (window.confirm('Delete this saved preview view?')) {
-                    void deleteSavedView(activeTab.filePath, selectedSavedViewId)
-                  }
+                  void confirmDialog({
+                    title: 'Delete saved preview view',
+                    message: 'Delete this saved preview view?',
+                    confirmLabel: 'Delete view',
+                    cancelLabel: 'Keep',
+                    danger: true,
+                  }).then((confirmed) => {
+                    if (confirmed) void deleteSavedView(activeTab.filePath, selectedSavedViewId)
+                  })
                 }}
               />
             </>
@@ -283,6 +328,24 @@ export function DataPreview() {
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
           )}
+          <button
+            type="button"
+            className="ml-auto shrink-0 text-[11px] text-text-muted hover:text-accent"
+            title="Save a bug report with the current file state and app context"
+            onClick={() => void exportBugReport({
+              title: 'data-preview-issue',
+              reason: errors[activeTab.id] ?? 'Data preview issue reported by user',
+              extra: {
+                filePath: activeTab.filePath,
+                detectedDelimiter: activeTab.data?.delimiter,
+                headers: activeTab.data?.headers,
+                rowCount: activeTab.data?.rows.length,
+                errorMessage: errors[activeTab.id] ?? null,
+              },
+            })}
+          >
+            Report issue
+          </button>
         </div>
       )}
 
@@ -298,7 +361,8 @@ export function DataPreview() {
             filePath={activeTab.filePath}
             headers={activeTab.data.headers}
             rows={activeTab.data.rows}
-            onExportFiltered={exportFiltered}
+            onAddFilteredToPipeline={addFilteredToPipeline}
+            onExportFilteredFile={(nextRows) => void exportFilteredFile(nextRows)}
           />
         )}
 

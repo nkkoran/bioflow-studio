@@ -59,6 +59,25 @@ interface Window {
       setSecret: (key: string, value: string) => Promise<void>
       deleteSecret: (key: string) => Promise<void>
     }
+    dnx: {
+      bootstrap: (options?: { force?: boolean }) => Promise<{ ok: boolean }>
+      auth: (args: { token?: string; projectId?: string }) => Promise<{ ok: boolean }>
+      listProjects: () => Promise<import('./types/dnx').DnxProject[]>
+      listInstanceTypes: () => Promise<import('./types/dnx').DnxInstanceSpec[]>
+      listFiles: (args: { projectId: string; path: string }) => Promise<import('./types/dnx').DnxRemoteFileEntry[]>
+      stat: (args: { projectId: string; path: string }) => Promise<import('./types/dnx').DnxFileStat>
+      upload: (args: { projectId: string; localPath: string; folder: string }) => Promise<{ fileId: string }>
+      download: (args: { projectId: string; fileId: string; localPath: string }) => Promise<{ path: string }>
+      run: (args: Record<string, unknown>) => Promise<{ jobId: string }>
+      jobStatus: (args: { jobId: string }) => Promise<import('./types/dnx').DnxJobStatus>
+      cancel: (args: { jobId: string }) => Promise<{ ok: boolean }>
+      ensureApplet: (args: Record<string, unknown>) => Promise<{ appletId: string; hash: string }>
+      sparkExtract: (args: Record<string, unknown>) => Promise<{ jobId: string }>
+      onBridgeStatus: (callback: (data: import('./types/dnx').DnxBridgeStatusEvent) => void) => () => void
+      onBootstrapProgress: (callback: (data: import('./types/dnx').DnxBridgeStatusEvent) => void) => () => void
+      onTransferProgress: (callback: (data: import('./types/dnx').DnxTransferProgress) => void) => () => void
+      onAppletInstallProgress: (callback: (data: import('./types/dnx').DnxAppletInstallProgress) => void) => () => void
+    }
     local: {
       ls: (dirPath: string) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (filePath: string) => Promise<import('./types/files').FileStat>
@@ -78,7 +97,7 @@ interface Window {
       openDirectory: (options?: { defaultPath?: string }) => Promise<string | null>
     }
     pipeline: {
-      run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string) => Promise<{ runId: string }>
+      run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string, workspace?: import('./types/pipeline').RunState['workspace']) => Promise<{ runId: string }>
       cancel: (runId: string) => Promise<void>
       cancelNode: (runId: string, nodeId: string) => Promise<void>
       cancelJob: (connectionId: string, jobId: string) => Promise<void>
@@ -108,6 +127,7 @@ interface Window {
       listModules: (connectionId: string, query?: string, options?: { force?: boolean }) => Promise<import('./types/ssh').ClusterModulesResult>
       getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) => Promise<import('./types/ssh').LearnedResourceSummary | null>
       resetLearnedResources: (connectionId: string, toolId: string) => Promise<void>
+      clearCaches: (connectionId: string) => Promise<{ ok: boolean }>
     }
     annovar: {
       status: (connectionId: string, humandbPath: string, buildver: string, databases: string[]) => Promise<import('./types/annotation').AnnovarStatusResult>
@@ -122,7 +142,8 @@ interface Window {
       ) => Promise<{ items: Array<{ key: string; path: string }>; missing: string[] }>
     }
     app: {
-      onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' }) => void) => () => void
+      checkForUpdates: () => Promise<{ ok: boolean }>
+      onMenuCommand: (callback: (data: { command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection' }) => void) => () => void
     }
   }
 }

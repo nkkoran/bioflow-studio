@@ -70,6 +70,18 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
               <MiddleEllipsis value={nodeData.path} max={40} />
             </div>
           )}
+          {isInput && nodeData.split?.items?.length && (
+            <div className="mt-1 flex max-h-16 flex-wrap gap-1 overflow-hidden">
+              {nodeData.split.items.slice(0, 6).map((item) => (
+                <span key={item.key} className="rounded bg-amber-500/10 px-1 py-0.5 text-[9px] text-amber-200" title={item.path}>
+                  {item.key}
+                </span>
+              ))}
+              {nodeData.split.items.length > 6 && (
+                <span className="rounded bg-bg-tertiary px-1 py-0.5 text-[9px] text-text-muted">+{nodeData.split.items.length - 6}</span>
+              )}
+            </div>
+          )}
           {isInput && fanOutCount > 1 && (
             <div className="mt-1 text-[10px] text-accent">
               Fan-out: {fanOutCount} downstream inputs

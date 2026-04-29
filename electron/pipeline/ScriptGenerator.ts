@@ -15,8 +15,10 @@ import type {
   MergeStrategy,
   FileType,
   ToolFlagBlock,
+  AnalysisOptionState,
 } from '../../src/types/pipeline'
-import { activeFlagBlocks, getFlagDef, toolUsesFlagBuilder } from '../../src/lib/flagRegistry'
+import { activeFlagBlocks, blockFlag, getFlagDef, toolUsesFlagBuilder, CUSTOM_FLAG_ID } from '../../src/lib/flagRegistry'
+import { getActiveToolInputs, getAnalysisOptionDefs, normalizeAnalysisOptions } from '../../src/lib/analysisOptions'
 import type { AxedValue, AxisPlan } from './axisPlanner'
 
 export interface ConnectionDefaults {
@@ -28,6 +30,9 @@ export interface ConnectionDefaults {
   annovarDbPath?: string
   vepPath?: string
   vepCachePath?: string
+  shellCapabilities?: {
+    awk: boolean
+  }
 }
 
 export interface ToolScriptOpts {
@@ -54,6 +59,36 @@ export interface ToolScriptResult {
   arraySize?: number          // present when SLURM --array was emitted
 }
 
+function buildSlurmHeader(args: {
+  slug: string
+  logDir: string
+  cpus: number
+  memGB: number
+  timeH: number
+  account?: string
+  partition?: string
+  arraySpec?: string
+  jobSuffix?: string
+}): string[] {
+  const lines: string[] = ['#!/bin/bash']
+  const jobName = args.jobSuffix ? `bioflow-${args.slug}-${args.jobSuffix}` : `bioflow-${args.slug}`
+  lines.push(`#SBATCH --job-name=${jobName}`)
+  if (args.arraySpec) {
+    lines.push(`#SBATCH --array=${args.arraySpec}`)
+    lines.push(`#SBATCH --output=${args.logDir}/${args.slug}-%A_%a.out`)
+    lines.push(`#SBATCH --error=${args.logDir}/${args.slug}-%A_%a.err`)
+  } else {
+    lines.push(`#SBATCH --output=${args.logDir}/${args.slug}-%j.out`)
+    lines.push(`#SBATCH --error=${args.logDir}/${args.slug}-%j.err`)
+  }
+  lines.push(`#SBATCH --cpus-per-task=${args.cpus}`)
+  lines.push(`#SBATCH --mem=${args.memGB}G`)
+  lines.push(`#SBATCH --time=${formatTime(args.timeH)}`)
+  if (args.account) lines.push(`#SBATCH --account=${args.account}`)
+  if (args.partition) lines.push(`#SBATCH --partition=${args.partition}`)
+  return lines
+}
+
 export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   const { nodeId, tool, nodeData, axisPlan, outputDir, logDir, connectionDefaults } = opts
   const slug = opts.nodeSlug ?? nodeId
@@ -68,22 +103,16 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   const partition = slurm.partition ?? connectionDefaults?.partition
   const account = connectionDefaults?.account
 
-  const lines: string[] = []
-  lines.push('#!/bin/bash')
-  lines.push(`#SBATCH --job-name=bioflow-${slug}`)
-  if (isArray) {
-    lines.push(`#SBATCH --array=${arrayRuntime!.arraySpec}`)
-    lines.push(`#SBATCH --output=${logDir}/${slug}-%A_%a.out`)
-    lines.push(`#SBATCH --error=${logDir}/${slug}-%A_%a.err`)
-  } else {
-    lines.push(`#SBATCH --output=${logDir}/${slug}-%j.out`)
-    lines.push(`#SBATCH --error=${logDir}/${slug}-%j.err`)
-  }
-  lines.push(`#SBATCH --cpus-per-task=${cpus}`)
-  lines.push(`#SBATCH --mem=${memGB}G`)
-  lines.push(`#SBATCH --time=${formatTime(timeH)}`)
-  if (account) lines.push(`#SBATCH --account=${account}`)
-  if (partition) lines.push(`#SBATCH --partition=${partition}`)
+  const lines: string[] = buildSlurmHeader({
+    slug,
+    logDir,
+    cpus,
+    memGB,
+    timeH,
+    account,
+    partition,
+    arraySpec: isArray ? arrayRuntime!.arraySpec : undefined,
+  })
   lines.push('')
   lines.push('set -euo pipefail')
   lines.push('')
@@ -128,49 +157,48 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
   }
 
+  const customTemplate = typeof (tool as ToolDef & { customCommandTemplate?: unknown }).customCommandTemplate === 'string'
+    ? String((tool as ToolDef & { customCommandTemplate?: unknown }).customCommandTemplate)
+    : ''
+  if (customTemplate.trim()) {
+    lines.push(renderCommandTemplate(customTemplate, nodeData, axisPlan, outputDir, slug, isArray))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (nodeData.commandOverride?.trim()) {
+    lines.push(nodeData.commandOverride.trim())
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
   // Compose the command invocation.
   const cmdParts: string[] = [tool.command]
-  const useFlagBlocks = toolUsesFlagBuilder(tool.id) && activeFlagBlocks(tool.id, nodeData.flagBlocks).length > 0
-
-  if (useFlagBlocks) {
-    const mainInput = tool.inputs.find((port) => port.id === 'input')
-    if (mainInput) {
-      const val = axisPlan.inputs[mainInput.id]
-      if (val) {
-        if (isArray && mainInput.id === axisPlan.arrayPortId) {
-          const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
-          cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${mainInput.id}`, firstPath)}`)
-        } else {
-          renderPortArgs(tool, mainInput, val, cmdParts)
-        }
-      }
-    }
-    cmdParts.push(...emitFlagBlocks(tool, nodeData, axisPlan, isArray))
-  } else {
-    // Params first (in registry order for stability)
-    for (const p of tool.params) {
-      const raw = nodeData.paramValues?.[p.name]
-      appendParamArgs(tool, p, raw, cmdParts)
-    }
-
-    // Inputs, in the order the tool declares them
-    for (const port of tool.inputs) {
-      const val = axisPlan.inputs[port.id]
-      if (!val) continue
-      const flag = portFlag(tool, port)
-      if (isArray && port.id === axisPlan.arrayPortId) {
-        // One value per task, read from the pre-declared array variable
-        if (isPlinkInputPort(tool, port)) {
-          const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
-          cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${port.id}`, firstPath)}`)
-        } else {
-          cmdParts.push(flag ? `${flag} "$i_${port.id}"` : `"$i_${port.id}"`)
-        }
-        continue
-      }
-      renderPortArgs(tool, port, val, cmdParts)
-    }
+  const commandNodeData: ToolNodeData = {
+    ...nodeData,
+    analysisOptions: normalizeAnalysisOptions(tool, nodeData, { connectedPortIds: Object.keys(axisPlan.inputs) }),
   }
+  const activeInputs = getActiveToolInputs(tool, commandNodeData)
+  const optionDefs = getAnalysisOptionDefs(tool)
+  const optionFilePorts = new Set(optionDefs.filter((def) => def.flag && (def.kind === 'file' || def.kind === 'compound')).map((def) => def.filePortId).filter(Boolean))
+
+  for (const port of activeInputs) {
+    if (optionFilePorts.has(port.id)) continue
+    const val = axisPlan.inputs[port.id]
+    if (!val) continue
+    const flag = portFlag(tool, port)
+    if (isArray && port.id === axisPlan.arrayPortId) {
+      if (isPlinkInputPort(tool, port)) {
+        const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
+        cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${port.id}`, firstPath)}`)
+      } else {
+        cmdParts.push(flag ? `${flag} "$i_${port.id}"` : `"$i_${port.id}"`)
+      }
+      continue
+    }
+    renderPortArgs(tool, port, val, cmdParts)
+  }
+  cmdParts.push(...emitAnalysisOptions(tool, commandNodeData, axisPlan, isArray))
 
   // Output paths — one output flag if present.
   // Convention: many tools use --out <prefix>; we fall back to `-o` then plain.
@@ -184,6 +212,30 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
 
   const outputs: Record<string, AxedValue> = axisPlan.outputs
   return { script: lines.join('\n'), outputs, arraySize }
+}
+
+function renderCommandTemplate(
+  template: string,
+  nodeData: ToolNodeData,
+  axisPlan: AxisPlan,
+  outputDir: string,
+  slug: string,
+  isArray: boolean,
+): string {
+  const firstInput = Object.values(axisPlan.inputs)[0]
+  const input =
+    !firstInput ? ''
+    : isArray && firstInput.kind === 'array' ? '$i_input'
+    : firstInput.kind === 'single' ? firstInput.path
+    : firstInput.paths[0] ?? ''
+  const output = resolveShellOutputPath(axisPlan, outputDir, slug, isArray) ?? `${outputDir}/${slug}.output`
+  return template
+    .replaceAll('{{input}}', shellQuote(input))
+    .replaceAll('{{output}}', shellQuote(output))
+    .replace(/\{\{param:([^}]+)\}\}/g, (_match, name) => {
+      const value = nodeData.paramValues?.[String(name).trim()]
+      return value == null || value === '' ? '' : shellQuote(String(value))
+    })
 }
 
 function renderCustomShellScript(opts: {
@@ -258,9 +310,12 @@ function renderAnnovarCommand(opts: {
   const script = scriptDir ? `${scriptDir.replace(/\/+$/, '')}/table_annovar.pl` : 'table_annovar.pl'
   const humandb = stringParam(nodeData, 'annotationDbPath') || connectionDefaults?.annovarDbPath || `${connectionDefaults?.toolsRoot ?? '~/bioflow/tools'}/annovar/humandb`
   const build = stringParam(nodeData, 'buildver') || 'hg38'
-  const protocol = stringParam(nodeData, 'protocol') || 'refGene,avsnp150'
+  const protocol = stringParam(nodeData, 'protocol') || 'refGeneWithVer,avsnp151'
   const operation = stringParam(nodeData, 'operation') || 'g,f'
+  const arg = stringParam(nodeData, 'arg')
+  const xref = stringParam(nodeData, 'xref')
   const nastring = stringParam(nodeData, 'nastring') || '.'
+  const intronhgvs = stringParam(nodeData, 'intronhgvs')
   const prefix = stripExt(output)
 
   const parts = [
@@ -274,7 +329,12 @@ function renderAnnovarCommand(opts: {
     '--operation', shellQuote(operation),
     '--nastring', shellQuote(nastring),
   ]
-  if (nodeData.paramValues?.remove !== false) parts.push('--remove')
+  if (arg) parts.push('--arg', shellQuote(arg))
+  if (xref) parts.push('--xref', shellQuote(xref))
+  if (booleanParam(nodeData, 'polish', true)) parts.push('--polish')
+  if (intronhgvs) parts.push('--intronhgvs', shellQuote(intronhgvs))
+  if (booleanParam(nodeData, 'otherinfo', false)) parts.push('--otherinfo')
+  if (nodeData.paramValues?.remove === true) parts.push('--remove')
   if (nodeData.paramValues?.vcfinput !== false) parts.push('--vcfinput')
   return parts.join(' \\\n  ')
 }
@@ -293,25 +353,57 @@ function renderVepCommand(opts: {
   const rawToolPath = stringParam(nodeData, 'toolPath') || connectionDefaults?.vepPath || 'vep'
   const command = rawToolPath.endsWith('/') ? `${rawToolPath}vep` : rawToolPath
   const cache = stringParam(nodeData, 'annotationDbPath') || connectionDefaults?.vepCachePath || `${connectionDefaults?.toolsRoot ?? '~/bioflow/tools'}/vep/cache`
+  const species = stringParam(nodeData, 'species') || 'homo_sapiens'
   const assembly = stringParam(nodeData, 'assembly') || 'GRCh38'
+  const fasta = stringParam(nodeData, 'fasta')
   const fork = stringParam(nodeData, 'fork') || '4'
+  const bufferSize = stringParam(nodeData, 'buffer_size')
 
   const parts = [
     shellQuote(command),
     '--input_file', shellExpr(input),
     '--output_file', shellExpr(output),
+    '--species', shellQuote(species),
     '--assembly', shellQuote(assembly),
     '--dir_cache', shellQuote(cache),
     '--fork', shellQuote(fork),
     '--force_overwrite',
   ]
+  if (fasta) parts.push('--fasta', shellQuote(fasta))
+  if (bufferSize) parts.push('--buffer_size', shellQuote(bufferSize))
   if (nodeData.paramValues?.cache !== false) parts.push('--cache')
   if (nodeData.paramValues?.offline !== false) parts.push('--offline')
   if (nodeData.paramValues?.everything === true) parts.push('--everything')
   if (nodeData.paramValues?.check_existing === true) parts.push('--check_existing')
   if (nodeData.paramValues?.af_gnomad === true) parts.push('--af_gnomad')
+  if (booleanParam(nodeData, 'symbol', false)) parts.push('--symbol')
+  if (booleanParam(nodeData, 'canonical', false)) parts.push('--canonical')
+  if (booleanParam(nodeData, 'mane', false)) parts.push('--mane')
+  if (booleanParam(nodeData, 'tsl', false)) parts.push('--tsl')
+  if (booleanParam(nodeData, 'appris', false)) parts.push('--appris')
+  if (booleanParam(nodeData, 'hgvs', false)) parts.push('--hgvs')
+  if (booleanParam(nodeData, 'protein', false)) parts.push('--protein')
+  if (booleanParam(nodeData, 'biotype', false)) parts.push('--biotype')
+  if (booleanParam(nodeData, 'variant_class', false)) parts.push('--variant_class')
+  if (booleanParam(nodeData, 'numbers', false)) parts.push('--numbers')
+  if (booleanParam(nodeData, 'domains', false)) parts.push('--domains')
+  if (booleanParam(nodeData, 'gene_phenotype', false)) parts.push('--gene_phenotype')
+  if (booleanParam(nodeData, 'pubmed', false)) parts.push('--pubmed')
+  const sift = stringParam(nodeData, 'sift')
+  if (sift) parts.push('--sift', shellQuote(sift))
+  const polyphen = stringParam(nodeData, 'polyphen')
+  if (polyphen) parts.push('--polyphen', shellQuote(polyphen))
+  if (booleanParam(nodeData, 'pick', false)) parts.push('--pick')
+  if (booleanParam(nodeData, 'pick_allele', false)) parts.push('--pick_allele')
+  const pickOrder = stringParam(nodeData, 'pick_order')
+  if (pickOrder) parts.push('--pick_order', shellQuote(pickOrder))
   const nearest = stringParam(nodeData, 'nearest')
   if (nearest) parts.push('--nearest', shellQuote(nearest))
+  if (booleanParam(nodeData, 'coding_only', false)) parts.push('--coding_only')
+  if (booleanParam(nodeData, 'no_intergenic', false)) parts.push('--no_intergenic')
+  if (booleanParam(nodeData, 'check_ref', false)) parts.push('--check_ref')
+  if (booleanParam(nodeData, 'safe', false)) parts.push('--safe')
+  if (booleanParam(nodeData, 'no_stats', false)) parts.push('--no_stats')
   const plugin = stringParam(nodeData, 'plugin')
   if (plugin) parts.push('--plugin', shellQuote(plugin))
   return parts.join(' \\\n  ')
@@ -320,6 +412,11 @@ function renderVepCommand(opts: {
 function stringParam(nodeData: ToolNodeData, name: string): string {
   const value = nodeData.paramValues?.[name]
   return value === undefined || value === null ? '' : String(value).trim()
+}
+
+function booleanParam(nodeData: ToolNodeData, name: string, fallback = false): boolean {
+  const value = nodeData.paramValues?.[name]
+  return value === undefined ? fallback : Boolean(value)
 }
 
 interface ArrayRuntime {
@@ -571,6 +668,90 @@ function splitPlinkListValue(raw: unknown): string[] {
     .filter(Boolean)
 }
 
+function emitAnalysisOptions(
+  tool: ToolDef,
+  nodeData: ToolNodeData,
+  axisPlan: AxisPlan,
+  isArray: boolean,
+): string[] {
+  const parts: string[] = []
+  const defs = getAnalysisOptionDefs(tool)
+  const defsById = new Map(defs.map((def) => [def.id, def]))
+  const options = normalizeAnalysisOptions(tool, nodeData).filter((option) => option.enabled)
+
+  for (const option of options) {
+    const def = defsById.get(option.optionId)
+    if (!def) {
+      const flag = option.customFlag?.trim()
+      if (!flag) continue
+      if (option.customInputKind === 'file') {
+        const emitted = emitFileInputFlag(flag, option.source ?? option.value, undefined, axisPlan, isArray)
+        if (emitted) parts.push(emitted)
+      } else {
+        const emitted = emitValueFlag(flag, option.value, false, true)
+        if (emitted) parts.push(emitted)
+      }
+      continue
+    }
+    if (!def.flag) continue
+
+    if (tool.id === 'plink2.assoc' && def.id === 'glm') {
+      parts.push(emitAnalysisGlmFlag(option))
+      continue
+    }
+    if (tool.id === 'plink2.score' && def.id === 'score') {
+      const emitted = emitAnalysisScoreFlag(def.flag, option, axisPlan, isArray)
+      if (emitted) parts.push(emitted)
+      continue
+    }
+
+    if (def.kind === 'switch') {
+      parts.push(def.flag)
+      continue
+    }
+    if (def.kind === 'file') {
+      const emitted = emitFileInputFlag(def.flag, option.source ?? option.value, def.filePortId ?? def.sourcePortId, axisPlan, isArray)
+      if (emitted) parts.push(emitted)
+      continue
+    }
+    if (def.kind === 'list' || def.multiValue) {
+      const emitted = emitValueFlag(def.flag, option.source ?? option.value, true)
+      if (emitted) parts.push(emitted)
+      continue
+    }
+    const emitted = emitValueFlag(def.flag, option.source ?? option.value)
+    if (emitted) parts.push(emitted)
+  }
+
+  return parts
+}
+
+function emitAnalysisGlmFlag(option: AnalysisOptionState): string {
+  const mode = typeof option.value === 'string' && option.value.trim() ? option.value.trim() : 'firth-fallback'
+  const extras = [mode]
+  for (const id of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
+    if (option.subOptions?.[id]?.enabled) extras.push(id)
+  }
+  return `--glm ${extras.join(' ')}`
+}
+
+function emitAnalysisScoreFlag(
+  flag: string,
+  option: AnalysisOptionState,
+  axisPlan: AxisPlan,
+  isArray: boolean,
+): string | null {
+  const fileArg = resolveFileInputArg(option.source ?? option.value, 'score', axisPlan, isArray)
+  if (!fileArg) return null
+  const extras: string[] = []
+  const scoreCols = emitValueFlag('', option.subOptions?.['score-col-nums']?.value, true)?.trim()
+  if (scoreCols) extras.push(scoreCols)
+  for (const id of ['header', 'center', 'variance-standardize', 'no-mean-imputation']) {
+    if (option.subOptions?.[id]?.enabled) extras.push(id)
+  }
+  return `${flag} ${fileArg}${extras.length ? ` ${extras.join(' ')}` : ''}`
+}
+
 function emitFlagBlocks(
   tool: ToolDef,
   nodeData: ToolNodeData,
@@ -584,8 +765,20 @@ function emitFlagBlocks(
   for (const block of blocks) {
     const def = getFlagDef(tool.id, block.flagId)
     if (!def) continue
+    const renderedFlag = blockFlag(tool.id, block)
+    if (!renderedFlag) continue
+
+    if (tool.id === 'plink2.assoc' && ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno'].includes(def.id)) {
+      continue
+    }
 
     if (tool.id === 'plink2.score' && ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation'].includes(def.id)) {
+      continue
+    }
+
+    if (tool.id === 'plink2.assoc' && def.id === 'glm') {
+      const emitted = emitAssocGlmFlag(block.value, byId)
+      if (emitted) parts.push(emitted)
       continue
     }
 
@@ -596,21 +789,45 @@ function emitFlagBlocks(
     }
 
     if (def.kind === 'toggle') {
-      parts.push(def.flag)
+      parts.push(renderedFlag)
       continue
     }
 
     if (def.kind === 'fileInput') {
-      const emitted = emitFileInputFlag(def.flag, block.value, def.sourcePortId, axisPlan, isArray)
+      const emitted = emitFileInputFlag(renderedFlag, block.value, def.sourcePortId, axisPlan, isArray)
       if (emitted) parts.push(emitted)
       continue
     }
 
-    const emitted = emitValueFlag(def.flag, block.value, def.multiValue)
+    if (block.flagId === CUSTOM_FLAG_ID) {
+      const emitted = block.customInputKind === 'file'
+        ? emitFileInputFlag(renderedFlag, block.value, undefined, axisPlan, isArray)
+        : emitValueFlag(renderedFlag, block.value, false, true)
+      if (emitted) parts.push(emitted)
+      else parts.push(renderedFlag)
+      continue
+    }
+
+    const emitted = emitValueFlag(renderedFlag, block.value, def.multiValue)
     if (emitted) parts.push(emitted)
   }
 
   return parts
+}
+
+function emitAssocGlmFlag(
+  value: unknown,
+  byId: Map<string, ToolFlagBlock>,
+): string | null {
+  const extras: string[] = []
+  const mode = typeof value === 'string' && value.trim()
+    ? value.trim()
+    : 'firth-fallback'
+  extras.push(mode)
+  for (const modifier of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
+    if (byId.get(modifier)?.enabled) extras.push(modifier)
+  }
+  return `--glm${extras.length ? ` ${extras.join(' ')}` : ''}`
 }
 
 function emitScoreFlag(
@@ -665,16 +882,16 @@ function resolveFileInputArg(
   return shellQuote(String(value))
 }
 
-function emitValueFlag(flag: string, value: unknown, multiValue = false): string | null {
+function emitValueFlag(flag: string, value: unknown, multiValue = false, allowBareFlag = false): string | null {
   if (value && typeof value === 'object' && 'kind' in (value as Record<string, unknown>)) {
     const source = value as { value?: string }
-    if (!source.value?.trim()) return null
+    if (!source.value?.trim()) return allowBareFlag ? flag : null
     const rendered = multiValue
       ? splitPlinkListValue(source.value).map(shellQuote).join(' ')
       : shellQuote(source.value.trim())
     return flag ? `${flag} ${rendered}` : rendered
   }
-  if (value === undefined || value === null || value === '') return null
+  if (value === undefined || value === null || value === '') return allowBareFlag ? flag : null
   if (multiValue) {
     const rendered = splitPlinkListValue(value).map(shellQuote).join(' ')
     return rendered ? (flag ? `${flag} ${rendered}` : rendered) : null
@@ -800,22 +1017,17 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   const inputPaths = input?.kind === 'array' ? input.paths : input?.kind === 'multi' ? input.paths : input ? [input.path] : []
   const outputPaths = output?.kind === 'array' ? output.paths : output?.kind === 'multi' ? output.paths : output ? [output.path] : []
 
-  const lines: string[] = []
-  lines.push('#!/bin/bash')
-  lines.push(`#SBATCH --job-name=bioflow-${slug}-transform`)
-  if (isArray) {
-    lines.push(`#SBATCH --array=0-${arraySize! - 1}`)
-    lines.push(`#SBATCH --output=${logDir}/${slug}-%A_%a.out`)
-    lines.push(`#SBATCH --error=${logDir}/${slug}-%A_%a.err`)
-  } else {
-    lines.push(`#SBATCH --output=${logDir}/${slug}-%j.out`)
-    lines.push(`#SBATCH --error=${logDir}/${slug}-%j.err`)
-  }
-  lines.push(`#SBATCH --cpus-per-task=${cpus}`)
-  lines.push(`#SBATCH --mem=${memGB}G`)
-  lines.push(`#SBATCH --time=${formatTime(timeH)}`)
-  if (account) lines.push(`#SBATCH --account=${account}`)
-  if (partition) lines.push(`#SBATCH --partition=${partition}`)
+  const lines: string[] = buildSlurmHeader({
+    slug,
+    logDir,
+    cpus,
+    memGB,
+    timeH,
+    account,
+    partition,
+    arraySpec: isArray ? `0-${arraySize! - 1}` : undefined,
+    jobSuffix: 'transform',
+  })
   lines.push('')
   lines.push('set -euo pipefail')
   lines.push('')
@@ -832,6 +1044,136 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
     lines.push('OUT="${OUTPUTS[0]}"')
   }
   lines.push('')
+  if (canUseAwkTransformFastPath(transformData, inputPaths, connectionDefaults)) {
+    lines.push(...renderTransformAwkScript(transformData))
+  } else {
+    lines.push(...renderTransformPythonScript(transformData))
+  }
+  lines.push('')
+  return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+}
+
+function canUseAwkTransformFastPath(
+  transformData: TransformNodeData,
+  inputPaths: string[],
+  connectionDefaults?: ConnectionDefaults,
+): boolean {
+  if (!connectionDefaults?.shellCapabilities?.awk) return false
+  if (transformData.preset) return false
+  if (transformData.fileType === 'csv') return false
+  if (inputPaths.some((path) => path.toLowerCase().endsWith('.csv'))) return false
+  return (transformData.filters ?? []).every((rule) => rule.op !== 'regex')
+}
+
+function renderTransformAwkScript(transformData: TransformNodeData): string[] {
+  const selectedColumns = transformData.selectedColumns ?? []
+  const filters = transformData.filters ?? []
+  const renames = transformData.renames ?? []
+
+  const lines: string[] = []
+  lines.push('# Fast path: awk handles simple TSV/TXT projection and filtering.')
+  lines.push(`awk -F '\\t' -v OFS='\\t' -f - "$IN" > "$OUT" <<'AWK'`)
+  lines.push('BEGIN {')
+  lines.push(`  selectedCount = ${selectedColumns.length}`)
+  selectedColumns.forEach((column, idx) => {
+    lines.push(`  selectedNames[${idx + 1}] = ${awkStringLiteral(column)}`)
+  })
+  lines.push(`  renameCount = ${renames.length}`)
+  renames.forEach((rename, idx) => {
+    lines.push(`  renameFrom[${idx + 1}] = ${awkStringLiteral(rename.from)}`)
+    lines.push(`  renameTo[${idx + 1}] = ${awkStringLiteral(rename.to || rename.from)}`)
+  })
+  lines.push(`  filterCount = ${filters.length}`)
+  filters.forEach((filter, idx) => {
+    lines.push(`  filterColumn[${idx + 1}] = ${awkStringLiteral(filter.column)}`)
+    lines.push(`  filterOp[${idx + 1}] = ${awkStringLiteral(filter.op)}`)
+    lines.push(`  filterValue[${idx + 1}] = ${awkStringLiteral(filter.value ?? '')}`)
+    lines.push(`  filterJoin[${idx + 1}] = ${awkStringLiteral(filter.join ?? 'and')}`)
+  })
+  lines.push('}')
+  lines.push('function trim(value) {')
+  lines.push('  gsub(/^[ \\t\\r\\n]+|[ \\t\\r\\n]+$/, "", value)')
+  lines.push('  return value')
+  lines.push('}')
+  lines.push('function is_number(value) {')
+  lines.push('  return value ~ /^[-+]?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))([eE][-+]?[0-9]+)?$/')
+  lines.push('}')
+  lines.push('function matches_rule(raw, op, value, lhs, rhs) {')
+  lines.push('  if (op == "contains") return index(tolower(raw), tolower(value)) > 0')
+  lines.push('  if (op == "equals") return raw == value')
+  lines.push('  if (op == "notEquals") return raw != value')
+  lines.push('  if (op == "notEmpty") return trim(raw) != ""')
+  lines.push('  if (!is_number(raw) || !is_number(value)) return 0')
+  lines.push('  lhs = raw + 0')
+  lines.push('  rhs = value + 0')
+  lines.push('  if (op == "gt") return lhs > rhs')
+  lines.push('  if (op == "gte") return lhs >= rhs')
+  lines.push('  if (op == "lt") return lhs < rhs')
+  lines.push('  if (op == "lte") return lhs <= rhs')
+  lines.push('  return 0')
+  lines.push('}')
+  lines.push('function row_matches(   idx, raw, current, result, joiner, i) {')
+  lines.push('  if (filterCount == 0) return 1')
+  lines.push('  idx = colIndex[filterColumn[1]]')
+  lines.push('  raw = (idx > 0 && idx <= NF) ? $idx : ""')
+  lines.push('  result = matches_rule(raw, filterOp[1], filterValue[1])')
+  lines.push('  for (i = 2; i <= filterCount; i++) {')
+  lines.push('    idx = colIndex[filterColumn[i]]')
+  lines.push('    raw = (idx > 0 && idx <= NF) ? $idx : ""')
+  lines.push('    current = matches_rule(raw, filterOp[i], filterValue[i])')
+  lines.push('    joiner = filterJoin[i]')
+  lines.push('    if (joiner == "or") result = result || current')
+  lines.push('    else result = result && current')
+  lines.push('  }')
+  lines.push('  return result')
+  lines.push('}')
+  lines.push('NR == 1 {')
+  lines.push('  sourceCount = NF')
+  lines.push('  for (i = 1; i <= NF; i++) {')
+  lines.push('    sourceField[i] = $i')
+  lines.push('    colIndex[$i] = i')
+  lines.push('  }')
+  lines.push('  for (i = 1; i <= renameCount; i++) renameMap[renameFrom[i]] = renameTo[i]')
+  lines.push('  activeCount = 0')
+  lines.push('  if (selectedCount > 0) {')
+  lines.push('    for (i = 1; i <= selectedCount; i++) {')
+  lines.push('      idx = colIndex[selectedNames[i]]')
+  lines.push('      if (idx > 0) {')
+  lines.push('        activeCount++')
+  lines.push('        activeIndex[activeCount] = idx')
+  lines.push('        activeName[activeCount] = selectedNames[i]')
+  lines.push('      }')
+  lines.push('    }')
+  lines.push('  }')
+  lines.push('  if (activeCount == 0) {')
+  lines.push('    for (i = 1; i <= sourceCount; i++) {')
+  lines.push('      activeCount++')
+  lines.push('      activeIndex[activeCount] = i')
+  lines.push('      activeName[activeCount] = sourceField[i]')
+  lines.push('    }')
+  lines.push('  }')
+  lines.push('  for (i = 1; i <= activeCount; i++) {')
+  lines.push('    header = activeName[i]')
+  lines.push('    outName = (header in renameMap) ? renameMap[header] : header')
+  lines.push('    printf "%s%s", outName, (i < activeCount ? OFS : ORS)')
+  lines.push('  }')
+  lines.push('  next')
+  lines.push('}')
+  lines.push('{')
+  lines.push('  if (!row_matches()) next')
+  lines.push('  for (i = 1; i <= activeCount; i++) {')
+  lines.push('    idx = activeIndex[i]')
+  lines.push('    value = (idx > 0 && idx <= NF) ? $idx : ""')
+  lines.push('    printf "%s%s", value, (i < activeCount ? OFS : ORS)')
+  lines.push('  }')
+  lines.push('}')
+  lines.push('AWK')
+  return lines
+}
+
+function renderTransformPythonScript(transformData: TransformNodeData): string[] {
+  if (transformData.preset) return renderPresetTransformPythonScript(transformData)
+  const lines: string[] = []
   lines.push(`python3 - <<'PY' "$IN" "$OUT"`)
   lines.push('import csv, json, re, sys')
   lines.push('in_path, out_path = sys.argv[1], sys.argv[2]')
@@ -885,8 +1227,109 @@ export function generateTransformScript(opts: TransformScriptOpts): TransformScr
   lines.push('        if matches_filters(row, config.get("filters", [])):')
   lines.push('            writer.writerow({rename.get(c, c): row.get(c, "") for c in fields})')
   lines.push('PY')
-  lines.push('')
-  return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  return lines
+}
+
+function renderPresetTransformPythonScript(transformData: TransformNodeData): string[] {
+  const lines: string[] = []
+  lines.push(`python3 - <<'PY' "$IN" "$OUT"`)
+  lines.push('import csv, json, math, sys')
+  lines.push('in_path, out_path = sys.argv[1], sys.argv[2]')
+  lines.push(`config = json.loads(${JSON.stringify(JSON.stringify({
+    preset: transformData.preset,
+    presetConfig: transformData.presetConfig ?? {},
+    roleMappings: transformData.roleMappings ?? {},
+    selectedColumns: transformData.selectedColumns ?? [],
+    renames: transformData.renames ?? [],
+    fileType: transformData.fileType,
+  }))})`)
+  lines.push('def delimiter(path, preferred):')
+  lines.push('    if preferred == "csv" or path.lower().endswith(".csv"): return ","')
+  lines.push('    return "\\t"')
+  lines.push('def mapped(role_key):')
+  lines.push('    mapping = (config.get("roleMappings") or {}).get(role_key) or {}')
+  lines.push('    return mapping.get("column") or ""')
+  lines.push('def selected_fields(source_fields):')
+  lines.push('    requested = [c for c in config.get("selectedColumns", []) if c in source_fields]')
+  lines.push('    return requested or list(source_fields)')
+  lines.push('def rename_map():')
+  lines.push('    return {r.get("from"): (r.get("to") or r.get("from")) for r in config.get("renames", [])}')
+  lines.push('preset = config.get("preset")')
+  lines.push('in_delim = delimiter(in_path, "")')
+  lines.push('out_delim = delimiter(out_path, config.get("fileType", ""))')
+  lines.push('with open(in_path, newline="") as src, open(out_path, "w", newline="") as dst:')
+  lines.push('    reader = csv.DictReader(src, delimiter=in_delim)')
+  lines.push('    source_fields = reader.fieldnames or []')
+  lines.push('    rename = rename_map()')
+  lines.push('    if preset == "cohort-filter":')
+  lines.push('        sample_col = mapped("sample_id")')
+  lines.push('        family_col = mapped("family_id")')
+  lines.push('        cohort_col = mapped("cohort")')
+  lines.push('        match_value = str((config.get("presetConfig") or {}).get("matchValue", ""))')
+  lines.push('        artifact_mode = str((config.get("presetConfig") or {}).get("artifactMode", "filtered-table"))')
+  lines.push('        if artifact_mode == "keep-file":')
+  lines.push('            writer = csv.writer(dst, delimiter="\\t", lineterminator="\\n")')
+  lines.push('            for row in reader:')
+  lines.push('                if row.get(cohort_col, "") != match_value:')
+  lines.push('                    continue')
+  lines.push('                iid = row.get(sample_col, "").strip()')
+  lines.push('                if not iid:')
+  lines.push('                    continue')
+  lines.push('                fid = row.get(family_col, "").strip() or iid')
+  lines.push('                writer.writerow([fid, iid])')
+  lines.push('        else:')
+  lines.push('            fields = selected_fields(source_fields)')
+  lines.push('            out_fields = [rename.get(c, c) for c in fields]')
+  lines.push('            writer = csv.DictWriter(dst, fieldnames=out_fields, delimiter=out_delim, extrasaction="ignore", lineterminator="\\n")')
+  lines.push('            writer.writeheader()')
+  lines.push('            for row in reader:')
+  lines.push('                if row.get(cohort_col, "") != match_value:')
+  lines.push('                    continue')
+  lines.push('                writer.writerow({rename.get(c, c): row.get(c, "") for c in fields})')
+  lines.push('    elif preset == "gwas-pval-filter":')
+  lines.push('        p_col = mapped("p_value")')
+  lines.push('        threshold = float((config.get("presetConfig") or {}).get("threshold", 5e-8))')
+  lines.push('        fields = selected_fields(source_fields)')
+  lines.push('        out_fields = [rename.get(c, c) for c in fields]')
+  lines.push('        writer = csv.DictWriter(dst, fieldnames=out_fields, delimiter=out_delim, extrasaction="ignore", lineterminator="\\n")')
+  lines.push('        writer.writeheader()')
+  lines.push('        for row in reader:')
+  lines.push('            try:')
+  lines.push('                value = float(row.get(p_col, ""))')
+  lines.push('            except ValueError:')
+  lines.push('                continue')
+  lines.push('            if value <= threshold:')
+  lines.push('                writer.writerow({rename.get(c, c): row.get(c, "") for c in fields})')
+  lines.push('    elif preset == "clump-lead-list":')
+  lines.push('        variant_col = mapped("variant_id")')
+  lines.push('        for row in reader:')
+  lines.push('            value = row.get(variant_col, "").strip()')
+  lines.push('            if value:')
+  lines.push('                dst.write(value + "\\n")')
+  lines.push('    elif preset == "plink-score-file":')
+  lines.push('        variant_col = mapped("variant_id")')
+  lines.push('        allele_col = mapped("effect_allele")')
+  lines.push('        weight_col = mapped("weight")')
+  lines.push('        weight_transform = str((config.get("presetConfig") or {}).get("weightTransform", "identity"))')
+  lines.push('        writer = csv.writer(dst, delimiter="\\t", lineterminator="\\n")')
+  lines.push('        writer.writerow(["ID", "A1", "SCORE"])')
+  lines.push('        for row in reader:')
+  lines.push('            variant = row.get(variant_col, "").strip()')
+  lines.push('            allele = row.get(allele_col, "").strip()')
+  lines.push('            weight_raw = row.get(weight_col, "").strip()')
+  lines.push('            if not variant or not allele or not weight_raw:')
+  lines.push('                continue')
+  lines.push('            weight = weight_raw')
+  lines.push('            if weight_transform == "log":')
+  lines.push('                numeric = float(weight_raw)')
+  lines.push('                if numeric <= 0:')
+  lines.push('                    continue')
+  lines.push('                weight = str(math.log(numeric))')
+  lines.push('            writer.writerow([variant, allele, weight])')
+  lines.push('    else:')
+  lines.push('        raise SystemExit(f"Unsupported preset transform: {preset}")')
+  lines.push('PY')
+  return lines
 }
 
 export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
@@ -908,20 +1351,21 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
   const outExt =
     strategy === 'bcftools-concat' ? '.vcf.gz'
     : strategy === 'plink-pmerge-list' ? ''
+    : strategy === 'tabular-inner' || strategy === 'tabular-outer' || strategy === 'tabular-left' ? '.tsv'
     : strategy === 'tsv-concat-header' ? '.tsv'
     : '.txt'
   const outPath = opts.outputPath ?? `${outputDir}/${slug}.output${outExt}`
 
-  const lines: string[] = []
-  lines.push('#!/bin/bash')
-  lines.push(`#SBATCH --job-name=bioflow-${slug}-merge`)
-  lines.push(`#SBATCH --output=${logDir}/${slug}-%j.out`)
-  lines.push(`#SBATCH --error=${logDir}/${slug}-%j.err`)
-  lines.push(`#SBATCH --cpus-per-task=${cpus}`)
-  lines.push(`#SBATCH --mem=${memGB}G`)
-  lines.push(`#SBATCH --time=${formatTime(timeH)}`)
-  if (account) lines.push(`#SBATCH --account=${account}`)
-  if (partition) lines.push(`#SBATCH --partition=${partition}`)
+  const lines: string[] = buildSlurmHeader({
+    slug,
+    logDir,
+    cpus,
+    memGB,
+    timeH,
+    account,
+    partition,
+    jobSuffix: 'merge',
+  })
   lines.push('')
   lines.push('set -euo pipefail')
   lines.push('')
@@ -951,6 +1395,55 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
     }
     case 'cat':
       lines.push(`cat "\${INPUTS[@]}" > ${shellQuote(outPath)}`)
+      break
+    case 'tabular-inner':
+    case 'tabular-outer':
+    case 'tabular-left':
+      lines.push(`python3 - <<'PY'`)
+      lines.push(`import csv`)
+      lines.push(`inputs = ${JSON.stringify(inputs)}`)
+      lines.push(`out = ${JSON.stringify(outPath)}`)
+      lines.push(`strategy = ${JSON.stringify(strategy.replace('tabular-', ''))}`)
+      lines.push(`tables = []`)
+      lines.push(`for path in inputs:`)
+      lines.push(`    with open(path, newline='') as fh:`)
+      lines.push(`        sample = fh.read(4096); fh.seek(0)`)
+      lines.push(`        dialect = csv.Sniffer().sniff(sample, delimiters='\\t,') if sample else csv.excel_tab`)
+      lines.push(`        rows = list(csv.DictReader(fh, dialect=dialect))`)
+      lines.push(`        tables.append((path, rows, rows[0].keys() if rows else []))`)
+      lines.push(`shared = set(tables[0][2]) if tables else set()`)
+      lines.push(`for _, _, cols in tables[1:]: shared &= set(cols)`)
+      lines.push(`key = next((c for c in ['eid','sample','sample_id','id','IID','FID'] if c in shared), None)`)
+      lines.push(`if not key:`)
+      lines.push(`    key = next(iter(shared), None)`)
+      lines.push(`all_cols = []`)
+      lines.push(`for _, _, cols in tables:`)
+      lines.push(`    for col in cols:`)
+      lines.push(`        if col not in all_cols: all_cols.append(col)`)
+      lines.push(`if not key:`)
+      lines.push(`    with open(out, 'w', newline='') as fh:`)
+      lines.push(`        writer = csv.DictWriter(fh, fieldnames=all_cols, delimiter='\\t', extrasaction='ignore')`)
+      lines.push(`        writer.writeheader()`)
+      lines.push(`        for _, rows, _ in tables:`)
+      lines.push(`            writer.writerows(rows)`)
+      lines.push(`    raise SystemExit`)
+      lines.push(`indexed = []`)
+      lines.push(`for _, rows, _ in tables:`)
+      lines.push(`    indexed.append({row.get(key, ''): row for row in rows if row.get(key, '')})`)
+      lines.push(`keys = set(indexed[0])`)
+      lines.push(`if strategy == 'inner':`)
+      lines.push(`    for item in indexed[1:]: keys &= set(item)`)
+      lines.push(`elif strategy == 'outer':`)
+      lines.push(`    for item in indexed[1:]: keys |= set(item)`)
+      lines.push(`with open(out, 'w', newline='') as fh:`)
+      lines.push(`    writer = csv.DictWriter(fh, fieldnames=all_cols, delimiter='\\t', extrasaction='ignore')`)
+      lines.push(`    writer.writeheader()`)
+      lines.push(`    for k in sorted(keys):`)
+      lines.push(`        merged = {key: k}`)
+      lines.push(`        for item in indexed:`)
+      lines.push(`            merged.update(item.get(k, {}))`)
+      lines.push(`        writer.writerow(merged)`)
+      lines.push(`PY`)
       break
   }
 
@@ -982,6 +1475,15 @@ function shellQuote(s: string): string {
 
 function shellArg(s: string): string {
   return shellQuote(s)
+}
+
+function awkStringLiteral(value: string): string {
+  return `"${value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\t/g, '\\t')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')}"`
 }
 
 function stripExt(p: string): string {

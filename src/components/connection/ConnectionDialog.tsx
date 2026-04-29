@@ -27,6 +27,10 @@ interface FormData {
   passphrase: string
   password: string
   rememberPassword: boolean
+  alias: string
+  writeConfig: boolean
+  controlPersistHours: number
+  serverAliveIntervalSeconds: number
   defaultDirectory: string
 }
 
@@ -40,6 +44,10 @@ const initialFormData: FormData = {
   passphrase: '',
   password: '',
   rememberPassword: false,
+  alias: '',
+  writeConfig: true,
+  controlPersistHours: 8,
+  serverAliveIntervalSeconds: 60,
   defaultDirectory: '',
 }
 
@@ -103,6 +111,10 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
     () => form.host.trim() && form.username.trim() && form.port > 0,
     [form.host, form.port, form.username],
   )
+  const defaultAlias = useMemo(() => {
+    const preferred = form.alias.trim() || form.name.trim() || form.host.trim().split('.')[0] || form.username.trim()
+    return preferred.replace(/\s+/g, '-').replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'bioflow'
+  }, [form.alias, form.host, form.name, form.username])
 
   useEffect(() => {
     if (open) {
@@ -140,6 +152,10 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       passphrase: config.passphrase ?? '',
       password: config.password ?? '',
       rememberPassword: Boolean(config.rememberPassword),
+      alias: config.alias ?? '',
+      writeConfig: config.writeConfig ?? true,
+      controlPersistHours: config.controlPersistHours ?? 8,
+      serverAliveIntervalSeconds: config.serverAliveIntervalSeconds ?? 60,
       defaultDirectory: config.defaultDirectory ?? '',
     })
     setErrors({})
@@ -163,6 +179,10 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       ...(form.authMethod === 'password' && { password: form.password }),
       ...(form.authMethod === 'password' && { rememberPassword: form.rememberPassword }),
       ...(form.authMethod === 'key' && form.privateKeyPath.trim() && { generatedKeyPath: form.privateKeyPath.trim() }),
+      ...(defaultAlias && { alias: defaultAlias }),
+      ...(form.writeConfig ? { writeConfig: true } : {}),
+      ...(form.controlPersistHours > 0 ? { controlPersistHours: form.controlPersistHours } : {}),
+      ...(form.serverAliveIntervalSeconds > 0 ? { serverAliveIntervalSeconds: form.serverAliveIntervalSeconds } : {}),
       ...(form.defaultDirectory.trim() && { defaultDirectory: form.defaultDirectory.trim() }),
     }
 
@@ -220,12 +240,17 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
         overwrite: setupOverwrite,
         addToAgent: setupAddAgent,
         addToKeychain: setupAddKeychain,
+        alias: defaultAlias,
+        writeConfig: form.writeConfig,
+        controlPersistHours: form.controlPersistHours,
+        serverAliveIntervalSeconds: form.serverAliveIntervalSeconds,
       })
       setForm((prev) => ({
         ...prev,
         authMethod: 'key',
         privateKeyPath: result.keyPath,
         passphrase: '',
+        alias: result.alias ?? prev.alias,
       }))
       setSetupMessage(result.note ?? `Key installed at ${result.keyPath}`)
       setSetupOpen(false)
@@ -376,24 +401,26 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
               </button>
             ))}
           </div>
-          <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
-            <div className="min-w-0">
-              <div className="font-medium text-text-primary">Auto-setup SSH key</div>
-              <div>Generate an ed25519 key, install it on the host, and switch this connection to key auth.</div>
+          {!form.privateKeyPath.trim() && (
+            <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
+              <div className="min-w-0">
+                <div className="font-medium text-text-primary">Auto-setup SSH key</div>
+                <div>Generate a dedicated SSH key, install the public key on the host, and optionally write a reusable `ssh {defaultAlias}` alias with same-day OpenSSH session persistence.</div>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={!setupReady || setupRunning}
+                onClick={() => {
+                  setSetupMessage(null)
+                  setSetupOpen(true)
+                }}
+                icon={<Sparkles size={12} />}
+              >
+                Auto-setup key
+              </Button>
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={!setupReady || setupRunning}
-              onClick={() => {
-                setSetupMessage(null)
-                setSetupOpen(true)
-              }}
-              icon={<Sparkles size={12} />}
-            >
-              Auto-setup key
-            </Button>
-          </div>
+          )}
         </div>
 
         {/* SSH Key fields */}
@@ -473,6 +500,14 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
           </div>
         )}
 
+        <div className="rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-secondary">
+          <div className="font-medium text-text-primary">SSH key, alias, and app reuse are separate</div>
+          <div className="mt-1">
+            The generated SSH alias is for terminal use such as <code>ssh {defaultAlias}</code> and can keep one OpenSSH session warm for a few hours.
+            BioFlow&apos;s own MFA reuse still comes from the app reusing its existing `ssh2` connection, not from `ControlPersist`.
+          </div>
+        </div>
+
         {setupMessage && (
           <div className="px-3 py-2 rounded-md bg-bg-secondary border border-border text-text-secondary text-xs">
             {setupMessage}
@@ -514,7 +549,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
             <div><strong className="text-text-primary">Port:</strong> {form.port}</div>
           </div>
           <p>
-            BioFlow will generate a dedicated ed25519 key locally, append the public key to <code>~/.ssh/authorized_keys</code> on the remote host, and then switch this connection to key auth.
+            BioFlow will generate a dedicated ed25519 key locally, append the public key to <code>~/.ssh/authorized_keys</code> on the remote host, and then switch this connection to key auth. Optionally it will also write a BioFlow-managed SSH config snippet so you can use <code>ssh {defaultAlias}</code> in Terminal.
           </p>
           <Input
             label="Current account password"
@@ -550,6 +585,41 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
             />
             Replace an existing BioFlow-generated key for this host/user
           </label>
+          <Input
+            label="SSH alias"
+            value={defaultAlias}
+            onChange={(e) => updateField('alias', e.target.value)}
+            placeholder="rorqual"
+          />
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={form.writeConfig}
+              onChange={(e) => updateField('writeConfig', e.target.checked)}
+              className="accent-accent"
+            />
+            Write a BioFlow-managed SSH config snippet so <code>ssh {defaultAlias}</code> works in Terminal
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              label="Keep session open (hours)"
+              type="number"
+              min={1}
+              value={String(form.controlPersistHours)}
+              onChange={(e) => updateField('controlPersistHours', Math.max(1, Number(e.target.value) || 8))}
+            />
+            <Input
+              label="Keepalive (seconds)"
+              type="number"
+              min={15}
+              value={String(form.serverAliveIntervalSeconds)}
+              onChange={(e) => updateField('serverAliveIntervalSeconds', Math.max(15, Number(e.target.value) || 60))}
+            />
+          </div>
+          <div className="rounded-md border border-border bg-bg-primary p-2 text-[11px] leading-relaxed">
+            <div><strong className="text-text-primary">What these do:</strong> the SSH key proves this device can log in, the alias gives you a short terminal command, and the OpenSSH session settings can reduce repeated Duo/TOTP prompts during one workday in Terminal sessions.</div>
+            <div className="mt-1">BioFlow will still keep showing MFA prompts in-app if the cluster requires them for new app sessions.</div>
+          </div>
           <div className="rounded-md border border-accent/20 bg-accent/10 p-2 text-[11px]">
             Some clusters still require keyboard-interactive MFA after key auth. If that happens, BioFlow will keep showing the MFA prompt and will not claim the connection is fully passwordless.
           </div>

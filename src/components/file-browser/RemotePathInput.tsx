@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { autocompleteContext, collapseHomePath } from '@/lib/remotePath'
 import type { RemoteFileEntry } from '@/types'
+import type { FileOrigin } from '@/constants/connections'
 
 interface RemotePathInputProps {
   value: string
@@ -11,6 +12,8 @@ interface RemotePathInputProps {
   mode?: 'file' | 'directory'
   className?: string
   minPrefixChars?: number
+  origin?: FileOrigin
+  projectId?: string | null
 }
 
 export function RemotePathInput({
@@ -20,9 +23,12 @@ export function RemotePathInput({
   mode = 'file',
   className,
   minPrefixChars = 2,
+  origin,
+  projectId,
 }: RemotePathInputProps) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const effectiveOrigin: FileOrigin = origin ?? (activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')
   const [focused, setFocused] = useState(false)
   const [homeDir, setHomeDir] = useState<string | null>(null)
   const [suggestions, setSuggestions] = useState<RemoteFileEntry[]>([])
@@ -32,12 +38,16 @@ export function RemotePathInput({
   useEffect(() => {
     let cancelled = false
     async function loadHome() {
-      if (!activeConnectionId) return
-      if (activeConnectionId === LOCAL_CONNECTION_ID) {
+      if (effectiveOrigin === 'dnx') {
+        if (!cancelled) setHomeDir(null)
+        return
+      }
+      if (effectiveOrigin === 'local') {
         const home = await window.api.local.homedir()
         if (!cancelled) setHomeDir(home)
         return
       }
+      if (!activeConnectionId) return
       const result = await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')
       if (!cancelled) setHomeDir(result.stdout.trim() || null)
     }
@@ -45,25 +55,31 @@ export function RemotePathInput({
       if (!cancelled) setHomeDir(null)
     })
     return () => { cancelled = true }
-  }, [activeConnectionId])
+  }, [activeConnectionId, effectiveOrigin])
 
   useEffect(() => {
-    if (!focused || !activeConnectionId) {
+    const canSuggest = effectiveOrigin === 'local'
+      || (effectiveOrigin === 'ssh' && Boolean(activeConnectionId))
+      || (effectiveOrigin === 'dnx' && Boolean(projectId))
+    if (!focused || !canSuggest) {
       setSuggestions([])
       return
     }
     const { dir, prefix } = autocompleteContext(value, homeDir)
     const normalizedPrefix = prefix.trim()
-    if (normalizedPrefix.length < minPrefixChars) {
+    const minChars = prefix.length === 0 ? 0 : minPrefixChars
+    if (normalizedPrefix.length < minChars) {
       setSuggestions([])
       return
     }
     let cancelled = false
     const requestId = ++requestIdRef.current
     const timer = window.setTimeout(() => {
-      const list = activeConnectionId === LOCAL_CONNECTION_ID
+      const list = effectiveOrigin === 'local'
         ? window.api.local.ls(dir)
-        : window.api.sftp.ls(activeConnectionId, dir)
+        : effectiveOrigin === 'dnx'
+          ? window.api.dnx.listFiles({ projectId: projectId!, path: dir })
+          : window.api.sftp.ls(activeConnectionId!, dir)
       void list.then((entries) => {
         if (cancelled || requestId !== requestIdRef.current) return
         const needle = normalizedPrefix.toLowerCase()
@@ -88,7 +104,7 @@ export function RemotePathInput({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [activeConnectionId, focused, homeDir, minPrefixChars, mode, value])
+  }, [activeConnectionId, effectiveOrigin, focused, homeDir, minPrefixChars, mode, projectId, value])
 
   const renderedSuggestions = useMemo(() => suggestions.map((entry) => ({
     ...entry,
@@ -158,7 +174,7 @@ export function RemotePathInput({
                 index === activeIndex ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
               }`}
             >
-              {entry.displayPath}{entry.isDirectory ? '/' : ''}
+              {entry.displayPath}{entry.isDirectory && !entry.displayPath.endsWith('/') ? '/' : ''}
             </button>
           ))}
         </div>

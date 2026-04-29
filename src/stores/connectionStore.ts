@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import type { ConnectionConfig, ConnectionState, LoginPolicy } from '@/types'
+import { LOCAL_CONNECTION_ID } from '@/constants/connections'
 
-export const LOCAL_CONNECTION_ID = '__local__'
+export { LOCAL_CONNECTION_ID } from '@/constants/connections'
 
 function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
   return {
@@ -10,6 +11,7 @@ function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
     host: config.host.trim(),
     username: config.username.trim(),
     privateKeyPath: config.privateKeyPath?.trim(),
+    alias: config.alias?.trim(),
     defaultDirectory: config.defaultDirectory?.trim(),
   }
 }

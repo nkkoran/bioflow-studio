@@ -1,21 +1,53 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Lock } from 'lucide-react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { HelpButton } from '@/components/ui/HelpButton'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useUIStore } from '@/stores/uiStore'
 import { classNames } from '@/lib/utils'
 import { AnnovarSetupWizard } from './AnnovarSetupWizard'
+import { DnanexusSettingsPanel } from './DnanexusSettingsPanel'
 
-const SECTIONS = ['General', 'Paths', 'Tools', 'Notifications', 'Advanced'] as const
+const SECTIONS = ['General', 'Paths', 'Tools', 'DNAnexus', 'Notifications', 'Advanced'] as const
 type Section = typeof SECTIONS[number]
 
-export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [section, setSection] = useState<Section>('General')
+export function SettingsDialog({
+  open,
+  onClose,
+  initialSection,
+}: {
+  open: boolean
+  onClose: () => void
+  initialSection?: Section
+}) {
+  const [section, setSection] = useState<Section>(initialSection ?? 'General')
+
+  useEffect(() => {
+    if (open && initialSection) setSection(initialSection)
+  }, [open, initialSection])
   const [annovarWizardOpen, setAnnovarWizardOpen] = useState(false)
+  const [pinOpen, setPinOpen] = useState(false)
+  const [pinDraft, setPinDraft] = useState('')
+  const [pinError, setPinError] = useState<string | null>(null)
   const settings = useSettingsStore((s) => s.settings)
+  const devMode = useSettingsStore((s) => s.devMode)
   const load = useSettingsStore((s) => s.load)
   const setSetting = useSettingsStore((s) => s.setSetting)
+  const unlockDevMode = useSettingsStore((s) => s.unlockDevMode)
+  const theme = useUIStore((s) => s.theme)
+  const setTheme = useUIStore((s) => s.setTheme)
+
+  const visibleSections = useMemo(() => SECTIONS.filter((item) => item !== 'DNAnexus' || devMode), [devMode])
+
+  useEffect(() => {
+    if (!devMode && section === 'DNAnexus') {
+      setSection('General')
+      if (open) setPinOpen(true)
+    }
+  }, [devMode, open, section])
 
   useEffect(() => {
     if (open) void load()
@@ -33,11 +65,22 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
     void setSetting(key, value)
   }
 
+  const tryUnlockDevMode = () => {
+    if (unlockDevMode(pinDraft)) {
+      setPinDraft('')
+      setPinError(null)
+      setPinOpen(false)
+      setSection('DNAnexus')
+      return
+    }
+    setPinError('Incorrect PIN.')
+  }
+
   return (
     <Dialog open={open} onClose={onClose} title="Settings" width="max-w-3xl">
       <div className="grid min-h-[420px] grid-cols-[150px_1fr] gap-4">
         <div className="border-r border-border pr-2">
-          {SECTIONS.map((item) => (
+          {visibleSections.map((item) => (
             <button
               key={item}
               onClick={() => setSection(item)}
@@ -49,11 +92,23 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               {item}
             </button>
           ))}
+          {!devMode && (
+            <button
+              type="button"
+              onClick={() => setPinOpen(true)}
+              className="mt-3 flex w-full items-center gap-2 rounded border border-border bg-bg-tertiary px-2 py-1.5 text-left text-xs text-text-muted hover:bg-bg-hover hover:text-text-primary"
+            >
+              <Lock size={12} />
+              Developer Options
+              <HelpButton id="developer.gate" />
+            </button>
+          )}
         </div>
 
         <div className="min-w-0">
           {section === 'General' && (
             <div className="flex flex-col gap-3">
+              <SectionHeader label="General" helpId="settings.general" />
               <Input
                 label="Default partition"
                 value={settings.defaultPartition}
@@ -87,11 +142,45 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 disabled={!settings.autosaveEnabled}
                 onChange={(e) => number('settings:autosaveIntervalSeconds', Number(e.target.value))}
               />
+              <div>
+                <label className="mb-1 block text-text-secondary text-xs font-medium">Theme</label>
+                <select
+                  value={theme}
+                  onChange={(e) => {
+                    const next = e.target.value === 'light' || e.target.value === 'simple' ? e.target.value : 'dark'
+                    setTheme(next)
+                    void window.api.store.set('settings:theme', next)
+                  }}
+                  className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                >
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                  <option value="simple">Simple</option>
+                </select>
+              </div>
               <Checkbox
                 label="Confirm before login-node runs"
                 checked={settings.confirmOnLoginNodeRun}
                 onChange={(value) => toggle('settings:confirmOnLoginNodeRun', value)}
               />
+              <Checkbox
+                label="Share anonymous usage telemetry"
+                checked={settings.telemetryOptIn}
+                onChange={(value) => toggle('settings:telemetryOptIn', value)}
+              />
+              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
+                <p className="text-[11px] font-medium text-text-secondary">Pre-run checks</p>
+                <Checkbox
+                  label="Skip input file checks (faster, uses last known result)"
+                  checked={settings.skipPreRunFileCheck}
+                  onChange={(value) => toggle('settings:skipPreRunFileCheck', value)}
+                />
+                <Checkbox
+                  label="Skip cluster doctor check before run"
+                  checked={settings.skipPreRunDoctorCheck}
+                  onChange={(value) => toggle('settings:skipPreRunDoctorCheck', value)}
+                />
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="mb-1 block text-text-secondary text-xs font-medium">Array chain mode</label>
@@ -122,6 +211,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
 
           {section === 'Paths' && (
             <div className="flex flex-col gap-3">
+              <SectionHeader label="Paths" helpId="settings.paths" />
               <Input
                 label="Run folder template"
                 value={settings.paths.runFolderTemplate}
@@ -167,6 +257,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
 
           {section === 'Tools' && (
             <div className="flex flex-col gap-3">
+              <SectionHeader label="Tools" helpId="settings.tools" />
               <RemotePathField
                 label="Tools folder"
                 value={settings.toolsRoot}
@@ -222,6 +313,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
 
           {section === 'Notifications' && (
             <div className="flex flex-col gap-3">
+              <SectionHeader label="Notifications" helpId="settings.notifications" />
               <Checkbox
                 label="Notify when a run finishes"
                 checked={settings.notifyOnRunFinish}
@@ -240,8 +332,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
             </div>
           )}
 
+          {section === 'DNAnexus' && devMode && <DnanexusSettingsPanel />}
+
           {section === 'Advanced' && (
             <div className="flex flex-col gap-3">
+              <SectionHeader label="Advanced" helpId="settings.advanced" />
               <Input
                 label="Login-node CPU warning threshold (seconds)"
                 type="number"
@@ -253,20 +348,58 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               <p className="text-[11px] text-text-muted">
                 Show a warning after connect when the cluster reports a login-node CPU time limit below this value. Use 0 to suppress the warning.
               </p>
-              <Checkbox
-                label="Use experimental PLINK block-builder inspector"
-                checked={settings.plinkFlagBuilderEnabled}
-                onChange={(value) => toggle('settings:experimental:plinkFlagBuilderEnabled', value)}
-              />
+              <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-relaxed text-text-primary">
+                PLINK tools now use the block-based flag builder so users can add documented flags, custom fallback flags, and suggested rerun fixes directly in the inspector.
+              </div>
               <p className="text-[11px] text-text-muted">
-                Keeps the current PLINK inspector available as a fallback while the new block-based authoring flow is still being proven out.
+                This is the shared large-flag pattern we can extend to other tools with broad command surfaces in later passes.
               </p>
             </div>
           )}
         </div>
       </div>
       <AnnovarSetupWizard open={annovarWizardOpen} onClose={() => setAnnovarWizardOpen(false)} />
+      <Dialog
+        open={pinOpen}
+        onClose={() => {
+          setPinOpen(false)
+          setPinDraft('')
+          setPinError(null)
+        }}
+        title="Developer Options"
+        width="max-w-sm"
+        footer={(
+          <>
+            <Button variant="secondary" onClick={() => setPinOpen(false)}>Cancel</Button>
+            <Button onClick={tryUnlockDevMode}>Unlock</Button>
+          </>
+        )}
+      >
+        <div className="space-y-2">
+          <Input
+            label="PIN"
+            type="password"
+            value={pinDraft}
+            onChange={(e) => setPinDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') tryUnlockDevMode()
+            }}
+            autoFocus
+          />
+          <p className="text-[11px] text-text-muted">RAP features are under development and stay locked after app restart.</p>
+          {pinError && <p className="text-xs text-error">{pinError}</p>}
+        </div>
+      </Dialog>
     </Dialog>
+  )
+}
+
+function SectionHeader({ label, helpId }: { label: string; helpId: string }) {
+  return (
+    <div className="mb-1 flex items-center gap-2">
+      <h3 className="text-sm font-semibold text-text-primary">{label}</h3>
+      <HelpButton id={helpId} />
+    </div>
   )
 }
 

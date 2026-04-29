@@ -6,6 +6,7 @@ import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates
 import type { PipelineSnapshot } from '@/types/pipeline'
 import { TemplateGallery } from '@/components/pipeline/TemplateGallery'
 import type { PipelineTemplate } from '@/lib/pipelineTemplates'
+import { useDialogStore } from '@/stores/dialogStore'
 
 interface PipelineRow {
   id: string
@@ -24,6 +25,8 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
   const deletePipeline = usePipelineStore((s) => s.deletePipeline)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const markSaved = usePipelineStore((s) => s.markSaved)
+  const confirmDialog = useDialogStore((s) => s.confirm)
+  const promptDialog = useDialogStore((s) => s.prompt)
   const [open, setOpen] = useState(false)
   const [templateGalleryOpen, setTemplateGalleryOpen] = useState(false)
   const [rows, setRows] = useState<PipelineRow[]>([])
@@ -39,27 +42,57 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
   const switchTo = async (id: string) => {
     setOpen(false)
     if (id === pipelineId) return
-    if (dirty && !confirm('Discard unsaved changes and switch pipelines?')) return
+    if (dirty) {
+      const confirmed = await confirmDialog({
+        title: 'Switch pipeline',
+        message: 'Discard unsaved changes and switch pipelines?',
+        confirmLabel: 'Switch pipeline',
+        cancelLabel: 'Stay here',
+      })
+      if (!confirmed) return
+    }
     const snap = await window.api.store.get<PipelineSnapshot>(`pipeline:${id}`)
     if (snap) loadSnapshot(snap)
   }
 
-  const makeNew = () => {
+  const makeNew = async () => {
     setOpen(false)
-    if (dirty && !confirm('Discard unsaved changes and start a new pipeline?')) return
+    if (dirty) {
+      const confirmed = await confirmDialog({
+        title: 'New pipeline',
+        message: 'Discard unsaved changes and start a new pipeline?',
+        confirmLabel: 'Start new pipeline',
+        cancelLabel: 'Keep current',
+      })
+      if (!confirmed) return
+    }
     reset()
   }
 
-  const startFromTemplate = (template: PipelineTemplate) => {
+  const startFromTemplate = async (template: PipelineTemplate) => {
     setOpen(false)
     setTemplateGalleryOpen(false)
-    if (dirty && !confirm('Discard unsaved changes and start from this template?')) return
+    if (dirty) {
+      const confirmed = await confirmDialog({
+        title: 'Load template',
+        message: 'Discard unsaved changes and start from this template?',
+        confirmLabel: 'Load template',
+        cancelLabel: 'Keep current',
+      })
+      if (!confirmed) return
+    }
     loadSnapshot(instantiateTemplate(template))
   }
 
   const rename = async () => {
     setOpen(false)
-    const next = prompt('Rename pipeline', pipelineName)
+    const next = await promptDialog({
+      title: 'Rename pipeline',
+      message: 'Choose a new pipeline name.',
+      defaultValue: pipelineName,
+      placeholder: 'Pipeline name',
+      confirmLabel: 'Rename',
+    })
     if (!next || next === pipelineName) return
     setPipelineName(next)
     const snapshot = { ...exportSnapshot(), name: next, updatedAt: Date.now() }
@@ -74,7 +107,15 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
   }
 
   const remove = async (row: PipelineRow) => {
-    if (!confirm(`Delete "${row.name}"? This removes it from saved pipelines on this machine.`)) return
+    const confirmed = await confirmDialog({
+      title: 'Delete saved pipeline',
+      message: `Delete "${row.name}" from saved pipelines on this machine?`,
+      detail: 'This does not delete cluster outputs or run folders.',
+      confirmLabel: 'Delete pipeline',
+      cancelLabel: 'Keep',
+      danger: true,
+    })
+    if (!confirmed) return
     await deletePipeline(row.id)
     await refresh()
   }
@@ -120,7 +161,7 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
               <div className="px-3 py-2 text-xs text-text-muted">No saved pipelines yet.</div>
             )}
             <div className="my-1 h-px bg-border" />
-            <button onClick={makeNew} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">
+            <button onClick={() => void makeNew()} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">
               <FilePlus2 size={12} /> New
             </button>
             <button onClick={() => { setOpen(false); setTemplateGalleryOpen(true) }} className="flex w-full items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-bg-hover">

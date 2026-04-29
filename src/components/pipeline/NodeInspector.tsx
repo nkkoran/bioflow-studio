@@ -8,13 +8,16 @@
  *
  * All edits flow through `pipelineStore.updateNodeData`, which sets the dirty flag.
  */
-import { X, Trash2, Copy, Plus, Info, RefreshCcw, ChevronDown } from 'lucide-react'
+import { X, Trash2, Copy, Plus, Info, RefreshCcw, FolderOpen } from 'lucide-react'
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
-import { FlagBuilder } from '@/components/pipeline/inspector/FlagBuilder'
+import { HelpButton } from '@/components/ui/HelpButton'
+import { AnalysisOptionsPanel } from '@/components/pipeline/inspector/AnalysisOptionsPanel'
+import { UkbFieldBuilder } from '@/components/pipeline/inspector/UkbFieldBuilder'
+import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
@@ -22,8 +25,10 @@ import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStor
 import { useUIStore } from '@/stores/uiStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
+import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useClusterInfoStore } from '@/stores/clusterInfoStore'
+import { useDialogStore } from '@/stores/dialogStore'
 import { getTool } from '@/lib/toolRegistry'
 import { iconForTool } from '@/lib/toolIcons'
 import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
@@ -34,13 +39,21 @@ import {
   parseHeader,
 } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
+import { defaultTransformPresetConfig, getTransformPreset, TRANSFORM_PRESETS } from '@/lib/transformPresets'
+import { suggestRoleMappings } from '@/lib/roleMappings'
 import { inferFileType } from '@/lib/fileTypeInference'
+import { SPARK_INSTANCE_TYPES } from '@/lib/dnxInstanceCatalog'
 import {
-  ensureFlagBlocks,
-  flagBlocksToParamValues,
   syncFlagBlocksFromParamValues,
   toolUsesFlagBuilder,
 } from '@/lib/flagRegistry'
+import {
+  analysisOptionsToParamValues,
+  getActiveToolInputs,
+  getAnalysisOptionDefs,
+  normalizeAnalysisOptions,
+  type AnalysisOptionDef,
+} from '@/lib/analysisOptions'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -49,6 +62,7 @@ import type {
   MergeNodeData,
   MergeStrategy,
   NoteNodeData,
+  TransferNodeData,
   ToolNodeData,
   ToolParam,
   ToolPort,
@@ -86,8 +100,9 @@ function connectedInputPaths(
     if (!source) continue
     if (source.type === 'file') {
       const data = source.data as FileNodeData
-      paths[portId] = data.split?.items.length
-        ? data.split.items.map((item) => item.path).filter(Boolean)
+      const splitItems = safeSplitItems(data.split)
+      paths[portId] = splitItems.length
+        ? splitItems.map((item) => item.path).filter(Boolean)
         : data.path ? [data.path] : []
       continue
     }
@@ -121,11 +136,13 @@ function inspectorNodeLabel(node: PipelineSnapshot['nodes'][number]): string {
 function inputConnectionDetail(node: PipelineSnapshot['nodes'][number], sourceHandle: string): string {
   if (node.type === 'file') {
     const data = node.data as FileNodeData
-    if (data.split?.items.length) return `${data.split.items.length} files split by ${data.split.axis}`
+    const splitItems = safeSplitItems(data.split)
+    if (splitItems.length) return `${splitItems.length} files split by ${data.split?.axis || 'item'}`
     return data.path || 'File path not set'
   }
   if (node.type === 'tool') return `Output: ${sourceHandle}`
   if (node.type === 'merge') return 'Merged output'
+  if (node.type === 'transfer') return 'Transferred output'
   if (node.type === 'transform') return 'Transformed output'
   return 'Connected'
 }
@@ -436,7 +453,9 @@ function ParamLabel({ param }: { param: ToolParam }) {
       {param.required && <span className="text-error ml-0.5">*</span>}
     </>
   )
-  if (!param.description && !param.docUrl) return <>{text}</>
+  if (!param.description && !param.docUrl) {
+    return <span className="inline-flex items-center gap-1">{text}<HelpButton id="params.row" /></span>
+  }
   return (
     <Tooltip
       side="right"
@@ -462,9 +481,14 @@ function ParamLabel({ param }: { param: ToolParam }) {
       <span className="inline-flex cursor-help items-center gap-1">
         <span>{text}</span>
         <Info size={11} className="text-text-muted" />
+        <HelpButton id={param.name.toLowerCase().includes('flag') ? 'params.customFlags' : 'params.row'} />
       </span>
     </Tooltip>
   )
+}
+
+function toolParamSection(param: ToolParam): 'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime' {
+  return param.section ?? 'Analysis'
 }
 
 /**
@@ -610,51 +634,193 @@ function ShellScriptField({
 }
 
 function ToolInputRow({
+  nodeId,
   port,
   connections,
   snapshot,
+  optionDef,
+  onRemoveOption,
 }: {
+  nodeId: string
   port: ToolPort
   connections: PipelineSnapshot['edges']
   snapshot: PipelineSnapshot
+  optionDef?: AnalysisOptionDef
+  onRemoveOption?: () => void
 }) {
+  const deleteEdge = usePipelineStore((s) => s.deleteEdge)
+  const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const addTransformNode = usePipelineStore((s) => s.addTransformNode)
+  const onConnect = usePipelineStore((s) => s.onConnect)
+  const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const [browserOpen, setBrowserOpen] = useState(false)
   const missingRequired = port.required && connections.length === 0
+  const accept = port.fileType === 'any' ? undefined : [port.fileType]
+  const initialPath = useMemo(() => {
+    const firstEdge = connections[0]
+    if (!firstEdge) return undefined
+    const source = snapshot.nodes.find((node) => node.id === firstEdge.source)
+    if (source?.type !== 'file') return undefined
+    const data = source.data as FileNodeData
+    return data.path || undefined
+  }, [connections, snapshot.nodes])
+
+  const attachInputFiles = (paths: string[], pickedOrigin?: 'local' | 'ssh' | 'dnx') => {
+    if (paths.length === 0) return
+    if (!port.multi) {
+      for (const edge of connections) deleteEdge(edge.id)
+    }
+    const target = snapshot.nodes.find((node) => node.id === nodeId)
+    paths.forEach((path, index) => {
+      const label = pathBasename(path) || port.label
+      const origin = pickedOrigin ?? (activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')
+      const source: FileNodeData['source'] = origin === 'local' ? 'local' : 'remote'
+      const fileId = addFileNode(
+        target
+          ? { x: target.position.x - 220, y: target.position.y + Math.max(0, (connections.length + index) * 44) }
+          : { x: 80, y: 80 + index * 44 },
+        {
+          isInput: true,
+          label,
+          path,
+          fileType: inferFileType(path),
+          source,
+          origin,
+        },
+      )
+      onConnect({
+        source: fileId,
+        sourceHandle: 'output',
+        target: nodeId,
+        targetHandle: port.id,
+      })
+    })
+  }
+
+  const buildKeepFileFromPhenotype = () => {
+    const target = snapshot.nodes.find((node) => node.id === nodeId)
+    const phenotypeEdge = snapshot.edges.find((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'pheno')
+    if (!target || !phenotypeEdge) return
+    const transformId = addTransformNode(
+      { x: target.position.x - 260, y: target.position.y + snapshot.nodes.length * 18 },
+      {
+        label: `${port.label} builder`,
+        fileType: 'txt',
+        preset: 'cohort-filter',
+        presetConfig: { ...defaultTransformPresetConfig('cohort-filter'), artifactMode: 'keep-file' },
+        filters: [],
+        renames: [],
+        outputIntermediate: { output: false },
+        status: 'idle',
+      },
+    )
+    onConnect({ source: phenotypeEdge.source, sourceHandle: phenotypeEdge.sourceHandle ?? 'output', target: transformId, targetHandle: 'input' })
+    onConnect({ source: transformId, sourceHandle: 'output', target: nodeId, targetHandle: port.id })
+    setSelectedNode(transformId)
+  }
 
   return (
     <div className={classNames(
       'rounded-md border px-2 py-1.5 text-xs',
       missingRequired ? 'border-error/40 bg-error/5' : 'border-border bg-bg-tertiary',
     )}>
-      <div className="flex items-center gap-2">
-        <span className="font-medium text-text-primary">{port.label}</span>
-        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
-        {port.required && <span className="rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">required</span>}
-        {port.multi && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">multiple</span>}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="font-medium text-text-primary">{port.label}</span>
+          <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+          {optionDef?.flag && <span className="rounded bg-bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-text-muted">{optionDef.flag}</span>}
+          {port.required && <span className="rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">required</span>}
+          {port.multi && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">multiple</span>}
+        </div>
+        {onRemoveOption && (
+          <button
+            type="button"
+            onClick={onRemoveOption}
+            className="shrink-0 rounded border border-border bg-bg-secondary p-1 text-text-muted hover:text-text-primary"
+            title={`Remove ${optionDef?.label ?? port.label}`}
+          >
+            <X size={12} />
+          </button>
+        )}
       </div>
       <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
         {port.description ?? `Connect a ${port.fileType} file here.`}
       </div>
       <div className="mt-1.5 flex flex-col gap-0.5">
         {connections.length === 0 ? (
-          <div className={missingRequired ? 'text-error' : 'text-text-muted'}>
-            {missingRequired ? `Connect a ${port.fileType} source before running.` : 'Optional input not connected.'}
+          <div className="flex items-center justify-between gap-2">
+            <div className={missingRequired ? 'text-error' : 'text-text-muted'}>
+              {missingRequired ? `Connect a ${port.fileType} source before running.` : 'Optional input not connected.'}
+            </div>
+          <button
+            type="button"
+            onClick={() => setBrowserOpen(true)}
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[10px] text-text-muted hover:text-text-primary"
+            title={`Pick ${port.label} from the file browser`}
+            >
+              <FolderOpen size={12} />
+              Pick
+            </button>
           </div>
         ) : connections.map((edge) => {
           const source = snapshot.nodes.find((node) => node.id === edge.source)
           if (!source) return null
           const detail = inputConnectionDetail(source, edge.sourceHandle ?? 'output')
           return (
-            <div key={edge.id} className="min-w-0 text-text-secondary">
-              <span className="text-success">Connected</span>
-              {' to '}
-              <span className="text-text-primary" title={inspectorNodeLabel(source)}>
-                <MiddleEllipsis value={inspectorNodeLabel(source)} max={28} />
-              </span>
-              <span className="text-text-muted" title={detail}> · <MiddleEllipsis value={detail} max={54} /></span>
+            <div key={edge.id} className="flex items-start justify-between gap-2 text-text-secondary">
+              <div className="min-w-0">
+                <span className="text-success">Connected</span>
+                {' to '}
+                <span className="text-text-primary" title={inspectorNodeLabel(source)}>
+                  <MiddleEllipsis value={inspectorNodeLabel(source)} max={28} />
+                </span>
+                <span className="text-text-muted" title={detail}> · <MiddleEllipsis value={detail} max={54} /></span>
+              </div>
+              <button
+                type="button"
+                onClick={() => deleteEdge(edge.id)}
+                className="shrink-0 rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-primary"
+                title="Disconnect"
+              >
+                Disconnect
+              </button>
             </div>
           )
         })}
+        {connections.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setBrowserOpen(true)}
+            className="mt-1 inline-flex h-7 w-fit items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[10px] text-text-muted hover:text-text-primary"
+            title={port.multi ? `Pick another ${port.label} file` : `Replace ${port.label} file`}
+          >
+            <FolderOpen size={12} />
+            {port.multi ? 'Pick another' : 'Replace'}
+          </button>
+        )}
+        {port.id === 'keep' && (
+          <button
+            type="button"
+            onClick={buildKeepFileFromPhenotype}
+            disabled={!snapshot.edges.some((edge) => edge.target === nodeId && (edge.targetHandle ?? 'input') === 'pheno')}
+            className="mt-1 inline-flex h-7 w-fit items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[10px] text-text-muted hover:text-text-primary disabled:opacity-50"
+            title="Create a cohort-filter transform from the connected phenotype input and wire it into this keep port"
+          >
+            <FolderOpen size={12} />
+            Build from phenotype
+          </button>
+        )}
       </div>
+      <RemoteFileBrowser
+        open={browserOpen}
+        onClose={() => setBrowserOpen(false)}
+        title={`Select ${port.label}`}
+        mode={port.multi ? 'multi-file' : 'file'}
+        initialPath={initialPath}
+        accept={accept}
+        onSelect={attachInputFiles}
+      />
     </div>
   )
 }
@@ -666,6 +832,7 @@ function ToolOutputRow({
   data,
   updateNodeData,
   showMergeBehavior,
+  snapshot,
 }: {
   port: ToolPort
   consumers: PipelineSnapshot['edges']
@@ -673,10 +840,12 @@ function ToolOutputRow({
   data: ToolNodeData
   updateNodeData: (nodeId: string, patch: Partial<ToolNodeData>) => void
   showMergeBehavior: boolean
+  snapshot: PipelineSnapshot
 }) {
+  const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const mergeConfig = data.outputMerge?.[port.id]
   const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
-  const intermediate = data.outputIntermediate?.[port.id] ?? Boolean(port.intermediate)
+  const intermediate = data.outputIntermediate?.[port.id] ?? false
   return (
     <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
       <div className="flex items-center gap-2">
@@ -691,6 +860,33 @@ function ToolOutputRow({
           ? `${consumers.length} downstream connection${consumers.length === 1 ? '' : 's'}`
           : 'Not connected downstream; the file is still written when the node runs.'}
       </div>
+      {consumers.length > 0 && (
+        <div className="mt-1.5 flex flex-col gap-1">
+          {consumers.map((edge) => {
+            const target = snapshot.nodes.find((node) => node.id === edge.target)
+            if (!target) return null
+            return (
+              <div key={edge.id} className="flex items-start justify-between gap-2 text-[11px] text-text-secondary">
+                <div className="min-w-0">
+                  Downstream:
+                  {' '}
+                  <span className="text-text-primary" title={inspectorNodeLabel(target)}>
+                    <MiddleEllipsis value={inspectorNodeLabel(target)} max={32} />
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => deleteEdge(edge.id)}
+                  className="shrink-0 rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-primary"
+                  title="Disconnect"
+                >
+                  Disconnect
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {showMergeBehavior && (
           <div className="flex items-center gap-1">
@@ -725,7 +921,7 @@ function ToolOutputRow({
             })}
             className="accent-accent"
           />
-          Intermediate output
+          Temporary output: delete after successful run
         </label>
       </div>
     </div>
@@ -762,6 +958,7 @@ function AnnotationConfigPanel({
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const settings = useSettingsStore((s) => s.settings)
+  const confirmDialog = useDialogStore((s) => s.confirm)
   const setSetting = useSettingsStore((s) => s.setSetting)
   const [message, setMessage] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -824,12 +1021,11 @@ function AnnotationConfigPanel({
   const toggleVepFeature = (id: string) => {
     const next = featureIds.includes(id) ? featureIds.filter((value) => value !== id) : [...featureIds, id]
     const selected = VEP_FEATURES.filter((feature) => next.includes(feature.id))
-    const merged: Record<string, unknown> = {
-      annotationFeatures: next.join(','),
-      everything: false,
-      check_existing: false,
-      af_gnomad: false,
-      nearest: undefined,
+    const merged: Record<string, unknown> = { annotationFeatures: next.join(',') }
+    for (const feature of VEP_FEATURES) {
+      for (const [key, value] of Object.entries(feature.params)) {
+        merged[key] = typeof value === 'boolean' ? false : undefined
+      }
     }
     for (const feature of selected) Object.assign(merged, feature.params)
     patchParams(merged)
@@ -960,42 +1156,44 @@ function AnnotationConfigPanel({
                   </span>
                 ))}
               </div>
-              <div className="mt-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
-                  onClick={async () => {
-                    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
-                    setRunning(true)
-                    setMessage('Saving the humandb path and installing missing ANNOVAR databases...')
-                    try {
-                      await setSetting('settings:annovarDbPath', dbPath)
-                      if (toolPath.trim()) await setSetting('settings:annovarScriptsPath', toolPath)
-                      if (pendingAnnovarDatabases.length === 0) {
-                        setMessage('Saved the humandb path. All selected ANNOVAR databases are already installed.')
-                        return
-                      }
-                      await window.api.annovar.install({
-                        connectionId: activeConnectionId,
-                        scriptsPath: toolPath,
-                        humandbPath: dbPath,
-                        buildver: build,
-                        databases: pendingAnnovarDatabases,
-                      })
-                      const refreshed = await window.api.annovar.status(activeConnectionId, dbPath, build, annovarDbNames(featureIds))
-                      setAnnovarStatus(refreshed)
-                      setMessage('Saved the humandb path and finished installing the missing ANNOVAR databases.')
-                    } catch (err: any) {
-                      setMessage(err?.message ?? String(err))
-                    } finally {
-                      setRunning(false)
+            </div>
+          )}
+          {isAnnovar && (
+            <div className="mt-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
+                onClick={async () => {
+                  if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
+                  setRunning(true)
+                  setMessage('Saving the humandb path and downloading missing ANNOVAR databases...')
+                  try {
+                    await setSetting('settings:annovarDbPath', dbPath)
+                    if (toolPath.trim()) await setSetting('settings:annovarScriptsPath', toolPath)
+                    if (pendingAnnovarDatabases.length === 0) {
+                      setMessage('Saved the humandb path. All selected ANNOVAR databases are already installed.')
+                      return
                     }
-                  }}
-                >
-                  Set humandb + install missing DBs ({(annovarStatus?.totalDownloadSizeGB ?? 0).toFixed(1)} GB)
-                </Button>
-              </div>
+                    await window.api.annovar.install({
+                      connectionId: activeConnectionId,
+                      scriptsPath: toolPath,
+                      humandbPath: dbPath,
+                      buildver: build,
+                      databases: pendingAnnovarDatabases,
+                    })
+                    const refreshed = await window.api.annovar.status(activeConnectionId, dbPath, build, annovarDbNames(featureIds))
+                    setAnnovarStatus(refreshed)
+                    setMessage('Saved the humandb path and finished downloading missing ANNOVAR databases.')
+                  } catch (err: any) {
+                    setMessage(err?.message ?? String(err))
+                  } finally {
+                    setRunning(false)
+                  }
+                }}
+              >
+                Download selected DBs ({(annovarStatus?.totalDownloadSizeGB ?? 0).toFixed(1)} GB)
+              </Button>
             </div>
           )}
         </div>
@@ -1086,11 +1284,16 @@ function AnnotationConfigPanel({
 
 function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const undoPipelineChange = usePipelineStore((s) => s.undo)
   const nodes = usePipelineStore((s) => s.nodes)
   const edges = usePipelineStore((s) => s.edges)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const dnxCatalog = useDnxStore((s) => s.instanceCatalog)
+  const refreshDnxCatalog = useDnxStore((s) => s.refreshInstanceCatalog)
   const settings = useSettingsStore((s) => s.settings)
+  const devMode = useSettingsStore((s) => s.devMode)
   const loadModules = useClusterInfoStore((s) => s.loadModules)
   const loadingModules = useClusterInfoStore((s) => activeConnectionId ? s.loadingModules[activeConnectionId] : false)
   const schemas = useDataPreviewStore((s) => s.schemas)
@@ -1103,8 +1306,6 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   const [estimating, setEstimating] = useState(false)
   const [showEstimateWhy, setShowEstimateWhy] = useState(false)
   const [refreshingSchemaPath, setRefreshingSchemaPath] = useState<string | null>(null)
-  const advancedExpanded = useUIStore((s) => s.advancedExpanded[data.toolId] ?? false)
-  const setAdvancedExpanded = useUIStore((s) => s.setAdvancedExpanded)
 
   /**
    * Inputs whose upstream source carries an axis — either a file node with
@@ -1114,21 +1315,23 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
    */
   const axedInputPorts = useMemo(() => {
     const result: Array<{ portId: string; axis: string }> = []
+    const activePortIds = tool ? new Set(getActiveToolInputs(tool, data, { connectedPortIds: snapshot.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.targetHandle ?? 'input') }).map((port) => port.id)) : null
     for (const edge of edges) {
       if (edge.target !== nodeId) continue
       const portId = edge.targetHandle
       if (!portId) continue
+      if (activePortIds && !activePortIds.has(portId)) continue
       const src = nodes.find((n) => n.id === edge.source)
       if (!src) continue
       if (src.type === 'file') {
         const fd = src.data as FileNodeData
-        if (fd.split?.axis && fd.split.items.length > 0) {
+        if (fd.split?.axis && safeSplitItems(fd.split).length > 0) {
           result.push({ portId, axis: fd.split.axis })
         }
       }
     }
     return result
-  }, [nodes, edges, nodeId])
+  }, [nodes, edges, nodeId, tool, data])
 
   const setParam = useCallback(
     (name: string, value: unknown) => {
@@ -1235,9 +1438,9 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           inputSizes: sizes,
           isArray: data.arrayOver !== null && axedInputPorts.length > 0,
           arraySize: firstAxed
-            ? (snapshot.nodes.find((node) =>
+            ? safeSplitItems((snapshot.nodes.find((node) =>
                 snapshot.edges.some((edge) => edge.target === nodeId && edge.targetHandle === firstAxed.portId && edge.source === node.id),
-              )?.data as FileNodeData | undefined)?.split?.items.length
+              )?.data as FileNodeData | undefined)?.split).length
             : undefined,
           hasFilter: hasFilteringParam(data),
           partitionMaxMemGB: settings.partitionMaxMemGB,
@@ -1251,16 +1454,21 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     return () => { cancelled = true }
   }, [activeConnectionId, axedInputPorts, data, learnedEstimate, nodeId, settings.partitionMaxMemGB, snapshot, tool])
 
+  useEffect(() => {
+    const supported = (tool?.backends ?? ['ssh']).filter((backend) => devMode || backend !== 'dnx')
+    const currentBackend = supported.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supported[0] === 'dnx' ? 'dnx' : 'ssh'
+    if (currentBackend !== 'dnx' || dnxCatalog?.specs?.length) return
+    void refreshDnxCatalog().catch(() => undefined)
+  }, [data.backend, devMode, dnxCatalog?.specs?.length, refreshDnxCatalog, tool])
+
   if (!tool) {
     return <div className="p-4 text-xs text-error">Unknown tool: {data.toolId}</div>
   }
 
-  const useFlagBuilder = settings.plinkFlagBuilderEnabled && toolUsesFlagBuilder(data.toolId)
-  const flagBlocks = toolUsesFlagBuilder(data.toolId)
-    ? ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
-    : []
-
   const ToolIcon = iconForTool(data.toolId)
+  const supportedBackends = (tool.backends ?? ['ssh']).filter((item) => devMode || item !== 'dnx')
+  const backend = supportedBackends.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supportedBackends[0] === 'dnx' ? 'dnx' : 'ssh'
+  const dnxInstanceOptions = dnxCatalog?.specs?.length ? dnxCatalog.specs : SPARK_INSTANCE_TYPES
   const slurm = { ...tool.slurm, ...data.slurmOverride }
   const executionMode = data.executionMode ?? 'sbatch'
   const inputEdgesByPort = new Map<string, PipelineSnapshot['edges']>()
@@ -1275,11 +1483,23 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     const portId = edge.sourceHandle ?? 'output'
     outputEdgesByPort.set(portId, [...(outputEdgesByPort.get(portId) ?? []), edge])
   }
+  const activeInputs = getActiveToolInputs(tool, data, { connectedPortIds: inputEdgesByPort.keys() })
+  const analysisDefs = getAnalysisOptionDefs(tool)
+  const analysisOptions = normalizeAnalysisOptions(tool, data, { connectedPortIds: inputEdgesByPort.keys() })
+  const analysisOptionsById = new Map(analysisOptions.map((option) => [option.optionId, option]))
+  const inputOptionByPort = new Map<string, AnalysisOptionDef>()
+  for (const def of analysisDefs) {
+    const portId = def.filePortId
+    if (!portId || !(def.kind === 'file' || def.kind === 'compound')) continue
+    if (analysisOptionsById.get(def.id)?.enabled) inputOptionByPort.set(portId, def)
+  }
   const visibleParams = tool.requiresDatabase
-    ? tool.params.filter((param) => !ANNOTATION_INTERNAL_PARAMS.has(param.name))
-    : tool.params
-  const commonParams = visibleParams.filter((param) => !param.advanced)
-  const advancedParams = visibleParams.filter((param) => param.advanced)
+    ? tool.params.filter((param) => !param.internal && !ANNOTATION_INTERNAL_PARAMS.has(param.name))
+    : tool.params.filter((param) => !param.internal)
+  const commonParams = visibleParams.filter((param) => param.core || !param.advanced)
+  const paramSections: Array<'Inputs' | 'Analysis' | 'Filters' | 'Output' | 'Runtime'> = ['Inputs', 'Analysis', 'Filters', 'Output', 'Runtime']
+  const sortParams = (params: typeof visibleParams) =>
+    [...params].sort((a, b) => Number(b.core) - Number(a.core) || a.label.localeCompare(b.label))
   const applyEstimate = () => {
     if (!estimate) return
     updateNodeData(nodeId, {
@@ -1291,13 +1511,35 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
       },
     })
   }
-  const setFlagBlocks = useCallback((nextBlocks: ToolNodeData['flagBlocks']) => {
-    const safeBlocks = nextBlocks ?? []
+  const setAnalysisOptions = useCallback((patch: Partial<Pick<ToolNodeData, 'analysisOptions' | 'paramValues' | 'commandOverride'>>) => {
     updateNodeData(nodeId, {
-      flagBlocks: safeBlocks,
-      paramValues: flagBlocksToParamValues(data.toolId, safeBlocks, data.paramValues),
+      analysisOptions: patch.analysisOptions,
+      paramValues: patch.paramValues,
+      commandOverride: patch.commandOverride,
     })
-  }, [data.paramValues, data.toolId, nodeId, updateNodeData])
+  }, [nodeId, updateNodeData])
+
+  const disableOptionPort = useCallback((portId: string) => {
+    let removed = 0
+    for (const edge of snapshot.edges) {
+      if (edge.target === nodeId && (edge.targetHandle ?? 'input') === portId) {
+        usePipelineStore.getState().deleteEdge(edge.id)
+        removed += 1
+      }
+    }
+    return removed
+  }, [nodeId, snapshot.edges])
+
+  const removeInputOption = (def: AnalysisOptionDef) => {
+    const nextOptions = analysisOptions.map((option) =>
+      option.optionId === def.id ? { ...option, enabled: false } : option,
+    )
+    disableOptionPort(def.filePortId ?? def.sourcePortId ?? '')
+    updateNodeData(nodeId, {
+      analysisOptions: nextOptions,
+      paramValues: analysisOptionsToParamValues(tool, nextOptions, data.paramValues),
+    })
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1317,7 +1559,80 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           {tool.module && <div>Module: <span className="font-mono text-text-secondary">{tool.module}</span></div>}
         </div>
         <p className="text-xs text-text-muted mt-2">{tool.description}</p>
+        {tool.docUrl && (
+          <button
+            type="button"
+            className="mt-2 text-[11px] text-accent underline"
+            onClick={() => window.open(tool.docUrl!, '_blank', 'noopener,noreferrer')}
+          >
+            Open official docs
+          </button>
+        )}
       </div>
+
+      {supportedBackends.length > 1 && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+            Backend
+          </h4>
+          <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+            {supportedBackends.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => updateNodeData(nodeId, { backend: option })}
+                className={classNames(
+                  'h-7 rounded text-xs transition-colors',
+                  backend === option
+                    ? 'bg-accent text-white'
+                    : 'text-text-secondary hover:text-text-primary',
+                )}
+              >
+                {option === 'dnx' ? 'DNAnexus' : 'Rorqual'}
+              </button>
+            ))}
+          </div>
+          {backend === 'dnx' && !dnxDefaultProjectId && (
+            <p className="text-[10px] text-warning mt-2">
+              Choose a default DNAnexus project in Settings before running this node on DNAnexus.
+            </p>
+          )}
+        </div>
+      )}
+
+      {backend === 'dnx' && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+            DNAnexus Runtime
+          </h4>
+          <select
+            value={data.dnxInstanceType ?? ''}
+            onChange={(e) => updateNodeData(nodeId, { dnxInstanceType: e.target.value || undefined })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            <option value="">Default instance</option>
+            {dnxInstanceOptions.map((spec) => (
+              <option key={spec.id} value={spec.id}>
+                {spec.name} ({spec.cpu} CPU, {spec.memoryGB} GB)
+              </option>
+            ))}
+          </select>
+          <div className="mt-1 text-[10px] text-text-muted">
+            {dnxCatalog?.lastRefreshed
+              ? `Specs refreshed ${new Date(dnxCatalog.lastRefreshed).toLocaleString()}.`
+              : 'Using bundled instance specs until the live catalog is refreshed.'}
+            {' '}
+            <a
+              href="https://documentation.dnanexus.com/developer/api/running-analyses/instance-types"
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent underline"
+            >
+              View current pricing
+            </a>
+          </div>
+        </div>
+      )}
 
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
@@ -1331,24 +1646,33 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             <button
               key={option.value}
               type="button"
-              onClick={() => updateNodeData(nodeId, { executionMode: option.value === 'sbatch' ? undefined : 'login' })}
+              onClick={() => {
+                if (backend === 'dnx' && option.value === 'login') return
+                updateNodeData(nodeId, { executionMode: option.value === 'sbatch' ? undefined : 'login' })
+              }}
               className={classNames(
                 'h-7 rounded text-xs transition-colors',
                 executionMode === option.value
                   ? 'bg-accent text-white'
                   : 'text-text-secondary hover:text-text-primary',
               )}
+              disabled={backend === 'dnx' && option.value === 'login'}
             >
               {option.label}
             </button>
           ))}
         </div>
-        {executionMode === 'login' && (
+        {backend === 'dnx' ? (
+          <div className="mt-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
+            DNAnexus-backed tools run as platform jobs. Login-node execution is not available on this backend.
+          </div>
+        ) : executionMode === 'login' && (
           <div className="mt-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1.5 text-[11px] text-yellow-200">
             Running an array or heavy job on the login node will likely be killed by cluster admins. Consider Slurm for anything beyond quick commands.
           </div>
         )}
-        <div className="mt-2">
+        {backend !== 'dnx' && (
+          <div className="mt-2">
           <ModuleAutocompleteField
             connectionId={activeConnectionId}
             value={data.moduleOverride ?? tool.module ?? ''}
@@ -1364,7 +1688,8 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           <p className="mt-1 text-[10px] text-text-muted">
             Leave blank to keep the registry default. Free text still works if the module list is incomplete.
           </p>
-        </div>
+          </div>
+        )}
       </div>
 
       <div>
@@ -1372,15 +1697,22 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           Inputs
         </h4>
         <div className="flex flex-col gap-1.5">
-          {tool.inputs.map((port) => (
+          {activeInputs.map((port) => (
             <ToolInputRow
               key={port.id}
+              nodeId={nodeId}
               port={port}
               connections={inputEdgesByPort.get(port.id) ?? []}
               snapshot={snapshot}
+              optionDef={inputOptionByPort.get(port.id)}
+              onRemoveOption={
+                inputOptionByPort.get(port.id) && !port.required
+                  ? () => removeInputOption(inputOptionByPort.get(port.id)!)
+                  : undefined
+              }
             />
           ))}
-          {tool.inputs.length === 0 && (
+          {activeInputs.length === 0 && (
             <div className="text-xs text-text-muted italic">This tool has no inputs.</div>
           )}
         </div>
@@ -1400,6 +1732,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               data={data}
               updateNodeData={updateNodeData}
               showMergeBehavior={axedInputPorts.length > 0}
+              snapshot={snapshot}
             />
           ))}
           {tool.outputs.length === 0 && (
@@ -1408,6 +1741,43 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         </div>
       </div>
 
+      {tool.id === 'ukb.spark-extract' && (
+        <div className="flex flex-col gap-4">
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+              UKB Fields
+            </h4>
+            <UkbFieldBuilder nodeId={nodeId} value={data.paramValues?.fields} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={String(data.paramValues?.codingValues ?? 'replace')}
+              onChange={(e) => setParam('codingValues', e.target.value)}
+              className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+            >
+              <option value="replace">Replace coding values</option>
+              <option value="raw">Keep raw coding values</option>
+            </select>
+            <Input
+              label="Output filename"
+              value={String(data.paramValues?.outputName ?? 'ukb_extracted_traits.tsv')}
+              onChange={(e) => setParam('outputName', e.target.value)}
+            />
+          </div>
+
+          <Input
+            label="DNAnexus output folder"
+            value={String(data.paramValues?.outputFolder ?? '/')}
+            onChange={(e) => {
+              setParam('outputFolder', e.target.value)
+              updateNodeData(nodeId, { outputDirOverride: e.target.value || undefined })
+            }}
+            placeholder="/BioFlow/extracts"
+          />
+        </div>
+      )}
+
       {tool.requiresDatabase && <AnnotationConfigPanel nodeId={nodeId} data={data} />}
 
       {/* Parameters */}
@@ -1415,108 +1785,38 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Parameters
         </h4>
-        {useFlagBuilder ? (
-          <FlagBuilder
+        {tool.id === 'custom.shell' ? (
+          <div className="flex flex-col gap-2">
+            {paramSections.map((section) => {
+              const sectionParams = sortParams(commonParams.filter((param) => toolParamSection(param) === section))
+              if (sectionParams.length === 0) return null
+              return (
+                <div key={section} className="rounded-md border border-border bg-bg-tertiary/40 p-2">
+                  <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">{section}</div>
+                  <div className="flex flex-col gap-2">
+                    {sectionParams.map((p) => (
+                      p.name === 'script'
+                        ? <ShellScriptField key={p.name} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
+                        : <ParamField key={p.name} param={p} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <AnalysisOptionsPanel
             nodeId={nodeId}
             tool={tool}
-            nodeData={{ ...data, flagBlocks }}
+            nodeData={data}
             snapshot={snapshot}
             schemas={schemas}
             refreshingSchemaPath={refreshingSchemaPath}
-            advancedExpanded={advancedExpanded}
-            onSetAdvancedExpanded={(expanded) => setAdvancedExpanded(data.toolId, expanded)}
             onLoadSchema={loadSchemaForPath}
-            onChange={(blocks) => setFlagBlocks(blocks)}
+            onChange={setAnalysisOptions}
+            onDisablePort={disableOptionPort}
+            onUndoDisconnect={undoPipelineChange}
           />
-        ) : (
-          <div className="flex flex-col gap-2">
-            {commonParams.map((p) => {
-              const schema = p.columnRef
-                ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                : null
-              const inputPath = p.columnRef
-                ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                : null
-              return tool.id === 'custom.shell' && p.name === 'script'
-                ? (
-                    <ShellScriptField
-                      key={p.name}
-                      value={data.paramValues[p.name]}
-                      onChange={(v) => setParam(p.name, v)}
-                    />
-                  )
-                : p.columnRef
-                  ? (
-                      <ColumnParamField
-                        key={p.name}
-                        param={p}
-                        value={data.paramValues[p.name]}
-                        columns={schema?.columns ?? []}
-                        loading={Boolean(inputPath && !schema)}
-                        refreshing={refreshingSchemaPath === inputPath}
-                        onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                        onChange={(v) => setParam(p.name, v)}
-                      />
-                    )
-                : (
-                    <ParamField
-                      key={p.name}
-                      param={p}
-                      value={data.paramValues[p.name]}
-                      onChange={(v) => setParam(p.name, v)}
-                    />
-                  )
-            })}
-            {advancedParams.length > 0 && (
-              <div className="mt-1 rounded-md border border-border bg-bg-tertiary/40">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
-                  onClick={() => setAdvancedExpanded(data.toolId, !advancedExpanded)}
-                >
-                  <ChevronDown size={13} className={classNames('transition-transform', advancedExpanded ? 'rotate-180' : '')} />
-                  Advanced
-                  <span className="ml-auto text-[10px] text-text-muted">{advancedParams.length}</span>
-                </button>
-                {advancedExpanded && (
-                  <div className="flex flex-col gap-2 border-t border-border p-2">
-                    {advancedParams.map((p) => {
-                      const schema = p.columnRef
-                        ? resolveUpstreamSchema(snapshot, nodeId, p.columnSourcePortId ?? 'input', schemas)
-                        : null
-                      const inputPath = p.columnRef
-                        ? connectedInputPath(snapshot, nodeId, p.columnSourcePortId ?? 'input')
-                        : null
-                      return p.columnRef
-                        ? (
-                            <ColumnParamField
-                              key={p.name}
-                              param={p}
-                              value={data.paramValues[p.name]}
-                              columns={schema?.columns ?? []}
-                              loading={Boolean(inputPath && !schema)}
-                              refreshing={refreshingSchemaPath === inputPath}
-                              onRefresh={inputPath ? () => void loadSchemaForPath(inputPath, { force: true }) : undefined}
-                              onChange={(v) => setParam(p.name, v)}
-                            />
-                          )
-                        : (
-                            <ParamField
-                              key={p.name}
-                              param={p}
-                              value={data.paramValues[p.name]}
-                              onChange={(v) => setParam(p.name, v)}
-                            />
-                          )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-            {visibleParams.length === 0 && (
-              <div className="text-xs text-text-muted italic">No parameters</div>
-            )}
-          </div>
         )}
       </div>
 
@@ -1705,8 +2005,9 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const settings = useSettingsStore((s) => s.settings)
+  const confirmDialog = useDialogStore((s) => s.confirm)
 
-  const split = data.split
+  const split = useMemo(() => normalizeSplitForInspector(data.split), [data.split])
   const outputParts = !data.isInput ? splitOutputPath(data) : null
   const [uploading, setUploading] = useState(false)
   const [uploadMessage, setUploadMessage] = useState<string | null>(null)
@@ -1894,14 +2195,21 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     }
     updateNodeData(nodeId, {
       source: 'local',
+      origin: 'local',
       path: localPath,
       fileType: inferFileType(localPath),
     })
     setUploadMessage(`Using ${pathBasename(localPath)}`)
-    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && window.confirm('Upload this file to the cluster now?')) {
+    if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && await confirmDialog({
+      title: 'Upload local input',
+      message: 'Upload this file to the cluster now?',
+      detail: 'Choose Upload now to copy it into the configured uploads folder and switch the node to the remote path.',
+      confirmLabel: 'Upload now',
+      cancelLabel: 'Keep local',
+    })) {
       await uploadLocalFileForPath(activeConnectionId, localPath, settings.paths.uploadsSubfolder, nodeId, updateNodeData, setUploadMessage)
     }
-  }, [activeConnectionId, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
+  }, [activeConnectionId, confirmDialog, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
 
   return (
     <div className="flex flex-col gap-3">
@@ -1921,7 +2229,10 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               <button
                 key={option.value}
                 type="button"
-                onClick={() => updateNodeData(nodeId, { source: option.value as FileNodeData['source'] })}
+                onClick={() => updateNodeData(nodeId, {
+                  source: option.value as FileNodeData['source'],
+                  origin: option.value === 'local' ? 'local' : 'ssh',
+                })}
                 className={classNames(
                   'h-7 flex-1 rounded text-xs transition-colors',
                   (data.source ?? 'remote') === option.value
@@ -1958,6 +2269,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
 	                  const inferred = inferFileType(value)
 	                  updateNodeData(nodeId, {
 	                    path: value,
+	                    origin: 'ssh',
 	                    fileType: data.fileType === 'plink' && inferred === 'bed' ? 'plink' : inferred,
 	                  })
 	                }}
@@ -2377,7 +2689,7 @@ async function uploadLocalFileForPath(
   const remotePath = `${uploadDir}/${fileName}`
   await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
   await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
-  updateNodeData(nodeId, { path: remotePath, source: 'remote' })
+  updateNodeData(nodeId, { path: remotePath, source: 'remote', origin: 'ssh' })
   setUploadMessage(`Uploaded to ${remotePath}`)
 }
 
@@ -2590,7 +2902,7 @@ async function detectSplitInFolder({
   fileType: FileNodeData['fileType']
   seedPath: string
 }): Promise<DetectedSplit> {
-  const entries = await window.api.sftp.ls(connectionId, folder)
+  const entries = asRemoteFileEntries(await window.api.sftp.ls(connectionId, folder))
   const candidates: DetectedSplit[] = []
   if (mode === 'auto' || mode === 'files') {
     const files = detectFilesInFolder(folder, entries, fileType, axis)
@@ -2642,7 +2954,7 @@ async function detectFoldersInFolder(
     .slice(0, 100)
   const listings = await Promise.all(folderEntries.map(async (entry) => {
     try {
-      return { folder: entry, entries: await window.api.sftp.ls(connectionId, entry.path) }
+      return { folder: entry, entries: asRemoteFileEntries(await window.api.sftp.ls(connectionId, entry.path)) }
     } catch {
       return { folder: entry, entries: [] as RemoteFileEntry[] }
     }
@@ -2685,7 +2997,7 @@ function detectOneNestedFilePerFolder(
   const items: FileNodeSplit['items'] = []
   for (const listing of listings) {
     const key = captureKeyFromName(listing.folder.name)
-    const files = preferredFiles(listing.entries.filter((entry) => !entry.isDirectory), fileType)
+    const files = preferredFiles(asRemoteFileEntries(listing.entries).filter((entry) => !entry.isDirectory), fileType)
     if (files.length === 0) continue
     const picked =
       files.find((file) => file.name.includes(key)) ??
@@ -2694,6 +3006,39 @@ function detectOneNestedFilePerFolder(
     items.push({ key, path: picked.path })
   }
   return sortSplitRows(items)
+}
+
+function safeSplitItems(split: FileNodeSplit | undefined): FileNodeSplit['items'] {
+  const rawItems = (split as { items?: unknown } | undefined)?.items
+  if (!Array.isArray(rawItems)) return []
+  return rawItems.map((item, index) => {
+    const row = item as { key?: unknown; path?: unknown }
+    return {
+      key: typeof row.key === 'string' && row.key.trim() ? row.key : String(index + 1),
+      path: typeof row.path === 'string' ? row.path : '',
+    }
+  })
+}
+
+function normalizeSplitForInspector(split: FileNodeSplit | undefined): FileNodeSplit | undefined {
+  if (!split) return undefined
+  return {
+    ...split,
+    axis: split.axis || 'item',
+    items: safeSplitItems(split),
+    pattern: split.pattern ?? (split.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }),
+  }
+}
+
+function asRemoteFileEntries(value: unknown): RemoteFileEntry[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is RemoteFileEntry => {
+    if (!entry || typeof entry !== 'object') return false
+    const candidate = entry as Partial<RemoteFileEntry>
+    return typeof candidate.name === 'string'
+      && typeof candidate.path === 'string'
+      && typeof candidate.isDirectory === 'boolean'
+  })
 }
 
 function preferredFiles(files: RemoteFileEntry[], fileType: FileNodeData['fileType']): RemoteFileEntry[] {
@@ -2896,6 +3241,9 @@ function isPlinkLikeSplit(split: FileNodeSplit): boolean {
 
 const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] = [
   { value: 'auto', label: 'Auto (by upstream type)', hint: 'Picks the best strategy from the upstream file type.' },
+  { value: 'tabular-inner', label: 'Tabular inner merge', hint: 'Join tabular files on a shared id column and keep rows present in every file.' },
+  { value: 'tabular-outer', label: 'Tabular outer merge', hint: 'Join tabular files on a shared id column and keep every row.' },
+  { value: 'tabular-left', label: 'Tabular left merge', hint: 'Join tabular files on a shared id column and keep rows from the first file.' },
   { value: 'tsv-concat-header', label: 'TSV concat (keep header)', hint: 'Keep first header, append data rows from each task.' },
   { value: 'bcftools-concat', label: 'bcftools concat', hint: 'VCF/BCF per-chrom outputs → single VCF.' },
   { value: 'plink-pmerge-list', label: 'plink2 --pmerge-list', hint: 'Merge per-chrom PLINK2 filesets.' },
@@ -2904,6 +3252,10 @@ const MERGE_STRATEGIES: { value: MergeStrategy; label: string; hint: string }[] 
 
 function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData }) {
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const handles = data.inputHandles?.length ? data.inputHandles : [{ id: 'input', label: 'Input 1' }]
 
   const setSlurm = useCallback(
     (patch: Partial<NonNullable<MergeNodeData['slurmOverride']>>) => {
@@ -2916,6 +3268,47 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
 
   const selectedStrategy = MERGE_STRATEGIES.find((s) => s.value === data.strategy)
 
+  useEffect(() => {
+    let cancelled = false
+    const connectedFiles = edges
+      .filter((edge) => edge.target === nodeId)
+      .flatMap((edge) => {
+        const source = nodes.find((node) => node.id === edge.source)
+        if (source?.type !== 'file') return []
+        const file = source.data as FileNodeData
+        if (file.split?.items?.length) return file.split.items.map((item) => ({ path: item.path, label: item.key }))
+        return file.path ? [{ path: file.path, label: file.label || pathBasename(file.path) }] : []
+      })
+    if (connectedFiles.length === 0) return
+    void Promise.all(connectedFiles.map(async (file) => {
+      try {
+        const sourceNode = nodes.find((node) => node.type === 'file' && ((node.data as FileNodeData).path === file.path || (node.data as FileNodeData).split?.items?.some((item) => item.path === file.path)))
+        const origin = sourceNode?.type === 'file' ? (sourceNode.data as FileNodeData).origin : 'ssh'
+        const text = origin === 'local'
+          ? await window.api.local.head(file.path, 1)
+          : activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID
+            ? await window.api.sftp.head(activeConnectionId, file.path, 1)
+            : ''
+        return { ...file, columns: parseHeader(text, file.path).columns }
+      } catch {
+        return { ...file, columns: [] }
+      }
+    })).then((files) => {
+      if (cancelled) return
+      const columnSets = files.map((file) => new Set(file.columns))
+      const sharedColumns = files[0]?.columns.filter((column) => columnSets.every((set) => set.has(column))) ?? []
+      const allColumns = [...new Set(files.flatMap((file) => file.columns))]
+      const divergentColumns = allColumns
+        .filter((column) => !sharedColumns.includes(column))
+        .map((name) => ({ name, files: files.filter((file) => file.columns.includes(name)).map((file) => file.label) }))
+      const next = { files, sharedColumns, divergentColumns }
+      if (JSON.stringify(data.columnPreview ?? null) !== JSON.stringify(next)) {
+        updateNodeData(nodeId, { columnPreview: next })
+      }
+    })
+    return () => { cancelled = true }
+  }, [activeConnectionId, data.columnPreview, edges, nodeId, nodes, updateNodeData])
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -2925,7 +3318,11 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
           onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
         />
         <p className="text-xs text-text-muted mt-2">
-          Combines many upstream outputs into one file. Use axed fan-in for
+          <span className="inline-flex items-center gap-1">
+            Combines many upstream outputs into one file.
+            <HelpButton id="inspector.merge" />
+          </span>{' '}
+          Use axed fan-in for
           per-chromosome arrays, or parallel branches for independent branches
           that should converge.
         </p>
@@ -2958,8 +3355,32 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
       </div>
 
       <div>
+        <div className="mb-2 flex items-center justify-between">
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">Inputs</h4>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Plus size={12} />}
+            onClick={() => updateNodeData(nodeId, { inputHandles: [...handles, { id: `input-${handles.length + 1}`, label: `Input ${handles.length + 1}` }] })}
+          >
+            Add input
+          </Button>
+        </div>
+        <div className="space-y-1">
+          {handles.map((handle, index) => (
+            <Input
+              key={handle.id}
+              label={`Handle ${index + 1}`}
+              value={handle.label}
+              onChange={(e) => updateNodeData(nodeId, { inputHandles: handles.map((item) => item.id === handle.id ? { ...item, label: e.target.value } : item) })}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
-          Strategy
+          Strategy <HelpButton id="merge.columns" />
         </h4>
         <select
           value={data.strategy}
@@ -2973,6 +3394,36 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
         {selectedStrategy && (
           <p className="text-[10px] text-text-muted mt-1">{selectedStrategy.hint}</p>
         )}
+      </div>
+
+      <div className="rounded-md border border-border bg-bg-tertiary p-3">
+        <div className="mb-2 flex items-center gap-1 text-xs font-medium text-text-primary">
+          Column assignment preview
+          <HelpButton id="merge.columns" />
+        </div>
+        <div className="space-y-2 text-[11px]">
+          <div>
+            <div className="text-text-muted">Shared columns</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(data.columnPreview?.sharedColumns ?? []).map((column) => (
+                <span key={column} className="rounded bg-success/10 px-1.5 py-0.5 text-success">{column}</span>
+              ))}
+              {(!data.columnPreview?.sharedColumns?.length) && <span className="text-text-muted">No shared columns detected yet.</span>}
+            </div>
+          </div>
+          <div>
+            <div className="text-text-muted">Divergent columns</div>
+            <div className="mt-1 max-h-28 overflow-auto space-y-1">
+              {(data.columnPreview?.divergentColumns ?? []).map((column) => (
+                <div key={column.name} className="rounded border border-border bg-bg-secondary px-2 py-1">
+                  <span className="font-mono text-text-primary">{column.name}</span>
+                  <span className="ml-2 text-text-muted">from {column.files.join(', ')}</span>
+                </div>
+              ))}
+              {(!data.columnPreview?.divergentColumns?.length) && <span className="text-text-muted">No divergent columns detected yet.</span>}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div>
@@ -2996,7 +3447,7 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
             onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
             className="accent-accent"
           />
-          Mark merged output as intermediate
+          Temporary output: delete after successful run
         </label>
       </div>
 
@@ -3060,6 +3511,102 @@ function MergeInspector({ nodeId, data }: { nodeId: string; data: MergeNodeData 
   )
 }
 
+function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNodeData }) {
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
+  const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
+  const devMode = useSettingsStore((s) => s.devMode)
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <Input
+          label="Label"
+          value={data.label}
+          onChange={(e) => updateNodeData(nodeId, { label: e.target.value })}
+        />
+        <p className="text-xs text-text-muted mt-2">
+          Use Transfer to make cross-backend copies explicit.
+        </p>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+          Route
+        </h4>
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            value={data.from}
+            onChange={(e) => updateNodeData(nodeId, { from: devMode && e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            <option value="ssh">From Rorqual</option>
+            {devMode && <option value="dnx">From DNAnexus</option>}
+          </select>
+          <select
+            value={data.to}
+            onChange={(e) => updateNodeData(nodeId, { to: devMode && e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            <option value="ssh">To Rorqual</option>
+            {devMode && <option value="dnx">To DNAnexus</option>}
+          </select>
+        </div>
+      </div>
+
+      <Input
+        label="Output filename"
+        value={data.outputName ?? ''}
+        placeholder="(keep upstream name)"
+        onChange={(e) => updateNodeData(nodeId, { outputName: e.target.value || undefined })}
+      />
+
+      {data.to === 'ssh' && (
+        <FolderPickerField
+          label="Rorqual folder"
+          value={data.sshFolder ?? ''}
+          placeholder="(default run output folder)"
+          requesterLabel={`${data.label} SSH folder`}
+          onChange={(value) => updateNodeData(nodeId, { sshFolder: value || undefined })}
+        />
+      )}
+
+      {devMode && data.to === 'dnx' && (
+        <div className="flex flex-col gap-2">
+          <Input
+            label="DNAnexus folder"
+            value={data.dnxFolder ?? ''}
+            placeholder="/BioFlow/transfers"
+            onChange={(e) => updateNodeData(nodeId, { dnxFolder: e.target.value || undefined })}
+          />
+          <Input
+            label="Project ID"
+            value={data.dnxProjectId ?? dnxDefaultProjectId ?? ''}
+            placeholder={dnxDefaultProjectId ?? 'project-xxxx'}
+            onChange={(e) => updateNodeData(nodeId, { dnxProjectId: e.target.value || undefined })}
+          />
+        </div>
+      )}
+
+      {data.status && data.status !== 'idle' && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+            Execution
+          </h4>
+          <div className="flex flex-col gap-1 text-xs">
+            <div>Status: <span className="text-text-primary font-medium">{data.status}</span></div>
+            {data.jobId && <div>Job ID: <span className="font-mono text-text-primary">{data.jobId}</span></div>}
+            {data.error && (
+              <div className="px-2 py-1 rounded bg-error/10 border border-error/20 text-error text-[11px]">
+                {data.error}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const TRANSFORM_FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
   { value: 'contains', label: 'contains', needsValue: true },
   { value: 'regex', label: 'matches regex', needsValue: true },
@@ -3095,9 +3642,66 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
   const inputPath = connectedInputPath(snapshot, nodeId, 'input')
   const schema = resolveUpstreamSchema(snapshot, nodeId, 'input', schemas)
   const columns = schema?.columns ?? []
+  const preset = getTransformPreset(data.preset)
   const selected = data.selectedColumns?.length ? data.selectedColumns : columns
   const filters = data.filters ?? []
   const renames = data.renames ?? []
+  const artifactMode = String(data.presetConfig?.artifactMode ?? 'filtered-table')
+  const lockedFileType =
+    data.preset === 'cohort-filter'
+      ? (artifactMode === 'keep-file' ? 'txt' : null)
+      : data.preset === 'clump-lead-list'
+        ? 'txt'
+        : data.preset === 'plink-score-file'
+          ? 'tsv'
+          : null
+  const presetRoleMappings = useMemo(
+    () => (preset ? suggestRoleMappings(columns, preset.roles, data.roleMappings ?? {}) : {}),
+    [preset, columns, data.roleMappings],
+  )
+  const canProjectColumns = !preset || data.preset === 'cohort-filter' || data.preset === 'gwas-pval-filter'
+  const canRenameColumns = !preset || data.preset === 'cohort-filter' || data.preset === 'gwas-pval-filter'
+  const canUseGenericFilters = !preset
+
+  const setRoleMapping = useCallback((mappingKey: string, roleId: string, column: string) => {
+    const next = { ...(data.roleMappings ?? {}) }
+    if (!column) {
+      delete next[mappingKey]
+    } else {
+      next[mappingKey] = {
+        ...(next[mappingKey] ?? { roleId }),
+        roleId,
+        column,
+        confirmed: true,
+        confidence: 1,
+      }
+    }
+    updateNodeData(nodeId, { roleMappings: next })
+  }, [data.roleMappings, nodeId, updateNodeData])
+
+  const applyPreset = useCallback((presetId: TransformNodeData['preset']) => {
+    if (!presetId) {
+      updateNodeData(nodeId, {
+        preset: undefined,
+        presetConfig: undefined,
+        roleMappings: undefined,
+      })
+      return
+    }
+    const presetDef = getTransformPreset(presetId)
+    if (!presetDef) return
+    const presetConfig = defaultTransformPresetConfig(presetId)
+    const presetFileType =
+      presetId === 'cohort-filter'
+        ? (String(presetConfig.artifactMode ?? 'filtered-table') === 'keep-file' ? 'txt' : presetDef.fileType)
+        : presetDef.fileType
+    updateNodeData(nodeId, {
+      preset: presetId,
+      presetConfig,
+      roleMappings: {},
+      fileType: presetFileType,
+    })
+  }, [nodeId, updateNodeData])
 
   useEffect(() => {
     if (!activeConnectionId || !inputPath || schemas[inputPath]) return
@@ -3138,9 +3742,155 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
         </p>
       </div>
 
-      <div>
+      <div className="rounded-lg border border-border bg-bg-primary/60 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+              Transform mode
+            </h4>
+            <p className="mt-1 text-[11px] text-text-muted">
+              Use a workflow-aware preset when this transform should create a specific analysis artifact.
+            </p>
+          </div>
+          <select
+            value={data.preset ?? ''}
+            onChange={(e) => applyPreset((e.target.value || undefined) as TransformNodeData['preset'])}
+            className="h-8 min-w-[220px] rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+          >
+            <option value="">Manual transform</option>
+            {TRANSFORM_PRESETS.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {preset && (
+          <div className="mt-3 flex flex-col gap-3">
+            <div className="rounded-md border border-border-light bg-bg-secondary px-3 py-2 text-[11px] text-text-secondary">
+              {preset.description}
+            </div>
+
+            <div>
+              <h5 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
+                Role mappings
+              </h5>
+              <div className="flex flex-col gap-2">
+                {preset.roles.map((role) => {
+                  const bindingKey = role.binding?.kind === 'roleMapping' ? role.binding.key : role.id
+                  const mapping = presetRoleMappings[bindingKey] ?? presetRoleMappings[role.id]
+                  const suggested = !data.roleMappings?.[bindingKey] && mapping?.column
+                  return (
+                    <div key={role.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-2 items-center">
+                      <div className="text-[11px] text-text-secondary">
+                        <div className="text-text-primary">
+                          {role.label}{role.required ? ' *' : ''}
+                        </div>
+                        {suggested && (
+                          <div className="text-[10px] text-accent">
+                            Suggested: {mapping?.column}
+                          </div>
+                        )}
+                      </div>
+                      <select
+                        value={mapping?.column ?? ''}
+                        onChange={(e) => setRoleMapping(bindingKey, role.id, e.target.value)}
+                        className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                      >
+                        <option value="">-- select column --</option>
+                        {columns.map((column) => (
+                          <option key={column} value={column}>{column}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {data.preset === 'cohort-filter' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                    Cohort value
+                  </label>
+                  <input
+                    value={String(data.presetConfig?.matchValue ?? '')}
+                    onChange={(e) => updateNodeData(nodeId, {
+                      presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('cohort-filter')), matchValue: e.target.value },
+                    })}
+                    className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                    placeholder="EUR"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                    Artifact mode
+                  </label>
+                  <select
+                    value={artifactMode}
+                    onChange={(e) => {
+                      const nextMode = e.target.value
+                      updateNodeData(nodeId, {
+                        presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('cohort-filter')), artifactMode: nextMode },
+                        fileType: nextMode === 'keep-file' ? 'txt' : 'tsv',
+                      })
+                    }}
+                    className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                  >
+                    <option value="filtered-table">Filtered table</option>
+                    <option value="keep-file">PLINK keep file</option>
+                  </select>
+                </div>
+                {artifactMode === 'keep-file' && (
+                  <div className="col-span-2 rounded-md border border-border-light bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
+                    Keep-file mode writes two tab-separated columns with no header. If no family ID column is mapped, BioFlow will duplicate the sample ID into both FID and IID.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {data.preset === 'gwas-pval-filter' && (
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                  P-value threshold
+                </label>
+                <input
+                  type="number"
+                  value={String(data.presetConfig?.threshold ?? 5e-8)}
+                  onChange={(e) => updateNodeData(nodeId, {
+                    presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('gwas-pval-filter')), threshold: e.target.value === '' ? '' : Number(e.target.value) },
+                  })}
+                  className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                  step="any"
+                />
+              </div>
+            )}
+
+            {data.preset === 'plink-score-file' && (
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+                  Weight transform
+                </label>
+                <select
+                  value={String(data.presetConfig?.weightTransform ?? 'identity')}
+                  onChange={(e) => updateNodeData(nodeId, {
+                    presetConfig: { ...(data.presetConfig ?? defaultTransformPresetConfig('plink-score-file')), weightTransform: e.target.value },
+                  })}
+                  className="mt-1 h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary"
+                >
+                  <option value="identity">Use values as-is</option>
+                  <option value="log">log(OR)</option>
+                </select>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {canProjectColumns && (
+        <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
-          Columns
+          {preset ? 'Output columns' : 'Columns'}
         </h4>
         {columns.length > 0 ? (
           <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
@@ -3188,9 +3938,11 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             First 8
           </button>
         </div>
-      </div>
+        </div>
+      )}
 
-      <div>
+      {canUseGenericFilters && (
+        <div>
         <div className="flex items-center justify-between mb-2">
           <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
             Row filters
@@ -3256,9 +4008,11 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             Copy filters from current preview
           </button>
         )}
-      </div>
+        </div>
+      )}
 
-      <div>
+      {canRenameColumns && (
+        <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Rename columns
         </h4>
@@ -3293,19 +4047,26 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
         >
           Add rename
         </button>
-      </div>
+        </div>
+      )}
 
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Output
         </h4>
-        <select
-          value={data.fileType}
-          onChange={(e) => updateNodeData(nodeId, { fileType: e.target.value as TransformNodeData['fileType'] })}
-          className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
-        >
-          {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
+        {lockedFileType ? (
+          <div className="rounded-md border border-border bg-bg-primary px-2 py-2 text-[11px] text-text-secondary">
+            This preset writes a fixed <span className="text-text-primary">{lockedFileType}</span> artifact.
+          </div>
+        ) : (
+          <select
+            value={data.fileType}
+            onChange={(e) => updateNodeData(nodeId, { fileType: e.target.value as TransformNodeData['fileType'] })}
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          >
+            {['tsv', 'csv', 'txt', 'any'].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
         <div className="mt-2">
           <FolderPickerField
             label=""
@@ -3322,7 +4083,7 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
             onChange={(e) => updateNodeData(nodeId, { outputIntermediate: { output: e.target.checked } })}
             className="accent-accent"
           />
-          Mark filtered output as intermediate
+          Temporary output: delete after successful run
         </label>
       </div>
 
@@ -3385,7 +4146,7 @@ export function NodeInspector() {
 
   if (!node) {
     return (
-      <div className="w-80 h-full bg-bg-secondary border-l border-border flex items-center justify-center">
+      <div data-tour="inspector" className="w-80 h-full bg-bg-secondary border-l border-border flex items-center justify-center">
         <p className="text-xs text-text-muted text-center px-6">
           Select a node on the canvas to edit its properties.
         </p>
@@ -3394,12 +4155,13 @@ export function NodeInspector() {
   }
 
   return (
-    <div className="w-80 h-full bg-bg-secondary border-l border-border flex flex-col">
+    <div data-tour="inspector" className="w-80 h-full bg-bg-secondary border-l border-border flex flex-col">
       {/* Header */}
       <div className="px-3 py-2 border-b border-border flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
           {node.type} inspector
         </div>
+        <HelpButton id={node.type === 'merge' ? 'inspector.merge' : node.type === 'tool' ? 'inspector.tool' : node.type === 'file' ? 'inspector.file' : 'inspector.custom'} />
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => duplicateNode(node.id)}
@@ -3435,6 +4197,9 @@ export function NodeInspector() {
         )}
         {node.type === 'merge' && (
           <MergeInspector nodeId={node.id} data={node.data as MergeNodeData} />
+        )}
+        {node.type === 'transfer' && (
+          <TransferInspector nodeId={node.id} data={node.data as TransferNodeData} />
         )}
         {node.type === 'transform' && (
           <TransformInspector nodeId={node.id} data={node.data as TransformNodeData} />

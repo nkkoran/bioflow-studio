@@ -1,5 +1,6 @@
 import { getTool } from '@/lib/toolRegistry'
-import type { FileNodeData, PipelineSnapshot, ToolNodeData } from '@/types/pipeline'
+import { getActiveToolInputs } from '@/lib/analysisOptions'
+import type { FileNodeData, PipelineSnapshot, ToolNodeData, TransformNodeData } from '@/types/pipeline'
 
 export interface EdgeAxisChip {
   axis: string
@@ -33,18 +34,29 @@ export function edgeAxisChips(snapshot: PipelineSnapshot): Record<string, EdgeAx
 
     if (node.type === 'file') {
       const data = node.data as FileNodeData
+      const split = data.split
+      const rawSplitItems = (split as { items?: unknown } | undefined)?.items
+      const splitItems = Array.isArray(rawSplitItems) ? rawSplitItems : []
       outputsByNode.set(nodeId, {
-        output: data.split && data.split.items.length > 0
-          ? { axis: data.split.axis, keys: data.split.items.map((item) => item.key) }
+        output: split && splitItems.length > 0
+          ? { axis: split.axis, keys: splitItems.map((item) => item.key) }
           : null,
       })
       continue
     }
 
     if (node.type === 'transform') {
+      const data = node.data as TransformNodeData
       const inputAxis = inputAxisFor(nodeId, 'input', incoming, outputsByNode)
       outputsByNode.set(nodeId, {
-        output: inputAxis,
+        output: outputCarriesAxis(data, 'output') ? inputAxis : null,
+      })
+      continue
+    }
+
+    if (node.type === 'transfer') {
+      outputsByNode.set(nodeId, {
+        output: inputAxisFor(nodeId, 'input', incoming, outputsByNode),
       })
       continue
     }
@@ -57,7 +69,7 @@ export function edgeAxisChips(snapshot: PipelineSnapshot): Record<string, EdgeAx
         continue
       }
 
-      const candidates = tool.inputs.flatMap((port) => {
+      const candidates = getActiveToolInputs(tool, data).flatMap((port) => {
         if (port.multi || port.arrayable === false) return []
         const axis = inputAxisFor(nodeId, port.id, incoming, outputsByNode)
         return axis ? [{ portId: port.id, axis }] : []
@@ -74,7 +86,7 @@ export function edgeAxisChips(snapshot: PipelineSnapshot): Record<string, EdgeAx
 
       outputsByNode.set(
         nodeId,
-        Object.fromEntries(tool.outputs.map((port) => [port.id, picked])),
+        Object.fromEntries(tool.outputs.map((port) => [port.id, outputCarriesAxis(data, port.id, port.autoMergeDefault) ? picked : null])),
       )
       continue
     }
@@ -113,6 +125,16 @@ function outputAxisFor(
   outputsByNode: Map<string, Record<string, AxisState | null>>,
 ): AxisState | null {
   return outputsByNode.get(nodeId)?.[portId] ?? null
+}
+
+function outputCarriesAxis(
+  data: Pick<ToolNodeData | TransformNodeData, 'outputMerge'>,
+  portId: string,
+  autoMergeDefault?: unknown,
+): boolean {
+  const explicit = data.outputMerge?.[portId]
+  if (explicit) return explicit.mode !== 'auto-merge'
+  return !autoMergeDefault
 }
 
 function topoOrder(snapshot: PipelineSnapshot): string[] {

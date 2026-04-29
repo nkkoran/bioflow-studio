@@ -19,6 +19,7 @@ import {
   useReactFlow,
   type Connection,
   type EdgeTypes,
+  type FinalConnectionState,
   type NodeTypes,
   type OnSelectionChangeParams,
 } from '@xyflow/react'
@@ -28,21 +29,28 @@ import { ToolNode } from './nodes/ToolNode'
 import { FileNode } from './nodes/FileNode'
 import { NoteNode } from './nodes/NoteNode'
 import { MergeNode } from './nodes/MergeNode'
+import { TransferNode } from './nodes/TransferNode'
 import { TransformNode } from './nodes/TransformNode'
 import { AxedEdge } from './edges/AxedEdge'
 import { GroupOverlay } from './GroupOverlay'
 import { PortPickerPopover, type PortPickerState } from './PortPickerPopover'
 import { BUNDLE_DRAG_MIME, DRAG_MIME } from './ToolPalette'
+import { Dialog } from '@/components/ui/Dialog'
+import { Input } from '@/components/ui/Input'
+import { Button } from '@/components/ui/Button'
 import { usePipelineStore, type BioflowNode } from '@/stores/pipelineStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useUIStore } from '@/stores/uiStore'
 import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
+import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { edgeAxisChips } from '@/lib/axisPlannerPure'
 import { pathBasename } from '@/lib/utils'
 import type { FileType } from '@/types/pipeline'
 import type { NodeGroup } from '@/types/pipeline'
+import { useDialogStore } from '@/stores/dialogStore'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
 
@@ -51,6 +59,7 @@ const nodeTypes: NodeTypes = {
   file: FileNode,
   note: NoteNode,
   merge: MergeNode,
+  transfer: TransferNode,
   transform: TransformNode,
 }
 
@@ -65,15 +74,18 @@ function CanvasInner() {
   const { screenToFlowPosition } = useReactFlow()
 
   const nodes = usePipelineStore((s) => s.nodes)
+  const theme = useUIStore((s) => s.theme)
   const edges = usePipelineStore((s) => s.edges)
   const groups = usePipelineStore((s) => s.groups)
   const onNodesChange = usePipelineStore((s) => s.onNodesChange)
   const onEdgesChange = usePipelineStore((s) => s.onEdgesChange)
   const onConnect = usePipelineStore((s) => s.onConnect)
+  const reconnectEdge = usePipelineStore((s) => s.reconnectEdge)
   const addToolNode = usePipelineStore((s) => s.addToolNode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
   const addNoteNode = usePipelineStore((s) => s.addNoteNode)
   const addMergeNode = usePipelineStore((s) => s.addMergeNode)
+  const addTransferNode = usePipelineStore((s) => s.addTransferNode)
   const addTransformNode = usePipelineStore((s) => s.addTransformNode)
   const addNodesAndEdges = usePipelineStore((s) => s.addNodesAndEdges)
   const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
@@ -85,11 +97,21 @@ function CanvasInner() {
   const createGroup = usePipelineStore((s) => s.createGroup)
   const updateGroup = usePipelineStore((s) => s.updateGroup)
   const deleteGroup = usePipelineStore((s) => s.deleteGroup)
+  const deleteEdge = usePipelineStore((s) => s.deleteEdge)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const uploadsSubfolder = useSettingsStore((s) => s.settings.paths.uploadsSubfolder)
+  const confirmDialog = useDialogStore((s) => s.confirm)
 
   const [portPicker, setPortPicker] = useState<PortPickerState | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'selection' | 'group'; group?: NodeGroup } | null>(null)
+  const [groupResourceEditor, setGroupResourceEditor] = useState<null | {
+    groupId: string
+    label: string
+    cpus: string
+    memoryGB: string
+    timeHours: string
+    partition: string
+  }>(null)
   const [dropMessage, setDropMessage] = useState<string | null>(null)
   const [dropBusy, setDropBusy] = useState(false)
   const displayEdges = useMemo(() => {
@@ -173,10 +195,17 @@ function CanvasInner() {
     const label = pathBasename(rawPath)
     let resolvedPath = rawPath
     let source: 'local' | 'remote' = localDrop ? 'local' : 'remote'
+    let origin: 'local' | 'ssh' = localDrop ? 'local' : 'ssh'
     try {
       setDropMessage(localDrop ? `Adding ${label}…` : 'Adding file…')
       if (localDrop && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
-        const uploadNow = window.confirm(`Upload ${label} to the active cluster connection now?`)
+        const uploadNow = await confirmDialog({
+          title: 'Upload dropped file',
+          message: `Upload ${label} to the active cluster connection now?`,
+          detail: 'Choose Upload now to copy the file into the cluster uploads folder before wiring it into the pipeline.',
+          confirmLabel: 'Upload now',
+          cancelLabel: 'Keep local',
+        })
         if (uploadNow) {
           setDropMessage(`Uploading ${label} to the cluster…`)
           const home = (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')).stdout.trim()
@@ -186,18 +215,21 @@ function CanvasInner() {
           await window.api.sftp.upload(activeConnectionId, rawPath, remotePath)
           resolvedPath = remotePath
           source = 'remote'
+          origin = 'ssh'
         }
       }
       const target = findDropTargetTool(nodes, position)
       if (!target) {
-        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
         setDropMessage(source === 'remote' && localDrop ? `Uploaded ${label} and added it to the canvas.` : `Added ${label} to the canvas.`)
         return
       }
 
       const tool = getTool((target.data as any).toolId)
-      if (!tool || tool.inputs.length === 0) {
-        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+      const connectedPortIds = edges.filter((edge) => edge.target === target.id).map((edge) => edge.targetHandle ?? 'input')
+      const activeInputs = tool ? getActiveToolInputs(tool, target.data as any, { connectedPortIds }) : []
+      if (!tool || activeInputs.length === 0) {
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
         setDropMessage(`Added ${label} to the canvas.`)
         return
       }
@@ -210,7 +242,7 @@ function CanvasInner() {
       const attach = (portId: string) => {
         const fileId = addFileNode(
           { x: target.position.x - 220, y: target.position.y },
-          { isInput: true, label, path: resolvedPath, fileType, source },
+          { isInput: true, label, path: resolvedPath, fileType, source, origin },
         )
         onConnect({
           source: fileId,
@@ -221,14 +253,14 @@ function CanvasInner() {
         setDropMessage(`Attached ${label} to ${target.data.label ?? 'the tool'}.`)
       }
 
-      const compatible = tool.inputs.filter((candidate) => {
+      const compatible = activeInputs.filter((candidate) => {
         if (!areTypesCompatible(fileType, candidate.fileType)) return false
         if (candidate.multi) return true
         return !occupied.has(candidate.id)
       })
 
       if (compatible.length === 0) {
-        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source })
+        addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
         setDropMessage(`Added ${label} to the canvas.`)
         return
       }
@@ -242,7 +274,7 @@ function CanvasInner() {
       setPortPicker({
         x: wrapperRef.current?.getBoundingClientRect().left ?? position.x,
         y: wrapperRef.current?.getBoundingClientRect().top ?? position.y,
-        ports: tool.inputs,
+        ports: activeInputs,
         droppedType: fileType,
         occupiedPortIds: occupied,
         onPick: (portId) => {
@@ -257,7 +289,55 @@ function CanvasInner() {
       setDropBusy(false)
       window.setTimeout(() => setDropMessage(null), 3000)
     }
-  }, [activeConnectionId, addFileNode, edges, nodes, onConnect, uploadsSubfolder])
+  }, [activeConnectionId, addFileNode, confirmDialog, edges, nodes, onConnect, uploadsSubfolder])
+
+  const handleDroppedFolder = useCallback(async (
+    folderPath: string,
+    position: { x: number; y: number },
+  ) => {
+    setDropBusy(true)
+    try {
+      setDropMessage('Creating split input from folder…')
+      const entries = (await window.api.local.ls(folderPath)).filter((entry) => !entry.isDirectory)
+      if (entries.length === 0) {
+        setDropMessage('Folder has no files to split.')
+        return
+      }
+      const items = entries.map((entry) => ({ key: entry.name, path: entry.path }))
+      const firstType = inferFileType(entries[0].name) as FileType
+      const allSameType = entries.every((entry) => inferFileType(entry.name) === firstType)
+      const label = pathBasename(folderPath) || 'Folder split'
+      const fileId = addFileNode(position, {
+        isInput: true,
+        label,
+        path: folderPath,
+        fileType: allSameType ? firstType : 'any',
+        source: 'local',
+        origin: 'local',
+        split: {
+          axis: 'file',
+          items,
+          pattern: { kind: 'manual' },
+        },
+      })
+      const target = findDropTargetTool(nodes, position)
+      if (target) {
+        const tool = getTool((target.data as any).toolId)
+        const connectedPortIds = edges.filter((edge) => edge.target === target.id).map((edge) => edge.targetHandle ?? 'input')
+        const activeInputs = tool ? getActiveToolInputs(tool, target.data as any, { connectedPortIds }) : []
+        const compatible = activeInputs.find((port) => areTypesCompatible(allSameType ? firstType : 'any', port.fileType))
+        if (compatible) {
+          onConnect({ source: fileId, sourceHandle: 'output', target: target.id, targetHandle: compatible.id })
+        }
+      }
+      setDropMessage(`Added ${items.length} files as an axis-split input.`)
+    } catch (err) {
+      setDropMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDropBusy(false)
+      window.setTimeout(() => setDropMessage(null), 3000)
+    }
+  }, [addFileNode, edges, nodes, onConnect])
 
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
@@ -268,24 +348,33 @@ function CanvasInner() {
       const droppedLocalPaths = readLocalDropPaths(event)
       if (!payload && !bundlePayload && !filePath && droppedLocalPaths.length === 0) return
 
-      if (droppedLocalPaths.length > 1) {
-        setDropMessage('Drag one file at a time for now.')
-        window.setTimeout(() => setDropMessage(null), 3000)
-        return
-      }
-
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       })
+
+      if (droppedLocalPaths.length > 1) {
+        const items = droppedLocalPaths.map((path) => ({ key: pathBasename(path), path }))
+        addFileNode(position, {
+          isInput: true,
+          label: 'Dropped file split',
+          path: '',
+          fileType: 'any',
+          source: 'local',
+          origin: 'local',
+          split: { axis: 'file', items, pattern: { kind: 'manual' } },
+        })
+        setDropMessage(`Added ${items.length} files as an axis-split input.`)
+        window.setTimeout(() => setDropMessage(null), 3000)
+        return
+      }
 
       const droppedLocalPath = droppedLocalPaths[0]
       if (droppedLocalPath) {
         try {
           const stat = await window.api.local.stat(droppedLocalPath)
           if (stat.isDirectory) {
-            setDropMessage('Dropping folders is not supported yet. Drop a single file instead.')
-            window.setTimeout(() => setDropMessage(null), 3000)
+            await handleDroppedFolder(droppedLocalPath, position)
             return
           }
         } catch (err) {
@@ -314,12 +403,13 @@ function CanvasInner() {
         else if (kind === 'file-output') addFileNode(position, { isInput: false, label: 'Output file' })
         else if (kind === 'note') addNoteNode(position)
         else if (kind === 'merge') addMergeNode(position)
+        else if (kind === 'transfer') addTransferNode(position)
         else if (kind === 'transform') addTransformNode(position)
       } else {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, handleDroppedPath, addToolNode, addNoteNode, addMergeNode, addTransformNode, addNodesAndEdges],
+    [screenToFlowPosition, handleDroppedPath, handleDroppedFolder, addFileNode, addToolNode, addNoteNode, addMergeNode, addTransferNode, addTransformNode, addNodesAndEdges],
   )
 
   useEffect(() => {
@@ -327,11 +417,27 @@ function CanvasInner() {
       const detail = (event as CustomEvent<{ clientX: number; clientY: number; paths: string[] }>).detail
       if (!detail?.paths?.[0]) return
       const position = screenToFlowPosition({ x: detail.clientX, y: detail.clientY })
-      void handleDroppedPath(detail.paths[0], position, true)
+      if (detail.paths.length > 1) {
+        const items = detail.paths.map((path) => ({ key: pathBasename(path), path }))
+        addFileNode(position, {
+          isInput: true,
+          label: 'Dropped file split',
+          path: '',
+          fileType: 'any',
+          source: 'local',
+          origin: 'local',
+          split: { axis: 'file', items, pattern: { kind: 'manual' } },
+        })
+        return
+      }
+      void window.api.local.stat(detail.paths[0]).then((stat) => {
+        if (stat.isDirectory) return handleDroppedFolder(detail.paths[0], position)
+        return handleDroppedPath(detail.paths[0], position, true)
+      })
     }
     window.addEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)
     return () => window.removeEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)
-  }, [handleDroppedPath, screenToFlowPosition])
+  }, [addFileNode, handleDroppedFolder, handleDroppedPath, screenToFlowPosition])
 
   /**
    * Validate a proposed connection. Rejects connections where the source
@@ -356,6 +462,8 @@ function CanvasInner() {
         sourceType = (sourceNode.data as any).fileType
       } else if (sourceNode.type === 'transform') {
         sourceType = (sourceNode.data as any).fileType
+      } else if (sourceNode.type === 'transfer') {
+        sourceType = 'any'
       }
       // merge nodes pass through — their output type matches upstream
 
@@ -363,11 +471,17 @@ function CanvasInner() {
       let targetType = 'any'
       if (targetNode.type === 'tool') {
         const tool = getTool((targetNode.data as any).toolId)
-        const port = tool?.inputs.find((p) => p.id === conn.targetHandle)
+        const connectedPortIds = nodes
+          ? edges.filter((edge) => edge.target === targetNode.id).map((edge) => edge.targetHandle ?? 'input')
+          : []
+        const port = tool ? getActiveToolInputs(tool, targetNode.data as any, { connectedPortIds }).find((p) => p.id === conn.targetHandle) : undefined
         if (port) targetType = port.fileType
+        else return false
       } else if (targetNode.type === 'file') {
         targetType = (targetNode.data as any).fileType
       } else if (targetNode.type === 'transform') {
+        targetType = 'any'
+      } else if (targetNode.type === 'transfer') {
         targetType = 'any'
       }
       // merge nodes accept any input — validation happens at plan time
@@ -442,8 +556,22 @@ function CanvasInner() {
     [],
   )
 
+  const handleReconnect = useCallback((oldEdge: typeof edges[number], connection: Connection) => {
+    reconnectEdge(oldEdge.id, connection)
+  }, [reconnectEdge])
+
+  const handleReconnectEnd = useCallback((
+    _event: MouseEvent | TouchEvent,
+    edge: typeof edges[number],
+    _handleType: 'source' | 'target',
+    connectionState: FinalConnectionState,
+  ) => {
+    if (connectionState.isValid === true) return
+    deleteEdge(edge.id)
+  }, [deleteEdge])
+
   return (
-    <div ref={wrapperRef} className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
+    <div ref={wrapperRef} data-tour="canvas" className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
       <ReactFlow
         nodes={displayNodes}
         edges={visibleEdges}
@@ -452,10 +580,13 @@ function CanvasInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onReconnect={handleReconnect}
+        onReconnectEnd={handleReconnectEnd}
         onSelectionChange={onSelectionChange}
         onNodeContextMenu={onNodeContextMenu}
         isValidConnection={isValidConnection}
         defaultEdgeOptions={defaultEdgeOptions}
+        edgesReconnectable
         proOptions={proOptions}
         fitView
         fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
@@ -463,7 +594,7 @@ function CanvasInner() {
         snapGrid={[16, 16]}
         deleteKeyCode={['Delete', 'Backspace']}
         multiSelectionKeyCode={['Meta', 'Control']}
-        colorMode="dark"
+        colorMode={theme === 'light' ? 'light' : 'dark'}
       >
         <Background gap={16} size={1} />
         <Controls position="bottom-right" showInteractive={false} />
@@ -476,6 +607,7 @@ function CanvasInner() {
             if (n.type === 'file') return '#f59e0b'
             if (n.type === 'note') return '#fbbf24'
             if (n.type === 'merge') return '#818cf8'
+            if (n.type === 'transfer') return '#22d3ee'
             if (n.type === 'transform') return '#2dd4bf'
             return '#888'
           }}
@@ -489,6 +621,19 @@ function CanvasInner() {
           onToggleCollapse={(group) => updateGroup(group.id, { collapsed: !group.collapsed })}
         />
       </ReactFlow>
+      {nodes.length === 0 && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+          <div className="rounded-lg border border-dashed border-border bg-bg-secondary/70 px-6 py-5 text-center shadow-xl backdrop-blur-sm">
+            <div className="text-sm font-medium text-text-primary">Build a pipeline</div>
+            <div className="mt-1 text-xs text-text-secondary">
+              Drag a file or folder here, or pick a tool from the left sidebar.
+            </div>
+            <div className="mt-1 text-[11px] text-text-muted">
+              Folders become axis-split inputs. Help → Build Your First Pipeline for a guided tour.
+            </div>
+          </div>
+        </div>
+      )}
       {dropMessage && (
         <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded border border-accent/40 bg-bg-secondary px-3 py-1 text-xs text-text-primary shadow">
           <div className="flex items-center gap-2">
@@ -544,17 +689,13 @@ function CanvasInner() {
                     className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-hover"
                     onClick={() => {
                       const group = menu.group!
-                      const cpus = prompt('CPUs for grouped sbatch (blank = max across nodes)', group.sharedResources?.cpus?.toString() ?? '')
-                      const memoryGB = prompt('Memory GB for grouped sbatch (blank = max across nodes)', group.sharedResources?.memoryGB?.toString() ?? '')
-                      const timeHours = prompt('Time hours for grouped sbatch (blank = max across nodes)', group.sharedResources?.timeHours?.toString() ?? '')
-                      const partition = prompt('Partition for grouped sbatch (blank = default)', group.sharedResources?.partition ?? '')
-                      updateGroup(group.id, {
-                        sharedResources: {
-                          cpus: cpus ? Number(cpus) : undefined,
-                          memoryGB: memoryGB ? Number(memoryGB) : undefined,
-                          timeHours: timeHours ? Number(timeHours) : undefined,
-                          partition: partition || undefined,
-                        },
+                      setGroupResourceEditor({
+                        groupId: group.id,
+                        label: group.label,
+                        cpus: group.sharedResources?.cpus?.toString() ?? '',
+                        memoryGB: group.sharedResources?.memoryGB?.toString() ?? '',
+                        timeHours: group.sharedResources?.timeHours?.toString() ?? '',
+                        partition: group.sharedResources?.partition ?? '',
                       })
                       setMenu(null)
                     }}
@@ -567,6 +708,70 @@ function CanvasInner() {
           </div>
         </>
       )}
+      <Dialog
+        open={groupResourceEditor !== null}
+        onClose={() => setGroupResourceEditor(null)}
+        title="Grouped sbatch resources"
+        footer={(
+          <>
+            <Button variant="secondary" onClick={() => setGroupResourceEditor(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!groupResourceEditor) return
+                updateGroup(groupResourceEditor.groupId, {
+                  sharedResources: {
+                    cpus: groupResourceEditor.cpus.trim() ? Number(groupResourceEditor.cpus) : undefined,
+                    memoryGB: groupResourceEditor.memoryGB.trim() ? Number(groupResourceEditor.memoryGB) : undefined,
+                    timeHours: groupResourceEditor.timeHours.trim() ? Number(groupResourceEditor.timeHours) : undefined,
+                    partition: groupResourceEditor.partition.trim() || undefined,
+                  },
+                })
+                setGroupResourceEditor(null)
+              }}
+            >
+              Save resources
+            </Button>
+          </>
+        )}
+      >
+        {groupResourceEditor && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2 text-xs text-text-muted">
+              Override the shared Slurm resources for <span className="text-text-primary">{groupResourceEditor.label}</span>. Leave fields blank to keep the automatic max-across-nodes behavior.
+            </div>
+            <Input
+              label="CPUs"
+              type="number"
+              min={1}
+              value={groupResourceEditor.cpus}
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, cpus: e.target.value } : current)}
+            />
+            <Input
+              label="Memory (GB)"
+              type="number"
+              min={1}
+              value={groupResourceEditor.memoryGB}
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, memoryGB: e.target.value } : current)}
+            />
+            <Input
+              label="Time (hours)"
+              type="number"
+              min={0}
+              step="0.5"
+              value={groupResourceEditor.timeHours}
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, timeHours: e.target.value } : current)}
+            />
+            <Input
+              label="Partition"
+              value={groupResourceEditor.partition}
+              placeholder="Use connection default"
+              onChange={(e) => setGroupResourceEditor((current) => current ? { ...current, partition: e.target.value } : current)}
+            />
+          </div>
+        )}
+      </Dialog>
     </div>
   )
 }

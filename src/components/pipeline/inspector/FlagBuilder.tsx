@@ -3,13 +3,18 @@ import { GripVertical, Info, ArrowDown, ArrowUp, Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { LocalPathField } from '@/components/file-browser/LocalPathField'
+import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import {
   blockHasValue,
+  blockFlag,
   blockLabel,
   buildPresetFlagBlocks,
+  createCustomFlagBlock,
   getFlagDef,
   getToolFlagDefs,
   getToolPresetOptions,
+  CUSTOM_FLAG_ID,
 } from '@/lib/flagRegistry'
 import { columnParamValues, connectedInputPath, type SchemaCache } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
@@ -100,7 +105,22 @@ function buildPreviewCommand(
   for (const block of enabled) {
     const def = getFlagDef(tool.id, block.flagId)
     if (!def) continue
+    const renderedFlag = blockFlag(tool.id, block)
+    if (!renderedFlag) continue
+    if (tool.id === 'plink2.assoc' && ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno'].includes(def.id)) {
+      continue
+    }
     if (tool.id === 'plink2.score' && ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation'].includes(def.id)) {
+      continue
+    }
+    if (tool.id === 'plink2.assoc' && def.id === 'glm') {
+      const extras: string[] = []
+      const mode = previewValue(block.value, 'firth-fallback')
+      if (mode && mode !== '<value>') extras.push(mode)
+      for (const modifier of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
+        if (byFlagId.get(modifier)?.enabled) extras.push(modifier)
+      }
+      parts.push(`--glm${extras.length ? ` ${extras.join(' ')}` : ''}`)
       continue
     }
     if (tool.id === 'plink2.score' && def.id === 'score') {
@@ -118,7 +138,7 @@ function buildPreviewCommand(
       continue
     }
     if (def.kind === 'toggle') {
-      parts.push(def.flag)
+      parts.push(renderedFlag)
       continue
     }
     if (def.kind === 'fileInput') {
@@ -126,12 +146,23 @@ function buildPreviewCommand(
       const file = source.kind === 'upstream-file'
         ? connectedInputPath(snapshot, nodeId, def.sourcePortId ?? source.portId ?? 'input') ?? `<${def.sourcePortId ?? source.portId ?? 'input'}>`
         : source.value?.trim() || `<${def.label.toLowerCase()}>`
-      parts.push(`${def.flag} ${quotePreview(file)}`)
+      parts.push(`${renderedFlag} ${quotePreview(file)}`)
+      continue
+    }
+    if (block.flagId === CUSTOM_FLAG_ID && block.customInputKind === 'file') {
+      const source = sourceValue(block.value, 'path')
+      const file = source.value?.trim() || '<file>'
+      parts.push(`${renderedFlag} ${quotePreview(file)}`)
+      continue
+    }
+    if (def.kind === 'raw') {
+      const value = previewValue(block.value, '')
+      parts.push(value ? `${renderedFlag} ${value}` : renderedFlag)
       continue
     }
     const value = previewValue(block.value)
-    if (value === '<value>' && def.kind !== 'raw') continue
-    parts.push(`${def.flag} ${value}`)
+    if (value === '<value>') continue
+    parts.push(`${renderedFlag} ${value}`)
   }
 
   parts.push('--out <output-prefix>')
@@ -342,14 +373,113 @@ function FileSourceEditor({
             <>No upstream file is connected on <span className="font-mono text-text-primary">{def.sourcePortId ?? current.portId ?? 'input'}</span>.</>
           )}
         </div>
-      ) : (
-        <Input
+      ) : current.kind === 'local-path' ? (
+        <LocalPathField
           label={pathLabel}
           value={current.value ?? ''}
-          placeholder={current.kind === 'local-path' ? '/Users/you/input.tsv' : '/project/.../input.tsv'}
-          onChange={(event) => onChange({ ...current, value: event.target.value })}
+          placeholder="/Users/you/input.tsv"
+          onChange={(value) => onChange({ ...current, value })}
+          mode="file"
+        />
+      ) : (
+        <RemotePathField
+          label={pathLabel}
+          value={current.value ?? ''}
+          placeholder="/project/.../input.tsv"
+          onChange={(value) => onChange({ ...current, value })}
+          mode="file"
+          title={`Select ${def.label}`}
+          buttonLabel="Browse"
         />
       )}
+    </div>
+  )
+}
+
+function CustomFlagEditor({
+  nodeId,
+  snapshot,
+  block,
+  onChange,
+}: {
+  nodeId: string
+  snapshot: PipelineSnapshot
+  block: ToolFlagBlock
+  onChange: (patch: Partial<ToolFlagBlock>) => void
+}) {
+  const inputKind = block.customInputKind ?? 'text'
+  const customFileDef: ToolFlagDef = {
+    id: CUSTOM_FLAG_ID,
+    flag: block.customFlag?.trim() || '--custom',
+    label: block.customLabel?.trim() || 'Custom file',
+    group: 'Advanced',
+    kind: 'fileInput',
+  }
+
+  return (
+    <div className="grid gap-2 md:grid-cols-2">
+      <Input
+        label="Flag"
+        value={block.customFlag ?? ''}
+        placeholder="--set-all-var-ids"
+        onChange={(event) => onChange({ customFlag: event.target.value })}
+      />
+      <Input
+        label="Label (optional)"
+        value={block.customLabel ?? ''}
+        placeholder="Variant ID rewrite"
+        onChange={(event) => onChange({ customLabel: event.target.value })}
+      />
+      <div className="md:col-span-2">
+        <div className="mb-1 text-text-secondary text-xs font-medium">Input type</div>
+        <div className="flex flex-wrap gap-1">
+          {([
+            ['text', 'Text'],
+            ['file', 'File'],
+          ] as const).map(([kind, label]) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => onChange({
+                customInputKind: kind,
+                value: kind === 'file'
+                  ? (isValueSource(block.value) ? block.value : { kind: 'path', value: String(block.value ?? '') })
+                  : (isValueSource(block.value) ? (block.value.value ?? '') : String(block.value ?? '')),
+              })}
+              className={classNames(
+                'rounded border px-2 py-1 text-[10px]',
+                inputKind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="md:col-span-2">
+        {inputKind === 'file' ? (
+          <FileSourceEditor
+            nodeId={nodeId}
+            snapshot={snapshot}
+            block={{
+              ...block,
+              value: isValueSource(block.value) ? block.value : { kind: 'path', value: String(block.value ?? '') },
+            }}
+            def={customFileDef}
+            onChange={(value) => onChange({ value, customInputKind: 'file' })}
+          />
+        ) : (
+          <Input
+            label="Value (optional)"
+            value={isValueSource(block.value) ? (block.value.value ?? '') : (block.value === undefined || block.value === null ? '' : String(block.value))}
+            placeholder="@:#$r,$a or leave blank for a switch flag"
+            onChange={(event) => onChange({ value: event.target.value, customInputKind: 'text' })}
+          />
+        )}
+      </div>
+      <p className="md:col-span-2 text-[10px] text-text-muted">
+        Leave Value empty when the flag is just a switch. File mode uses the same remote/local browse controls as the built-in file flags.
+      </p>
     </div>
   )
 }
@@ -373,6 +503,22 @@ function BlockControl({
   onLoadSchema: (path: string, options?: { force?: boolean }) => Promise<void>
   onChange: (value: unknown) => void
 }) {
+  if (block.flagId === CUSTOM_FLAG_ID) {
+    return (
+      <CustomFlagEditor
+        nodeId={nodeId}
+        snapshot={snapshot}
+        block={block}
+        onChange={(patch) => onChange({
+          value: patch.value ?? block.value ?? '',
+          flag: patch.customFlag ?? block.customFlag ?? '',
+          label: patch.customLabel ?? block.customLabel ?? '',
+          inputKind: patch.customInputKind ?? block.customInputKind ?? 'text',
+        })}
+      />
+    )
+  }
+
   if (def.kind === 'toggle') {
     return (
       <div className="text-[11px] text-text-muted">
@@ -468,12 +614,15 @@ export function FlagBuilder({
   }
 
   const addFlag = (flagIdValue: string, index?: number) => {
-    const block = {
-      id: `${flagIdValue}_${Math.random().toString(36).slice(2, 10)}`,
-      flagId: flagIdValue,
-      enabled: true,
-      value: structuredClone(getFlagDef(tool.id, flagIdValue)?.defaultValue),
-    } satisfies ToolFlagBlock
+    if (flagIdValue !== CUSTOM_FLAG_ID && activeBlocks.some((block) => block.flagId === flagIdValue)) return
+    const block = flagIdValue === CUSTOM_FLAG_ID
+      ? createCustomFlagBlock(tool.id)
+      : {
+          id: `${flagIdValue}_${Math.random().toString(36).slice(2, 10)}`,
+          flagId: flagIdValue,
+          enabled: true,
+          value: structuredClone(getFlagDef(tool.id, flagIdValue)?.defaultValue),
+        } satisfies ToolFlagBlock
     if (typeof index === 'number') {
       const next = [...activeBlocks]
       next.splice(index, 0, block)
@@ -503,22 +652,27 @@ export function FlagBuilder({
       <div className="rounded-md border border-border bg-bg-tertiary/30 p-3">
         <div className="mb-2 flex items-center justify-between gap-2">
           <h5 className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Flag Palette</h5>
-          {presetOptions.length > 0 && (
-            <select
-              value=""
-              onChange={(event) => {
-                if (!event.target.value) return
-                applyBlocks(buildPresetFlagBlocks(tool.id, event.target.value as Parameters<typeof buildPresetFlagBlocks>[1]))
-                event.target.value = ''
-              }}
-              className="h-7 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-primary"
-            >
-              <option value="">Apply preset…</option>
-              {presetOptions.map((preset) => (
-                <option key={preset.id} value={preset.id}>{preset.label}</option>
-              ))}
-            </select>
-          )}
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" className="h-7 px-2 text-[11px]" onClick={() => addFlag(CUSTOM_FLAG_ID)}>
+              Custom flag
+            </Button>
+            {presetOptions.length > 0 && (
+              <select
+                value=""
+                onChange={(event) => {
+                  if (!event.target.value) return
+                  applyBlocks(buildPresetFlagBlocks(tool.id, event.target.value as Parameters<typeof buildPresetFlagBlocks>[1]))
+                  event.target.value = ''
+                }}
+                className="h-7 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-primary"
+              >
+                <option value="">Apply preset…</option>
+                {presetOptions.map((preset) => (
+                  <option key={preset.id} value={preset.id}>{preset.label}</option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
         <Input
           label=""
@@ -605,7 +759,13 @@ export function FlagBuilder({
           {activeBlocks.map((block, index) => {
             const def = getFlagDef(tool.id, block.flagId)
             if (!def) return null
-            const isInvalid = block.enabled && def.requiredValue && !blockHasValue(block.value)
+            const isInvalid = block.enabled && (
+              (def.requiredValue && !blockHasValue(block.value))
+              || (block.flagId === CUSTOM_FLAG_ID && (
+                !block.customFlag?.trim()
+                || (block.customInputKind === 'file' && !blockHasValue(block.value))
+              ))
+            )
             return (
               <div
                 key={block.id}
@@ -621,11 +781,11 @@ export function FlagBuilder({
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <GripVertical size={14} className="shrink-0 text-text-muted" />
-                    <div className="min-w-0">
-                      <div className="truncate text-xs font-medium text-text-primary">{blockLabel(tool.id, block)}</div>
-                      <div className="text-[10px] font-mono text-text-muted">{def.flag}</div>
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium text-text-primary">{blockLabel(tool.id, block)}</div>
+                      <div className="text-[10px] font-mono text-text-muted">{blockFlag(tool.id, block) || def.flag}</div>
+                      </div>
                     </div>
-                  </div>
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
@@ -673,6 +833,16 @@ export function FlagBuilder({
                       refreshingSchemaPath={refreshingSchemaPath}
                       onLoadSchema={onLoadSchema}
                       onChange={(value) => {
+                        if (block.flagId === CUSTOM_FLAG_ID && value && typeof value === 'object') {
+                          const patch = value as { value?: unknown; flag?: string; label?: string; inputKind?: 'text' | 'file' }
+                          applyBlocks(updateBlock(activeBlocks, block.id, {
+                            value: patch.value ?? '',
+                            customFlag: patch.flag ?? '',
+                            customLabel: patch.label ?? '',
+                            customInputKind: patch.inputKind ?? block.customInputKind ?? 'text',
+                          }))
+                          return
+                        }
                         if (def.kind === 'toggle' && typeof value === 'boolean') {
                           applyBlocks(updateBlock(activeBlocks, block.id, { enabled: value }))
                           return
@@ -681,7 +851,13 @@ export function FlagBuilder({
                       }}
                     />
                     {isInvalid && (
-                      <div className="text-[10px] text-error">This flag needs a value before Run can proceed.</div>
+                      <div className="text-[10px] text-error">
+                        {block.flagId === CUSTOM_FLAG_ID
+                          ? block.customInputKind === 'file' && !blockHasValue(block.value)
+                            ? 'Choose a file path and enter the exact flag name before Run can proceed.'
+                            : 'Enter the exact flag name before Run can proceed.'
+                          : 'This flag needs a value before Run can proceed.'}
+                      </div>
                     )}
                   </div>
                 )}
@@ -697,7 +873,7 @@ export function FlagBuilder({
           </div>
           {activeBlocks.length === 0 && (
             <div className="rounded border border-border bg-bg-secondary px-3 py-2 text-xs text-text-muted">
-              No flags selected yet. Add one from the palette or apply a preset.
+              No flags selected yet. Add one from the palette, apply a preset, or use Custom flag for anything BioFlow does not expose yet.
             </div>
           )}
         </div>

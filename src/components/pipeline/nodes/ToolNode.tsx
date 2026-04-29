@@ -15,6 +15,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { computeNodeOutputPreview } from '@/lib/outputPathPreview'
 import { iconForTool } from '@/lib/toolIcons'
+import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
@@ -97,6 +98,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
 
   const borderColor = CATEGORY_COLORS[tool.category] ?? 'border-border'
   const connectedInputs = new Set(edges.filter((edge) => edge.target === id).map((edge) => edge.targetHandle ?? 'input'))
+  const activeInputs = getActiveToolInputs(tool, nodeData, { connectedPortIds: connectedInputs })
   const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
   const inputDetailsByPort = useMemo(() => {
     const details = new Map<string, string>()
@@ -140,6 +142,11 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           <div className="text-[10px] uppercase tracking-wide text-text-muted flex items-center gap-1">
             <ToolIcon size={10} className="shrink-0" />
             <span>{tool.category}</span>
+            {tool.backends && tool.backends.length > 1 && (
+              <span className="rounded bg-cyan-500/15 px-1 py-px text-[9px] text-cyan-200 normal-case tracking-normal">
+                {nodeData.backend === 'dnx' ? 'dnx' : 'ssh'}
+              </span>
+            )}
             {nodeData.executionMode === 'login' && (
               <span className="rounded bg-yellow-500/15 px-1 py-px text-[9px] text-yellow-300 normal-case tracking-normal">
                 login
@@ -164,10 +171,10 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           exactly with the port label. */}
       <div className="px-3 py-2 flex flex-col text-[11px]">
         {/* Inputs on the left */}
-        {tool.inputs.length > 0 && (
+        {activeInputs.length > 0 && (
           <div className="mb-1 text-[9px] uppercase tracking-wide text-text-muted">Inputs</div>
         )}
-        {tool.inputs.map((port) => {
+        {activeInputs.map((port) => {
           const connected = connectedInputs.has(port.id)
           return (
             <div key={port.id} className="relative flex items-center h-7 gap-2">
@@ -199,7 +206,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
           )
         })}
 
-        {tool.inputs.length > 0 && tool.outputs.length > 0 && (
+        {activeInputs.length > 0 && tool.outputs.length > 0 && (
           <div className="h-px bg-border my-1" />
         )}
 

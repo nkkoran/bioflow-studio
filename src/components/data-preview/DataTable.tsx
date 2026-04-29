@@ -18,7 +18,8 @@ interface DataTableProps {
   filePath: string
   headers: string[]
   rows: string[][]
-  onExportFiltered?: () => void
+  onAddFilteredToPipeline?: () => void
+  onExportFilteredFile?: (filteredRows: string[][]) => void
 }
 
 const columnHelper = createColumnHelper<string[]>()
@@ -26,7 +27,7 @@ const EMPTY_FILTERS: TransformFilterRule[] = []
 const DEFAULT_VISIBLE_COLUMNS = 24
 const SUMMARY_SAMPLE_ROWS = 400
 
-export function DataTable({ filePath, headers, rows, onExportFiltered }: DataTableProps) {
+export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, onExportFilteredFile }: DataTableProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
   const visibleColumns = useDataPreviewStore((s) => s.visibleColumns[filePath])
@@ -40,6 +41,7 @@ export function DataTable({ filePath, headers, rows, onExportFiltered }: DataTab
   const setSort = useDataPreviewStore((s) => s.setSort)
   const setScrollOffset = useDataPreviewStore((s) => s.setScrollOffset)
   const [columnDraft, setColumnDraft] = useState('')
+  const [filterExpression, setFilterExpression] = useState('')
   const hasDraftChanges = JSON.stringify(draftFilters) !== JSON.stringify(filters)
   const deferredColumnDraft = useDeferredValue(columnDraft)
 
@@ -64,31 +66,20 @@ export function DataTable({ filePath, headers, rows, onExportFiltered }: DataTab
     }
   }, [filePath, rows.length])
 
-  const filteredRows = useMemo(() => {
-    let next = filters.length > 0
-      ? rows.filter((row) => rowMatchesFilters(row, headers, filters))
-      : rows
-    if (sort) {
-      const idx = headers.indexOf(sort.column)
-      if (idx >= 0) {
-        next = [...next].sort((a, b) => {
-          const av = a[idx] ?? ''
-          const bv = b[idx] ?? ''
-          const an = Number(av)
-          const bn = Number(bv)
-          const cmp = !Number.isNaN(an) && !Number.isNaN(bn)
-            ? an - bn
-            : av.localeCompare(bv, undefined, { numeric: true })
-          return sort.dir === 'asc' ? cmp : -cmp
-        })
-      }
-    }
-    return next
-  }, [filters, headers, rows, sort])
+  const appliedRows = useMemo(
+    () => filterAndSortRows(rows, headers, filters, sort),
+    [filters, headers, rows, sort],
+  )
+  const draftPreviewRows = useMemo(
+    () => filterAndSortRows(rows, headers, draftFilters, sort),
+    [draftFilters, headers, rows, sort],
+  )
+  const displayedRows = hasDraftChanges ? draftPreviewRows : appliedRows
+  const removedRows = rows.length - displayedRows.length
 
   const summaryRows = useMemo(
-    () => filteredRows.length > SUMMARY_SAMPLE_ROWS ? filteredRows.slice(0, SUMMARY_SAMPLE_ROWS) : filteredRows,
-    [filteredRows],
+    () => displayedRows.length > SUMMARY_SAMPLE_ROWS ? displayedRows.slice(0, SUMMARY_SAMPLE_ROWS) : displayedRows,
+    [displayedRows],
   )
 
   const columnSummaries = useMemo(() => new Map(
@@ -149,7 +140,7 @@ export function DataTable({ filePath, headers, rows, onExportFiltered }: DataTab
   )
 
   const table = useReactTable({
-    data: filteredRows,
+    data: displayedRows,
     columns,
     getCoreRowModel: getCoreRowModel(),
   })
@@ -200,13 +191,45 @@ export function DataTable({ filePath, headers, rows, onExportFiltered }: DataTab
             Revert draft
           </button>
           <button
-            onClick={() => onExportFiltered?.()}
-            disabled={filters.length === 0}
+            onClick={() => onExportFilteredFile?.(appliedRows)}
+            disabled={appliedRows.length === 0 || hasDraftChanges}
             className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasDraftChanges ? 'Apply the draft filters first, then export the applied result.' : undefined}
           >
-            Export filtered as file…
+            Export as file
           </button>
-          {hasDraftChanges && <span>Unapplied changes</span>}
+          <button
+            onClick={() => onAddFilteredToPipeline?.()}
+            disabled={filters.length === 0 || hasDraftChanges}
+            className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasDraftChanges ? 'Apply the draft filters first, then add the applied result to the pipeline.' : undefined}
+          >
+            Add to pipeline
+          </button>
+          {hasDraftChanges && <span>Previewing draft filters</span>}
+        </div>
+        <div className="rounded-md border border-border bg-bg-primary/60 px-2 py-1 text-[11px] text-text-muted">
+          {hasDraftChanges
+            ? `Rows: ${displayedRows.length} in draft preview · ${appliedRows.length} applied · ${rows.length} original`
+            : `Rows: ${rows.length} original · ${removedRows} removed · ${displayedRows.length} remaining`}
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            value={filterExpression}
+            onChange={(e) => setFilterExpression(e.target.value)}
+            placeholder='R-like filter, e.g. age > 50 & status == "case"'
+            className="h-7 flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary placeholder:text-text-muted outline-none focus:ring-1 focus:ring-accent"
+          />
+          <button
+            onClick={() => {
+              const parsed = parseFilterExpression(filterExpression, headers)
+              if (!parsed) return
+              setDraftFilters(filePath, parsed)
+            }}
+            className="h-7 rounded-md border border-accent/40 bg-accent/10 px-2 text-[11px] text-accent"
+          >
+            Set draft
+          </button>
         </div>
 
         {draftFilters.length > 0 ? (
@@ -371,11 +394,37 @@ export function DataTable({ filePath, headers, rows, onExportFiltered }: DataTab
 
       <div className="shrink-0 border-t border-border bg-bg-secondary px-3 py-1.5">
         <span className="text-xs text-text-muted">
-          Showing {filteredRows.length} of {rows.length} rows · {visibleIndexes.length} of {headers.length} columns
+          {hasDraftChanges
+            ? `Showing ${displayedRows.length} preview rows (${appliedRows.length} applied) · ${visibleIndexes.length} of ${headers.length} columns`
+            : `Showing ${displayedRows.length} of ${rows.length} rows · ${visibleIndexes.length} of ${headers.length} columns`}
         </span>
       </div>
     </div>
   )
+}
+
+function filterAndSortRows(
+  rows: string[][],
+  headers: string[],
+  filters: TransformFilterRule[],
+  sort: { column: string; dir: 'asc' | 'desc' } | undefined,
+): string[][] {
+  let next = filters.length > 0
+    ? rows.filter((row) => rowMatchesFilters(row, headers, filters))
+    : rows
+  if (!sort) return next
+  const idx = headers.indexOf(sort.column)
+  if (idx < 0) return next
+  return [...next].sort((a, b) => {
+    const av = a[idx] ?? ''
+    const bv = b[idx] ?? ''
+    const an = Number(av)
+    const bn = Number(bv)
+    const cmp = !Number.isNaN(an) && !Number.isNaN(bn)
+      ? an - bn
+      : av.localeCompare(bv, undefined, { numeric: true })
+    return sort.dir === 'asc' ? cmp : -cmp
+  })
 }
 
 const FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
@@ -588,8 +637,7 @@ export function rowMatchesFilters(row: string[], headers: string[], rules: Trans
 
 export function rowMatchesRule(row: string[], headers: string[], rule: TransformFilterRule): boolean {
   const idx = headers.indexOf(rule.column)
-  if (idx < 0) return true
-  const raw = String(row[idx] ?? '')
+  const raw = idx < 0 ? '' : String(row[idx] ?? '')
   const value = String(rule.value ?? '')
   switch (rule.op) {
     case 'contains':
@@ -633,4 +681,44 @@ function inferDefaultFilterOp(column: string, headers: string[], rows: string[][
   if (sample.length === 0) return 'contains'
   const numeric = sample.filter((value) => !Number.isNaN(Number(value)))
   return numeric.length / sample.length >= 0.8 ? 'equals' : 'contains'
+}
+
+function parseFilterExpression(expression: string, headers: string[]): TransformFilterRule[] | null {
+  const source = expression.trim()
+  if (!source) return null
+  const tokens = source.split(/(\&\&|\|\||\&|\|)/).map((item) => item.trim()).filter(Boolean)
+  const rules: TransformFilterRule[] = []
+  let join: 'and' | 'or' = 'and'
+  for (const token of tokens) {
+    if (token === '&' || token === '&&') {
+      join = 'and'
+      continue
+    }
+    if (token === '|' || token === '||') {
+      join = 'or'
+      continue
+    }
+    const match = token.match(/^([A-Za-z0-9_.-]+)\s*(==|!=|>=|<=|>|<|~=)\s*(.+)$/)
+    if (!match) continue
+    const [, columnRaw, operator, rhsRaw] = match
+    const column = headers.find((header) => header === columnRaw) ?? headers.find((header) => header.toLowerCase() === columnRaw.toLowerCase())
+    if (!column) continue
+    const value = rhsRaw.trim().replace(/^['"]|['"]$/g, '')
+    const op: TransformFilterOp =
+      operator === '==' ? 'equals'
+        : operator === '!=' ? 'notEquals'
+          : operator === '>' ? 'gt'
+            : operator === '>=' ? 'gte'
+              : operator === '<' ? 'lt'
+                : operator === '<=' ? 'lte'
+                  : 'contains'
+    rules.push({
+      id: `expr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      column,
+      join: rules.length === 0 ? 'and' : join,
+      op,
+      value,
+    })
+  }
+  return rules.length > 0 ? rules : null
 }
