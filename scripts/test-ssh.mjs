@@ -4,7 +4,7 @@
  *   node scripts/test-ssh.mjs <host> <username> <keypath>
  *
  * Example:
- *   node scripts/test-ssh.mjs rorqual.alliancecan.ca nkkoran ~/.ssh/id_ed25519
+ *   node scripts/test-ssh.mjs cluster.example.edu myuser ~/.ssh/id_ed25519
  *
  * This helps isolate whether SSH auth issues are in the ssh2 library
  * or in BioFlow's Electron integration.
@@ -21,7 +21,7 @@ const [,, host, username, keyPath] = process.argv
 
 if (!host || !username) {
   console.log('Usage: node scripts/test-ssh.mjs <host> <username> [keypath]')
-  console.log('Example: node scripts/test-ssh.mjs rorqual.alliancecan.ca nkkoran ~/.ssh/id_ed25519')
+  console.log('Example: node scripts/test-ssh.mjs cluster.example.edu myuser ~/.ssh/id_ed25519')
   process.exit(1)
 }
 

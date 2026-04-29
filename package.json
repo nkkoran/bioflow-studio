@@ -1,7 +1,7 @@
 {
   "name": "bioflow-studio",
   "productName": "BioFlow Studio",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "main": "./out/main/index.js",
   "repository": {
     "type": "git",

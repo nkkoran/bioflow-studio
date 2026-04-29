@@ -8,6 +8,7 @@ import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useUIStore } from '@/stores/uiStore'
 import { classNames } from '@/lib/utils'
+import { showToast } from '@/components/ui/Toaster'
 import { AnnovarSetupWizard } from './AnnovarSetupWizard'
 import { DnanexusSettingsPanel } from './DnanexusSettingsPanel'
 
@@ -80,6 +81,16 @@ export function SettingsDialog({
     void setSetting('settings:onboardingComplete', false).then(() => {
       onClose()
       window.dispatchEvent(new CustomEvent('bioflow:open-onboarding'))
+    })
+  }
+
+  const checkForUpdates = () => {
+    void window.api.app.checkForUpdates().catch((err) => {
+      showToast({
+        kind: 'error',
+        message: `Update check failed: ${err instanceof Error ? err.message : String(err)}`,
+        durationMs: 6000,
+      })
     })
   }
 
@@ -177,9 +188,14 @@ export function SettingsDialog({
               />
               <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5">
                 <p className="mb-2 text-[11px] font-medium text-text-secondary">Setup</p>
-                <Button variant="secondary" size="sm" onClick={runStartupWizard}>
-                  Run startup wizard
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="secondary" size="sm" onClick={runStartupWizard}>
+                    Run startup wizard
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={checkForUpdates}>
+                    Check for updates
+                  </Button>
+                </div>
               </div>
               <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
                 <p className="text-[11px] font-medium text-text-secondary">Pre-run checks</p>

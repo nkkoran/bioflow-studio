@@ -232,6 +232,19 @@ export function AppLayout() {
   }, [])
 
   useEffect(() => {
+    if (!window.api.app?.onUpdateStatus) return
+    return window.api.app.onUpdateStatus((data) => {
+      window.dispatchEvent(new CustomEvent('bioflow:toast', {
+        detail: {
+          kind: data.kind,
+          message: data.message,
+          durationMs: data.durationMs,
+        },
+      }))
+    })
+  }, [])
+
+  useEffect(() => {
     const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
     const onDragOver = (event: DragEvent) => {
       if (!hasFiles(event)) return

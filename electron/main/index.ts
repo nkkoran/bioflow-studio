@@ -5,9 +5,22 @@ import { registerAllHandlers } from '../ipc/registerAll'
 
 // Check if dev: use electron-vite's environment
 const isDev = !app.isPackaged
+let manualUpdateCheckInFlight = false
 
 function sendMenuCommand(command: 'new' | 'open' | 'save' | 'saveAs' | 'tour' | 'bugReport' | 'settings' | 'addConnection'): void {
   BrowserWindow.getFocusedWindow()?.webContents.send('app:menu-command', { command })
+}
+
+type UpdateStatusPayload = {
+  kind: 'info' | 'success' | 'error'
+  message: string
+  durationMs?: number
+}
+
+function broadcastUpdateStatus(payload: UpdateStatusPayload): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('app:update-status', payload)
+  }
 }
 
 function isAllowedExternalUrl(raw: string): boolean {
@@ -47,10 +60,42 @@ function installSecurityHeaders(): void {
   })
 }
 
-function checkForUpdates(): void {
-  if (!app.isPackaged) return
+function checkForUpdates(userInitiated = false): void {
+  if (!app.isPackaged) {
+    if (userInitiated) {
+      broadcastUpdateStatus({
+        kind: 'info',
+        message: 'Update checks are only available in the packaged app.',
+      })
+    }
+    return
+  }
+  if (userInitiated) {
+    if (manualUpdateCheckInFlight) {
+      broadcastUpdateStatus({
+        kind: 'info',
+        message: 'Already checking for updates.',
+        durationMs: 3000,
+      })
+      return
+    }
+    manualUpdateCheckInFlight = true
+    broadcastUpdateStatus({
+      kind: 'info',
+      message: 'Checking for updates...',
+      durationMs: 3000,
+    })
+  }
   void autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+    manualUpdateCheckInFlight = false
     console.error('[autoUpdater] check failed:', err)
+    if (userInitiated) {
+      broadcastUpdateStatus({
+        kind: 'error',
+        message: `Update check failed: ${err instanceof Error ? err.message : String(err)}`,
+        durationMs: 6000,
+      })
+    }
   })
 }
 
@@ -75,6 +120,8 @@ function buildMenu(): Menu {
     label: appName,
     submenu: [
       { role: 'about' },
+      { type: 'separator' },
+      { label: 'Check for Updates', click: () => checkForUpdates(true) },
       { type: 'separator' },
       { label: 'Preferences…', accelerator: 'CmdOrCtrl+,', click: () => sendMenuCommand('settings') },
       { type: 'separator' },
@@ -148,7 +195,7 @@ function buildMenu(): Menu {
         { type: 'separator' },
         { label: 'GWAS Quickstart', click: () => openBundledDoc('gwas-quickstart.md') },
         { label: 'bcftools Workflow', click: () => openBundledDoc('bcftools-workflow.md') },
-        { label: 'Check for Updates', click: () => checkForUpdates() },
+        { label: 'Check for Updates', click: () => checkForUpdates(true) },
       ],
     },
   ])
@@ -205,8 +252,44 @@ function createWindow(): void {
 app.whenReady().then(() => {
   crashReporter.start({ uploadToServer: false })
   installSecurityHeaders()
+  autoUpdater.on('update-available', (info) => {
+    if (!manualUpdateCheckInFlight) return
+    const version = typeof info?.version === 'string' ? info.version : 'a newer version'
+    broadcastUpdateStatus({
+      kind: 'success',
+      message: `Update available: ${version}. Downloading now...`,
+      durationMs: 5000,
+    })
+  })
+  autoUpdater.on('update-not-available', () => {
+    if (!manualUpdateCheckInFlight) return
+    manualUpdateCheckInFlight = false
+    broadcastUpdateStatus({
+      kind: 'success',
+      message: 'BioFlow Studio is up to date.',
+      durationMs: 4000,
+    })
+  })
+  autoUpdater.on('update-downloaded', (info) => {
+    const version = typeof info?.version === 'string' ? info.version : 'the latest version'
+    manualUpdateCheckInFlight = false
+    broadcastUpdateStatus({
+      kind: 'success',
+      message: `${version} downloaded. It will install after you quit and reopen the app.`,
+      durationMs: 7000,
+    })
+  })
+  autoUpdater.on('error', (err) => {
+    if (!manualUpdateCheckInFlight) return
+    manualUpdateCheckInFlight = false
+    broadcastUpdateStatus({
+      kind: 'error',
+      message: `Update check failed: ${err instanceof Error ? err.message : String(err)}`,
+      durationMs: 6000,
+    })
+  })
   ipcMain.handle('app:check-updates', async () => {
-    checkForUpdates()
+    checkForUpdates(true)
     return { ok: true }
   })
   registerAllHandlers()
