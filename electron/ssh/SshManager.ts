@@ -1,5 +1,5 @@
 import { Client } from 'ssh2'
-import type { AuthenticationType, ClientChannel, ConnectConfig, Prompt } from 'ssh2'
+import type { ClientChannel, ConnectConfig, Prompt } from 'ssh2'
 import { readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { homedir } from 'os'
@@ -97,16 +97,24 @@ const CHANNEL_OPEN_RETRY_DELAYS_MS = [150, 400, 900]
  * Build ssh2 ConnectConfig from our ConnectionConfig.
  * Handles: key file (with ~ expansion), password, agent, keyboard-interactive.
  */
-function buildConnectOptions(config: ConnectionConfig): ConnectConfig {
+function buildConnectOptions(config: ConnectionConfig, onAuthDebug?: (detail: string) => void): ConnectConfig {
   const options: ConnectConfig = {
     host: config.host,
     port: config.port,
     username: config.username,
-    readyTimeout: 30_000,
+    readyTimeout: 90_000,
     tryKeyboard: true,
     algorithms: ALGORITHMS,
-    // Uncomment for verbose debug (very noisy):
-    // debug: (msg: string) => console.log(`[SSH debug] ${msg}`),
+    debug: (msg: string) => {
+      if (/local ident|remote ident|handshake|kex|auth|offer|keyboard|ready|error|timeout|trying|connect|socket/i.test(msg)) {
+        onAuthDebug?.(`ssh2: ${msg}`)
+      }
+    },
+  }
+
+  if (shouldForceIPv4ForHost(config.host)) {
+    options.forceIPv4 = true
+    onAuthDebug?.('Alliance / Compute Canada host detected; forcing IPv4 for the SSH socket before authentication starts.')
   }
 
   switch (config.authMethod) {
@@ -132,8 +140,8 @@ function buildConnectOptions(config: ConnectionConfig): ConnectConfig {
         throw new Error('Password auth selected but no password was provided')
       }
       options.password = config.password
-      options.authHandler = createPasswordAuthHandler(config)
-      console.log(`[SSH] Password auth configured (password length: ${config.password.length})`)
+      console.log('[SSH] Password auth configured')
+      onAuthDebug?.('Password auth configured. Using ssh2 default auth order with keyboard-interactive fallback enabled.')
       break
     case 'agent':
       options.agent = process.env.SSH_AUTH_SOCK
@@ -146,44 +154,14 @@ function buildConnectOptions(config: ConnectionConfig): ConnectConfig {
   return options
 }
 
-function createPasswordAuthHandler(config: ConnectionConfig): ConnectConfig['authHandler'] {
-  let triedKeyboardInteractive = false
-  let triedPassword = false
-
-  return (methodsLeft, partialSuccess) => {
-    const canTry = (method: AuthenticationType): boolean => methodsLeft === null || methodsLeft.includes(method)
-    const methodsLabel = methodsLeft?.join(',') ?? 'initial'
-
-    if (partialSuccess === true && canTry('keyboard-interactive')) {
-      console.log(`[SSH] Password auth strategy: continuing keyboard-interactive after partial success (methods left: ${methodsLabel})`)
-      return 'keyboard-interactive'
-    }
-
-    if (!triedKeyboardInteractive && canTry('keyboard-interactive')) {
-      triedKeyboardInteractive = true
-      console.log('[SSH] Password auth strategy: trying keyboard-interactive first')
-      return 'keyboard-interactive'
-    }
-
-    if (partialSuccess !== true && !triedPassword && config.password && canTry('password')) {
-      triedPassword = true
-      console.log('[SSH] Password auth strategy: falling back to direct password auth')
-      return 'password'
-    }
-
-    console.log(`[SSH] Password auth strategy: no usable auth method remains (partialSuccess=${partialSuccess === true ? 'true' : 'false'}, methods left: ${methodsLabel})`)
-    return false
-  }
-}
-
 /**
  * Ask the renderer to show a prompt dialog and return the user's input.
  * Used for MFA/2FA codes during keyboard-interactive auth.
  */
 function promptUser(request: PromptRequestPayload): Promise<string | null> {
   return new Promise((resolve) => {
-    const win = BrowserWindow.getAllWindows()[0]
-    if (!win) {
+    const windows = BrowserWindow.getAllWindows()
+    if (windows.length === 0) {
       console.warn('[SSH] Cannot show authentication prompt because no BrowserWindow is available')
       resolve(null)
       return
@@ -205,10 +183,14 @@ function promptUser(request: PromptRequestPayload): Promise<string | null> {
 
     // Ask renderer to show prompt
     console.log(`[SSH] Showing authentication prompt: ${request.message}`)
-    win.webContents.send('ssh:prompt', {
-      promptId,
-      ...request,
-    })
+    for (const win of windows) {
+      if (!win.webContents.isDestroyed()) {
+        win.webContents.send('ssh:prompt', {
+          promptId,
+          ...request,
+        })
+      }
+    }
 
     // Timeout after 60 seconds
     setTimeout(() => {
@@ -354,6 +336,188 @@ function looksLikeChoicePrompt(text: string): boolean {
 
 function looksLikeVerificationPrompt(text: string): boolean {
   return /(verification|authenticator|otp|totp|token|passcode|code|duo)/i.test(text)
+}
+
+function hostSuggestion(host: string): string | null {
+  const normalized = host.toLowerCase()
+  if (normalized === 'rorqual.digitalalliance.ca') return 'rorqual.alliancecan.ca'
+  if (normalized.endsWith('.digitalalliance.ca')) {
+    return host.replace(/\.digitalalliance\.ca$/i, '.alliancecan.ca')
+  }
+  return null
+}
+
+function shouldForceIPv4ForHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase()
+  return normalized === 'rorqual.alliancecan.ca' ||
+    normalized.endsWith('.alliancecan.ca') ||
+    normalized.endsWith('.computecanada.ca')
+}
+
+interface ErrorLike {
+  message?: unknown
+  name?: unknown
+  code?: unknown
+  errno?: unknown
+  syscall?: unknown
+  address?: unknown
+  port?: unknown
+  level?: unknown
+  errors?: unknown[]
+  cause?: unknown
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function numberField(value: unknown): string | null {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : null
+}
+
+function formatSingleError(err: unknown): string {
+  if (err instanceof Error) {
+    const like = err as ErrorLike
+    const prefix = [
+      stringField(like.code),
+      stringField(like.level) ? `level=${stringField(like.level)}` : null,
+      stringField(like.syscall) ? `syscall=${stringField(like.syscall)}` : null,
+      stringField(like.address) ? `address=${stringField(like.address)}${numberField(like.port) ? `:${numberField(like.port)}` : ''}` : null,
+    ].filter(Boolean)
+    const message = err.message.trim()
+    if (message) return [...prefix, message].join(' ')
+    return prefix.join(' ') || err.name || 'Unknown error'
+  }
+  if (typeof err === 'string') return err
+  return String(err)
+}
+
+function collectErrorDetails(err: unknown, seen = new Set<unknown>()): string[] {
+  if (err === null || err === undefined || seen.has(err)) return []
+  if (typeof err === 'object') seen.add(err)
+
+  const like = err as ErrorLike
+  const details: string[] = []
+  const current = formatSingleError(err)
+  if (current && current !== 'AggregateError') details.push(current)
+
+  if (Array.isArray(like.errors)) {
+    for (const nested of like.errors) {
+      details.push(...collectErrorDetails(nested, seen))
+    }
+  }
+  if (like.cause) {
+    details.push(...collectErrorDetails(like.cause, seen))
+  }
+
+  return details
+}
+
+function describeSystemError(err: unknown): string {
+  const unique = Array.from(new Set(collectErrorDetails(err).map((line) => line.trim()).filter(Boolean)))
+  return unique.length > 0 ? unique.join('\n') : String(err)
+}
+
+function systemErrorBlock(err: unknown): string {
+  const detail = describeSystemError(err)
+  if (!detail.includes('\n')) return `System error: ${detail}`
+  return `System error:\n${detail.split('\n').map((line) => `- ${line}`).join('\n')}`
+}
+
+function buildConnectionFailureMessage(err: Error, config: ConnectionConfig): string {
+  const message = err.message || String(err)
+  const code = typeof (err as NodeJS.ErrnoException).code === 'string'
+    ? (err as NodeJS.ErrnoException).code
+    : ''
+  const level = typeof (err as { level?: unknown }).level === 'string'
+    ? String((err as { level?: unknown }).level)
+    : ''
+  const systemDetails = describeSystemError(err)
+  const text = `${code} ${level} ${message} ${systemDetails}`.toLowerCase()
+  const target = `${config.username}@${config.host}:${config.port}`
+  const suggestion = hostSuggestion(config.host)
+
+  if (/enotfound|getaddrinfo|notfound/.test(text)) {
+    return [
+      `Could not find the host ${config.host}.`,
+      '',
+      'This failed before password or MFA authentication started, so changing the password will not fix this particular error.',
+      suggestion ? `For Rorqual, try host: ${suggestion}` : 'Check the host spelling, your DNS/network connection, and whether the cluster requires VPN or campus network access.',
+      '',
+      `Target: ${target}`,
+      systemErrorBlock(err),
+    ].join('\n')
+  }
+
+  if (/etimeout|timed out|ehostunreach|enetunreach/.test(text)) {
+    return [
+      `Could not reach ${config.host}:${config.port}.`,
+      '',
+      'The hostname resolved, but the network connection did not complete. Check your internet/VPN, campus firewall rules, and whether the cluster is currently accepting SSH connections.',
+      '',
+      `Target: ${target}`,
+      systemErrorBlock(err),
+    ].join('\n')
+  }
+
+  if (/aggregateerror|client-socket|econnreset|econnaborted|econnhostunreach|eaddrnotavail/.test(text)) {
+    return [
+      `Could not open a complete SSH session to ${config.host}:${config.port}.`,
+      '',
+      'The app reached the socket layer, but the server did not complete the SSH identification/handshake step. This happens before password or MFA, so a missing MFA prompt here is a connection or server-availability problem rather than a wrong password.',
+      shouldForceIPv4ForHost(config.host)
+        ? 'For this Alliance / Compute Canada host, BioFlow forced IPv4. If it still fails here, check the connection trace for the nested socket error and the current cluster status.'
+        : 'Check the nested socket error below, then confirm the hostname, port, VPN/firewall path, and cluster status.',
+      '',
+      `Target: ${target}`,
+      `Auth method: ${config.authMethod}`,
+      systemErrorBlock(err),
+    ].join('\n')
+  }
+
+  if (/econnrefused|connection refused/.test(text)) {
+    return [
+      `The host ${config.host} refused SSH on port ${config.port}.`,
+      '',
+      'The host is reachable, but nothing accepted the SSH connection on that port. Check the port and the cluster login hostname.',
+      '',
+      `Target: ${target}`,
+      systemErrorBlock(err),
+    ].join('\n')
+  }
+
+  if (/configured authentication methods failed|all configured methods failed|permission denied|authentication failed/.test(text)) {
+    return [
+      'SSH authentication failed.',
+      '',
+      config.authMethod === 'password'
+        ? 'Check the account password first. If no MFA prompt appeared, the server likely rejected password auth before it reached the second-factor step, or password login is not enabled for this host. For Alliance clusters, key auth plus keyboard-interactive MFA is often the more reliable path.'
+        : 'Check the selected authentication method and any MFA prompt from the cluster.',
+      '',
+      `Target: ${target}`,
+      `Auth method: ${config.authMethod}`,
+      systemErrorBlock(err),
+    ].join('\n')
+  }
+
+  if (/handshake|algorithm|kex|cipher|host key/.test(text)) {
+    return [
+      'SSH reached the host but could not complete the cryptographic handshake.',
+      '',
+      'This usually means the server only supports algorithms outside BioFlow\'s allowlist, or the SSH service is not the expected cluster login node.',
+      '',
+      `Target: ${target}`,
+      systemErrorBlock(err),
+    ].join('\n')
+  }
+
+  return [
+    `SSH connection to ${config.host} failed.`,
+    '',
+    `Target: ${target}`,
+    `Auth method: ${config.authMethod}`,
+    systemErrorBlock(err),
+  ].join('\n')
 }
 
 function buildPromptRequest(
@@ -531,19 +695,23 @@ export class SshManager {
         return
       }
 
+      const client = new Client()
+      const id = randomUUID()
+      let resolved = false
+      const keyboardInteractiveState: KeyboardInteractiveState = { passwordAutoResponded: false }
+
       let connectOptions: ConnectConfig
       try {
-        connectOptions = buildConnectOptions(cleanConfig)
+        connectOptions = buildConnectOptions(cleanConfig, (detail) => this.emitDebug(id, 'auth', detail))
       } catch (err) {
         reject(err)
         return
       }
 
-      const client = new Client()
-      const id = randomUUID()
-      let resolved = false
-      const keyboardInteractiveState: KeyboardInteractiveState = { passwordAutoResponded: false }
       this.emitDebug(id, 'connect', `Connecting to ${cleanConfig.host}:${cleanConfig.port} as ${cleanConfig.username} with ${cleanConfig.authMethod}`)
+      if (cleanConfig.authMethod === 'password') {
+        this.emitDebug(id, 'auth', 'Password auth selected. BioFlow will send the account password to ssh2, then ask you for any MFA code or Duo choice requested through keyboard-interactive.')
+      }
 
       /**
        * Handle keyboard-interactive auth.
@@ -617,18 +785,12 @@ export class SshManager {
       })
 
       client.on('error', (err) => {
-        console.error(`[SSH] Error:`, err.message, (err as any).level)
-        this.emitDebug(id, 'error', err.message)
+        console.error(`[SSH] Error:`, describeSystemError(err), (err as any).level)
+        const failureMessage = buildConnectionFailureMessage(err, cleanConfig)
+        this.emitDebug(id, 'error', failureMessage)
         if (!resolved) {
           resolved = true
-          const authHint =
-            cleanConfig.authMethod === 'password' && /configured authentication methods failed|all configured methods failed/i.test(err.message)
-              ? 'Password authentication failed. Check the password, and if the host uses MFA, enter the current verification code when prompted.'
-              : err.message
-          const enhanced = new Error(
-            `SSH connection to ${cleanConfig.host} failed: ${authHint}\n` +
-            `Auth method: ${cleanConfig.authMethod}, User: ${cleanConfig.username}`
-          )
+          const enhanced = new Error(failureMessage)
           reject(enhanced)
           return
         }
@@ -663,13 +825,15 @@ export class SshManager {
         console.log(`[SSH] Server banner:\n${message}`)
         this.emitDebug(id, 'banner', message.trim() || 'Server banner received')
         // Forward banner to renderer so user can see it
-        const win = BrowserWindow.getAllWindows()[0]
-        if (win) {
-          win.webContents.send('ssh:banner', { connectionId: id, message })
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.webContents.isDestroyed()) {
+            win.webContents.send('ssh:banner', { connectionId: id, message })
+          }
         }
       })
 
       console.log(`[SSH] Connecting to ${cleanConfig.host}:${cleanConfig.port} as ${cleanConfig.username} (auth: ${cleanConfig.authMethod})`)
+      this.emitDebug(id, 'connect', 'Opening TCP connection to SSH server; waiting up to 90 seconds for SSH ready/auth completion')
       client.connect(connectOptions)
     })
   }
@@ -923,7 +1087,7 @@ export class SshManager {
 
         let connectOptions: ConnectConfig
         try {
-          connectOptions = buildConnectOptions(config)
+          connectOptions = buildConnectOptions(config, (detail) => this.emitDebug(id, 'auth', detail))
         } catch {
           tryReconnect(attempt + 1)
           return
@@ -1010,14 +1174,15 @@ export class SshManager {
   }
 
   private emitDebug(connectionId: string, stage: 'connect' | 'auth' | 'prompt' | 'banner' | 'error', detail: string): void {
-    const win = BrowserWindow.getAllWindows()[0]
-    if (!win) return
-    win.webContents.send('ssh:debug', {
-      connectionId,
-      stage,
-      detail,
-      at: Date.now(),
-    })
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.webContents.isDestroyed()) continue
+      win.webContents.send('ssh:debug', {
+        connectionId,
+        stage,
+        detail,
+        at: Date.now(),
+      })
+    }
   }
 }
 
