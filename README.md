@@ -1,6 +1,6 @@
 # BioFlow Studio
 
-BioFlow Studio is an Electron + React desktop app for building and running bioinformatics pipelines on Slurm clusters over SSH. It is currently packaged for internal McGill lab beta testing.
+BioFlow Studio is an Electron + React desktop app for building and running bioinformatics pipelines on Slurm clusters over SSH. It is currently packaged for internal lab beta testing.
 
 ## Install
 
@@ -15,7 +15,7 @@ The first launch opens a setup wizard for run folders, Slurm account, and SSH co
 
 The beta is unsigned.
 
-Apple Silicon macOS may report that the app is damaged:
+Apple Silicon macOS may report that the app is damaged. In this case, run the following command in the directory:
 
 ```bash
 xattr -cr "/Applications/BioFlow Studio.app"
@@ -27,4 +27,4 @@ Windows SmartScreen may require: More info, then Run anyway. This can happen aga
 
 ## Help
 
-Use the Help menu for the walkthrough and workflow guides. For support, use GitHub Issues or the lab Slack.
+Use the Help menu for the walkthrough and workflow guides. For support, use GitHub Issues. Please feel free to provide feedback.
