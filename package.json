@@ -23,9 +23,9 @@
     "release:beta": "npm version prerelease --preid=beta -m \"v%s\" && git push origin HEAD --tags"
   },
   "keywords": [],
-  "author": "",
+  "author": "nkkoran <nkkoran@users.noreply.github.com>",
   "license": "ISC",
-  "description": "",
+  "description": "Electron GUI for building and running bioinformatics pipelines on HPC clusters.",
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
     "@tailwindcss/vite": "^4.2.4",
