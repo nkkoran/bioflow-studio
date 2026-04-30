@@ -1,8 +1,9 @@
 name: Release
 
 # Runs when you push a tag like v0.1.0-beta.2 or click "Run workflow" in the
-# Actions tab. Builds Mac (universal) and Windows (x64), uploads artefacts to a
-# DRAFT GitHub Release. You review the draft and click Publish when ready.
+# Actions tab. Builds Mac (universal), Windows (x64), and Linux (x64), uploads
+# artefacts to a DRAFT GitHub Release. You review the draft and click Publish
+# when ready.
 
 on:
   push:
@@ -32,6 +33,8 @@ jobs:
             target: mac
           - os: windows-latest
             target: win
+          - os: ubuntu-latest
+            target: linux
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
 

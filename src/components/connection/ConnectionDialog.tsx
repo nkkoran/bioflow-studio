@@ -8,6 +8,7 @@ import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { connectionConfigSchema } from '@/lib/validators'
 import { Server, Lock, User, Eye, EyeOff, Loader2, FolderOpen, Sparkles } from 'lucide-react'
 import type { ConnectionConfig } from '@/types'
+import type { SshDebugEvent } from '@/types/ssh'
 import type { ZodError } from 'zod'
 
 interface ConnectionDialogProps {
@@ -95,6 +96,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
   const [form, setForm] = useState<FormData>(initialFormData)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [connectError, setConnectError] = useState<string | null>(null)
+  const [connectionEvents, setConnectionEvents] = useState<SshDebugEvent[]>([])
   const [isConnecting, setIsConnecting] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [savedConnections, setSavedConnections] = useState<ConnectionConfig[]>([])
@@ -123,6 +125,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       })
       setErrors({})
       setConnectError(null)
+      setConnectionEvents([])
       setIsConnecting(false)
       setShowPassword(false)
       setSetupOpen(false)
@@ -130,6 +133,13 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       setSetupRunning(false)
       setSetupMessage(null)
     }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || !window.api.ssh.onDebug) return
+    return window.api.ssh.onDebug((event) => {
+      setConnectionEvents((prev) => [...prev, event].slice(-12))
+    })
   }, [open])
 
   function updateField<K extends keyof FormData>(key: K, value: FormData[K]) {
@@ -165,6 +175,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
   async function handleConnect() {
     setErrors({})
     setConnectError(null)
+    setConnectionEvents([])
 
     const config: ConnectionConfig = {
       name: form.name.trim(),
@@ -516,8 +527,29 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
 
         {/* Connection error */}
         {connectError && (
-          <div className="px-3 py-2 rounded-md bg-error/10 border border-error/20 text-error text-xs">
+          <div className="whitespace-pre-wrap rounded-md border border-error/20 bg-error/10 px-3 py-2 text-xs text-error">
             {connectError}
+          </div>
+        )}
+
+        {(isConnecting || connectionEvents.length > 0) && (
+          <div className="rounded-md border border-border bg-bg-secondary px-3 py-2">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs font-medium text-text-primary">Connection trace</div>
+              <div className="text-[10px] text-text-muted">{connectionEvents.length} events</div>
+            </div>
+            {connectionEvents.length === 0 ? (
+              <div className="text-[11px] text-text-muted">Starting SSH connection...</div>
+            ) : (
+              <div className="flex max-h-36 flex-col gap-1 overflow-y-auto font-mono text-[10px]">
+                {connectionEvents.map((event, index) => (
+                  <div key={`${event.at}-${index}`} className="grid grid-cols-[4.5rem_1fr] gap-2 rounded border border-border/70 bg-bg-primary px-2 py-1">
+                    <span className={traceStageClass(event.stage)}>{event.stage}</span>
+                    <span className="whitespace-pre-wrap break-words text-text-secondary">{event.detail}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -627,4 +659,14 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       </Dialog>
     </Dialog>
   )
+}
+
+function traceStageClass(stage: SshDebugEvent['stage']): string {
+  switch (stage) {
+    case 'error': return 'text-error'
+    case 'prompt': return 'text-warning'
+    case 'banner': return 'text-accent'
+    case 'auth': return 'text-blue-300'
+    default: return 'text-text-muted'
+  }
 }
