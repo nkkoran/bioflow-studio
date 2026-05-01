@@ -16,8 +16,9 @@ import type { ValidationIssue, ValidationResult } from '@/lib/pipelineValidator'
 import { getTool } from '@/lib/toolRegistry'
 import { connectedInputSchema, outputSchema, type SchemaCache } from '@/lib/schemaResolver'
 import { suggestRoleMapping } from '@/lib/roleMappings'
-import { getActiveToolInputs } from '@/lib/analysisOptions'
+import { getActiveToolInputs, getEnabledAnalysisOptions } from '@/lib/analysisOptions'
 import { getTransformPreset, transformPresetOutputSchema } from '@/lib/transformPresets'
+import { estimateResources } from '@/lib/resourceEstimator'
 
 interface ReadinessOptions {
   probes?: Record<string, FileProbeResult>
@@ -72,6 +73,31 @@ function sourceFilePath(snapshot: PipelineSnapshot, nodeId: string, portId: stri
   return null
 }
 
+function safeSplitItems(split: FileNodeData['split'] | undefined): Array<{ key: string; path: string }> {
+  const raw = split?.items
+  return Array.isArray(raw)
+    ? raw.filter((item): item is { key: string; path: string } => (
+      Boolean(item)
+      && typeof item.key === 'string'
+      && typeof item.path === 'string'
+      && item.path.trim().length > 0
+    ))
+    : []
+}
+
+function sourceFilePaths(snapshot: PipelineSnapshot, nodeId: string, portId: string): string[] {
+  const upstream = sourceNode(snapshot, nodeId, portId)
+  if (!upstream) return []
+  if (upstream.type === 'file') {
+    const data = upstream.data as FileNodeData
+    const splitItems = safeSplitItems(data.split)
+    if (splitItems.length > 0) return splitItems.map((item) => item.path).filter(Boolean)
+    return data.path ? [data.path] : []
+  }
+  if (upstream.type === 'transform') return sourceFilePaths(snapshot, upstream.id, 'input')
+  return []
+}
+
 function fileProbeForPort(
   snapshot: PipelineSnapshot,
   nodeId: string,
@@ -81,6 +107,17 @@ function fileProbeForPort(
   const path = sourceFilePath(snapshot, nodeId, portId)
   if (!path) return null
   return probes[probeKey(path)] ?? null
+}
+
+function fileProbesForPort(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  portId: string,
+  probes: Record<string, FileProbeResult>,
+): FileProbeResult[] {
+  return sourceFilePaths(snapshot, nodeId, portId)
+    .map((path) => probes[probeKey(path)])
+    .filter((probe): probe is FileProbeResult => Boolean(probe))
 }
 
 function currentRoleMapping(
@@ -365,22 +402,735 @@ function checkSampleOverlap(
           category: 'IDs',
           code: 'SAMPLE_OVERLAP_ZERO',
           nodeId: node.id,
-          message: `Inputs "${basePort}" and "${otherPort}" do not appear to share any sample IDs.`,
+          message: `Inputs "${basePort}" and "${otherPort}" do not share sample IDs in the preview sample.`,
           suggestion: 'Check ID columns, keep files, and whether the same cohort/sample naming scheme is being used.',
         })
-      } else if (overlap.length < Math.min(baseIds.size, otherIds.size)) {
+      } else if (overlap.length < Math.min(baseIds.size, otherIds.size) && basePort !== 'keep' && otherPort !== 'keep') {
         pushIssue(issues, {
-          severity: 'warning',
+          severity: 'info',
           blocking: false,
           category: 'IDs',
-          code: 'SAMPLE_OVERLAP_PARTIAL',
+          code: 'SAMPLE_OVERLAP_PREVIEW_PARTIAL',
           nodeId: node.id,
-          message: `Inputs "${basePort}" and "${otherPort}" only partially overlap on sample IDs (${overlap.length} shared in preview).`,
-          suggestion: 'If this is unexpected, review ID formatting and cohort filters before running.',
+          message: `Previewed sample IDs for "${basePort}" and "${otherPort}" are not identical (${overlap.length} shared among the previewed IDs).`,
+          suggestion: 'This can be normal when files have missing values, filters, or different row order; BioFlow only checked the preview sample.',
         })
       }
     }
   }
+}
+
+function checkPlinkPhenotypeCoding(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  probes: Record<string, FileProbeResult>,
+  schemas: SchemaCache,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool || (tool.id !== 'plink2.assoc' && tool.id !== 'plink2.phewas')) return
+  const oneEnabled = plinkFlagEnabled(tool, data, connectedPortIds, 'one')
+
+  const probe = fileProbeForPort(snapshot, node.id, 'pheno', probes)
+  if (!probe?.previewRows?.length) return
+  const columns = effectiveColumns(
+    tool.inputs.find((port) => port.id === 'pheno')?.contract,
+    probe,
+    schemaColumnsForPort(snapshot, node.id, 'pheno', schemas),
+  )
+  if (columns.length === 0) return
+
+  const selectedColumns = selectedParamColumns(
+    tool.id === 'plink2.phewas' ? data.paramValues?.phenotypes : data.paramValues?.['pheno-name'],
+    true,
+  )
+  for (const column of selectedColumns) {
+    const idx = columns.indexOf(column)
+    if (idx < 0) continue
+    const values = normalizedPhenotypePreviewValues(probe.previewRows, idx)
+    if (values.observed < 6) continue
+    const valueSet = new Set(values.values)
+    const looksZeroOne = valueSet.size > 0 && [...valueSet].every((value) => value === '0' || value === '1')
+    if (looksZeroOne && !oneEnabled) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'IDs',
+        code: 'PLINK_BINARY_PHENO_01_NEEDS_ONE',
+        nodeId: node.id,
+        portId: 'pheno',
+        path: probe.path,
+        message: `Phenotype "${column}" looks 0/1-coded in the preview. PLINK2 treats 1 as control and 2 as case unless --1 is enabled.`,
+        suggestion: 'Enable --1 for this PLINK node when 0=control and 1=case; otherwise PLINK can report 0 cases.',
+        details: quickFixDetails('one', true, 'Enable --1'),
+      })
+      return
+    }
+    const balance = binaryCaseControlBalance(values.values, oneEnabled)
+    if (!balance) continue
+    if (balance.cases === 0 || balance.controls === 0) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'IDs',
+        code: 'PLINK_BINARY_PHENO_EMPTY_CLASS_PREVIEW',
+        nodeId: node.id,
+        portId: 'pheno',
+        path: probe.path,
+        message: `Phenotype "${column}" has ${balance.cases} preview cases and ${balance.controls} preview controls under the current PLINK coding.`,
+        suggestion: oneEnabled
+          ? 'Confirm this phenotype has both classes after filtering; otherwise choose a different outcome or cohort.'
+          : 'If this is a 0/1 phenotype, enable --1; otherwise confirm the phenotype uses PLINK 1/2 case-control coding.',
+        details: oneEnabled ? undefined : quickFixDetails('one', true, 'Enable --1'),
+      })
+      return
+    }
+  }
+}
+
+function normalizedPhenotypePreviewValues(rows: string[][], columnIndex: number): { values: string[]; observed: number } {
+  const values: string[] = []
+  for (const row of rows) {
+    const raw = row[columnIndex]?.trim()
+    if (!raw || /^na$/i.test(raw) || /^nan$/i.test(raw) || raw === '-9') continue
+    const numeric = Number(raw)
+    if (Number.isFinite(numeric) && Number.isInteger(numeric)) values.push(String(numeric))
+    else values.push(raw)
+  }
+  return { values, observed: values.length }
+}
+
+function checkPlinkTableModifiers(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  probes: Record<string, FileProbeResult>,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool || (tool.id !== 'plink2.assoc' && tool.id !== 'plink2.phewas')) return
+  for (const portId of ['pheno', 'covar'] as const) {
+    if (!connectedPortIds.includes(portId)) continue
+    const probe = fileProbeForPort(snapshot, node.id, portId, probes)
+    if (!probe?.header?.length) continue
+    const lower = probe.header.map((column) => column.trim().toLowerCase())
+    const hasFid = lower.includes('fid') || lower.includes('family_id') || lower.includes('familyid')
+    const hasIid = lower.includes('iid') || lower.includes('sample_id') || lower.includes('sampleid') || lower.includes('id')
+    const flagId = `${portId}-iid-only`
+    if (!hasFid && hasIid && !plinkFlagEnabled(tool, data, connectedPortIds, flagId)) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'IDs',
+        code: `PLINK_${portId.toUpperCase()}_IID_ONLY`,
+        nodeId: node.id,
+        portId,
+        path: probe.path,
+        message: `The ${portId} file appears to have IID/sample IDs but no FID column.`,
+        suggestion: `Enable the PLINK iid-only modifier for --${portId}, or provide both FID and IID columns.`,
+        details: quickFixDetails(flagId, true, `Enable --${portId} iid-only`),
+      })
+    }
+  }
+}
+
+function checkPlinkNoCovars(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool || (tool.id !== 'plink2.assoc' && tool.id !== 'plink2.phewas')) return
+  const hasCovarInput = Boolean(sourceEdge(snapshot, node.id, 'covar'))
+  const covarNames = selectedParamColumns(data.paramValues?.['covar-name'], true)
+  if (!hasCovarInput && covarNames.length === 0 && !plinkFlagEnabled(tool, data, connectedPortIds, 'allow-no-covars')) {
+    pushIssue(issues, {
+      severity: 'warning',
+      blocking: false,
+      category: 'Parameters',
+      code: 'PLINK_GLM_NO_COVARS_NEEDS_FLAG',
+      nodeId: node.id,
+      message: 'PLINK --glm is configured without covariates.',
+      suggestion: 'Enable allow-no-covars for an intentionally unadjusted model, or connect a covariate file.',
+      details: quickFixDetails('allow-no-covars', true, 'Enable allow-no-covars'),
+    })
+  }
+}
+
+function checkPlinkNeg9Phenotypes(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  probes: Record<string, FileProbeResult>,
+  schemas: SchemaCache,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool || (tool.id !== 'plink2.assoc' && tool.id !== 'plink2.phewas')) return
+  if (
+    plinkFlagEnabled(tool, data, connectedPortIds, 'neg9-pheno-really-missing')
+    || plinkFlagEnabled(tool, data, connectedPortIds, 'no-input-missing-phenotype')
+    || Boolean(data.paramValues?.['input-missing-phenotype'])
+  ) return
+
+  const checks: Array<{ portId: 'pheno' | 'covar'; params: string[] }> = [
+    { portId: 'pheno', params: selectedParamColumns(tool.id === 'plink2.phewas' ? data.paramValues?.phenotypes : data.paramValues?.['pheno-name'], true) },
+    { portId: 'covar', params: selectedParamColumns(data.paramValues?.['covar-name'], true) },
+  ]
+  for (const { portId, params } of checks) {
+    const probe = fileProbeForPort(snapshot, node.id, portId, probes)
+    if (!probe?.previewRows?.length || params.length === 0) continue
+    const columns = effectiveColumns(
+      tool.inputs.find((port) => port.id === portId)?.contract,
+      probe,
+      schemaColumnsForPort(snapshot, node.id, portId, schemas),
+    )
+    for (const column of params) {
+      const idx = columns.indexOf(column)
+      if (idx < 0) continue
+      const values = numericPreviewValues(probe.previewRows, idx)
+      const hasNeg9 = values.some((value) => value === -9)
+      const nearNeg9 = values.some((value) => value > -10 && value < -8 && value !== -9)
+      if (hasNeg9 && nearNeg9) {
+        pushIssue(issues, {
+          severity: 'warning',
+          blocking: false,
+          category: 'Parameters',
+          code: 'PLINK_NEG9_PHENO_AMBIGUOUS',
+          nodeId: node.id,
+          portId,
+          path: probe.path,
+          message: `Column "${column}" contains -9 and nearby numeric values in the preview.`,
+          suggestion: 'If -9 is truly missing, confirm it with --neg9-pheno-really-missing; if -9 is numeric, use --no-input-missing-phenotype.',
+          details: quickFixDetails('neg9-pheno-really-missing', true, 'Confirm -9 missing'),
+        })
+        return
+      }
+    }
+  }
+}
+
+function checkPlinkKeepFileShape(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  probes: Record<string, FileProbeResult>,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const tool = getTool((node.data as ToolNodeData).toolId)
+  if (!tool?.id.startsWith('plink2.')) return
+  const probe = fileProbeForPort(snapshot, node.id, 'keep', probes)
+  if (!probe?.previewRows?.length) return
+  const narrow = probe.previewRows.some((row) => row.filter((cell) => cell.trim()).length < 2)
+  if (!narrow) return
+  pushIssue(issues, {
+    severity: 'warning',
+    blocking: false,
+    category: 'Files',
+    code: 'PLINK_KEEP_FILE_SHAPE',
+    nodeId: node.id,
+    portId: 'keep',
+    path: probe.path,
+    message: 'The connected keep file has preview rows with fewer than two ID columns.',
+    suggestion: 'PLINK keep files should normally contain FID and IID columns. Convert one-column IID lists before running.',
+  })
+}
+
+function checkPlinkVariantPreview(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  probes: Record<string, FileProbeResult>,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool?.id.startsWith('plink2.')) return
+  const probe = fileProbeForPort(snapshot, node.id, 'input', probes)
+  const variants = variantRowsForProbe(probe)
+  if (!variants) return
+  const rows = variants.rows.slice(0, 200)
+  const idIdx = variantColumnIndex(variants.header, ['ID', 'SNP', 'RSID'])
+  const chromIdx = variantColumnIndex(variants.header, ['#CHROM', 'CHROM', 'CHR'])
+  const refIdx = variantColumnIndex(variants.header, ['REF', 'A2'])
+  const altIdx = variantColumnIndex(variants.header, ['ALT', 'A1'])
+  if (idIdx >= 0) {
+    const ids = rows.map((row) => row[idIdx]?.trim()).filter(Boolean)
+    const duplicate = firstDuplicate(ids)
+    if (duplicate && !plinkFlagEnabled(tool, data, connectedPortIds, 'rm-dup')) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'Files',
+        code: 'PLINK_DUPLICATE_VARIANT_IDS',
+        nodeId: node.id,
+        portId: 'input',
+        path: probe?.path,
+        message: `Variant preview contains duplicate ID "${duplicate}".`,
+        suggestion: 'Review duplicate variants or use PLINK --rm-dup exclude-mismatch when dropping mismatching duplicates is acceptable.',
+        details: quickFixDetails('rm-dup', 'exclude-mismatch', 'Enable --rm-dup'),
+      })
+    }
+    if (ids.some((id) => id === '.') && !plinkFlagEnabled(tool, data, connectedPortIds, 'set-all-var-ids')) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'Files',
+        code: 'PLINK_MISSING_VARIANT_IDS',
+        nodeId: node.id,
+        portId: 'input',
+        path: probe?.path,
+        message: 'Variant preview contains missing "." variant IDs.',
+        suggestion: 'Use --set-all-var-ids to assign stable chromosome/position/allele IDs before PLINK steps that need unique IDs.',
+        details: quickFixDetails('set-all-var-ids', '@:#$r,$a', 'Enable --set-all-var-ids'),
+      })
+    }
+  }
+  if (altIdx >= 0 && rows.some((row) => row[altIdx]?.includes(',')) && !plinkFlagEnabled(tool, data, connectedPortIds, 'max-alleles')) {
+    pushIssue(issues, {
+      severity: 'warning',
+      blocking: false,
+      category: 'Files',
+      code: 'PLINK_MULTIALLELIC_VARIANTS',
+      nodeId: node.id,
+      portId: 'input',
+      path: probe?.path,
+      message: 'Variant preview includes multiallelic ALT values.',
+      suggestion: 'If this PLINK step expects biallelic variants, restrict to --max-alleles 2 or split multiallelic records upstream.',
+      details: quickFixDetails('max-alleles', 2, 'Enable --max-alleles 2'),
+    })
+  }
+  if (refIdx >= 0 && altIdx >= 0 && rows.some((row) => !isSimpleSnpAllele(row[refIdx]) || !isSimpleSnpAllele(row[altIdx])) && !plinkFlagEnabled(tool, data, connectedPortIds, 'snps-only')) {
+    pushIssue(issues, {
+      severity: 'info',
+      blocking: false,
+      category: 'Files',
+      code: 'PLINK_NON_SNP_VARIANTS',
+      nodeId: node.id,
+      portId: 'input',
+      path: probe?.path,
+      message: 'Variant preview includes non-SNP or non-ACGT alleles.',
+      suggestion: 'If downstream steps expect SNPs only, use --snps-only just-acgt.',
+      details: quickFixDetails('snps-only', 'just-acgt', 'Enable --snps-only'),
+    })
+  }
+  if (chromIdx >= 0) {
+    const chroms = rows.map((row) => normalizeChrom(row[chromIdx])).filter(Boolean)
+    const nonstandard = chroms.find((chrom) => !isStandardHumanChrom(chrom))
+    if (nonstandard && !plinkFlagEnabled(tool, data, connectedPortIds, 'allow-extra-chr')) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'Files',
+        code: 'PLINK_EXTRA_CHROMOSOMES',
+        nodeId: node.id,
+        portId: 'input',
+        path: probe?.path,
+        message: `Variant preview includes nonstandard chromosome "${nonstandard}".`,
+        suggestion: 'If these contigs are expected, enable --allow-extra-chr; otherwise check chromosome naming.',
+        details: quickFixDetails('allow-extra-chr', true, 'Enable --allow-extra-chr'),
+      })
+    }
+    if (chroms.some((chrom) => chrom === 'X')) {
+      pushIssue(issues, {
+        severity: 'info',
+        blocking: false,
+        category: 'Files',
+        code: 'PLINK_CHRX_PAR_REVIEW',
+        nodeId: node.id,
+        portId: 'input',
+        path: probe?.path,
+        message: 'Variant preview includes chromosome X.',
+        suggestion: 'For chrX association, confirm sex metadata and PAR handling before running large jobs.',
+      })
+    }
+  }
+}
+
+function checkPlinkScoreReadiness(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  probes: Record<string, FileProbeResult>,
+  schemas: SchemaCache,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (tool?.id !== 'plink2.score') return
+  const scoreProbe = fileProbeForPort(snapshot, node.id, 'score', probes)
+  if (!scoreProbe?.previewRows?.length) return
+  const columns = effectiveColumns(tool.inputs.find((port) => port.id === 'score')?.contract, scoreProbe, schemaColumnsForPort(snapshot, node.id, 'score', schemas))
+  const headerLooksReal = columns.some((column) => ['id', 'snp', 'rsid', 'a1', 'allele', 'effect_allele', 'beta', 'or', 'score'].includes(column.trim().toLowerCase()))
+  const headerEnabled = plinkFlagEnabled(tool, data, connectedPortIds, 'header')
+  if (headerLooksReal && !headerEnabled) {
+    pushIssue(issues, {
+      severity: 'warning',
+      blocking: false,
+      category: 'Parameters',
+      code: 'PLINK_SCORE_HEADER_DISABLED',
+      nodeId: node.id,
+      portId: 'score',
+      path: scoreProbe.path,
+      message: 'The score file preview looks like it has a header, but PLINK score header mode is off.',
+      suggestion: 'Enable score header so PLINK does not treat column names as a variant row.',
+      details: quickFixDetails('header', true, 'Enable score header'),
+    })
+  }
+  if (!headerLooksReal && headerEnabled) {
+    pushIssue(issues, {
+      severity: 'info',
+      blocking: false,
+      category: 'Parameters',
+      code: 'PLINK_SCORE_HEADER_UNCLEAR',
+      nodeId: node.id,
+      portId: 'score',
+      path: scoreProbe.path,
+      message: 'Score header mode is on, but the first row does not look like standard score-file column names.',
+      suggestion: 'Confirm the score file has a header; otherwise disable score header or provide column numbers explicitly.',
+    })
+  }
+
+  const expectedCols = scoreColumnNumsFromRoles(columns)
+  const currentCols = scoreColumnNums(tool, data, connectedPortIds)
+  if (expectedCols && currentCols && expectedCols !== currentCols) {
+    pushIssue(issues, {
+      severity: 'warning',
+      blocking: false,
+      category: 'Parameters',
+      code: 'PLINK_SCORE_COL_NUMS_MISMATCH',
+      nodeId: node.id,
+      portId: 'score',
+      path: scoreProbe.path,
+      message: `Score-file columns look like ${expectedCols}, but the node is set to ${currentCols}.`,
+      suggestion: 'Use the variant/effect-allele/weight columns inferred from the score-file header.',
+      details: quickFixDetails('score-col-nums', expectedCols, `Use columns ${expectedCols}`),
+    })
+  }
+
+  const scoreIdIdx = firstColumnIndex(columns, ['ID', 'SNP', 'RSID'])
+  const scoreAlleleIdx = firstColumnIndex(columns, ['A1', 'ALT', 'ALLELE', 'EFFECT_ALLELE'])
+  if (scoreIdIdx >= 0) {
+    const scoreIds = scoreProbe.previewRows.map((row) => row[scoreIdIdx]?.trim()).filter(Boolean)
+    const duplicate = firstDuplicate(scoreIds)
+    if (duplicate && !plinkFlagEnabled(tool, data, connectedPortIds, 'ignore-dup-ids')) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'Files',
+        code: 'PLINK_SCORE_DUPLICATE_IDS',
+        nodeId: node.id,
+        portId: 'score',
+        path: scoreProbe.path,
+        message: `Score file preview contains duplicate variant ID "${duplicate}".`,
+        suggestion: 'Deduplicate the score file, or enable ignore-dup-ids if repeated IDs are expected.',
+        details: quickFixDetails('ignore-dup-ids', true, 'Enable ignore-dup-ids'),
+      })
+    }
+  }
+  if (scoreIdIdx >= 0 && scoreAlleleIdx >= 0) {
+    const genotypeAlleles = alleleMapForProbe(fileProbeForPort(snapshot, node.id, 'input', probes))
+    const mismatch = scoreProbe.previewRows.find((row) => {
+      const id = row[scoreIdIdx]?.trim()
+      const allele = row[scoreAlleleIdx]?.trim().toUpperCase()
+      const allowed = id ? genotypeAlleles.get(id) : undefined
+      return Boolean(id && allele && allowed && !allowed.has(allele))
+    })
+    if (mismatch) {
+      pushIssue(issues, {
+        severity: 'warning',
+        blocking: false,
+        category: 'Files',
+        code: 'PLINK_SCORE_ALLELE_MISMATCH_PREVIEW',
+        nodeId: node.id,
+        portId: 'score',
+        path: scoreProbe.path,
+        message: `Score allele "${mismatch[scoreAlleleIdx]}" for variant "${mismatch[scoreIdIdx]}" is not present in the genotype preview alleles.`,
+        suggestion: 'Check score-file build, reference allele orientation, and genome build before scoring.',
+      })
+    }
+  }
+}
+
+function checkPlinkCovariatePreview(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  probes: Record<string, FileProbeResult>,
+  schemas: SchemaCache,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool || (tool.id !== 'plink2.assoc' && tool.id !== 'plink2.phewas')) return
+  const covarNames = selectedParamColumns(data.paramValues?.['covar-name'], true)
+  if (covarNames.length < 2) return
+  const probe = fileProbeForPort(snapshot, node.id, 'covar', probes)
+  if (!probe?.previewRows?.length) return
+  const columns = effectiveColumns(tool.inputs.find((port) => port.id === 'covar')?.contract, probe, schemaColumnsForPort(snapshot, node.id, 'covar', schemas))
+  for (let i = 0; i < covarNames.length; i++) {
+    for (let j = i + 1; j < covarNames.length; j++) {
+      const aIdx = columns.indexOf(covarNames[i])
+      const bIdx = columns.indexOf(covarNames[j])
+      if (aIdx < 0 || bIdx < 0) continue
+      const corr = previewCorrelation(probe.previewRows, aIdx, bIdx)
+      if (corr !== null && Math.abs(corr) >= 0.999) {
+        pushIssue(issues, {
+          severity: 'warning',
+          blocking: false,
+          category: 'Parameters',
+          code: 'PLINK_COVARIATE_COLLINEAR_PREVIEW',
+          nodeId: node.id,
+          portId: 'covar',
+          path: probe.path,
+          message: `Covariates "${covarNames[i]}" and "${covarNames[j]}" are nearly perfectly correlated in the preview.`,
+          suggestion: 'Review covariate selection before running; PLINK may reject singular or near-singular covariate matrices.',
+        })
+        return
+      }
+    }
+  }
+}
+
+function checkPlinkGwasResources(
+  snapshot: PipelineSnapshot,
+  node: ReadinessNode,
+  connectedPortIds: string[],
+  probes: Record<string, FileProbeResult>,
+  issues: WorkflowReadinessIssue[],
+): void {
+  if (node.type !== 'tool') return
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  if (!tool || (tool.id !== 'plink2.assoc' && tool.id !== 'plink2.phewas')) return
+
+  const inputSizes: Record<string, number> = {}
+  for (const portId of connectedPortIds) {
+    const portProbes = fileProbesForPort(snapshot, node.id, portId, probes)
+    if (portProbes.length === 0) continue
+    const sizes = portProbes.map((probe) => probe.size ?? 0).filter((size) => size > 0)
+    if (sizes.length === 0) continue
+    inputSizes[portId] = portProbes.length > 1
+      ? Math.max(...sizes)
+      : sizes.reduce((sum, size) => sum + size, 0)
+  }
+
+  const splitItems = sourceSplitItems(snapshot, node.id, 'input')
+  const estimate = estimateResources({
+    tool,
+    nodeData: data,
+    inputSizes,
+    isArray: splitItems.length > 0,
+    arraySize: splitItems.length || undefined,
+    hasFilter: hasPlinkFilterParam(data),
+  })
+
+  const effective = {
+    cpus: data.slurmOverride?.cpus ?? tool.slurm?.cpus ?? 1,
+    memoryGB: data.slurmOverride?.memoryGB ?? tool.slurm?.memoryGB ?? 4,
+    timeHours: data.slurmOverride?.timeHours ?? tool.slurm?.timeHours ?? 1,
+  }
+  const lowCpu = effective.cpus < estimate.cpus
+  const lowMem = effective.memoryGB < estimate.memGB
+  const lowTime = effective.timeHours < estimate.timeHours
+  if (!lowCpu && !lowMem && !lowTime) return
+
+  const current = `${effective.cpus} CPU / ${effective.memoryGB} GB / ${effective.timeHours} h`
+  const recommended = `${estimate.cpus} CPU / ${estimate.memGB} GB / ${estimate.timeHours} h`
+  pushIssue(issues, {
+    severity: 'warning',
+    blocking: false,
+    category: 'Resources',
+    code: 'PLINK_GWAS_RESOURCES_LOW',
+    nodeId: node.id,
+    message: `PLINK2 GWAS resources look low (${current}); safety recommendation is ${recommended}.`,
+    suggestion: 'Apply the safe Slurm resources before running large association jobs to reduce timeout/OOM risk. Lower them only when you know the cohort is small.',
+    details: {
+      quickFixResourceCpus: estimate.cpus,
+      quickFixResourceMemoryGB: estimate.memGB,
+      quickFixResourceTimeHours: estimate.timeHours,
+      quickFixLabel: 'Apply safe resources',
+    },
+  })
+}
+
+function sourceSplitItems(snapshot: PipelineSnapshot, nodeId: string, portId: string): Array<{ key: string; path: string }> {
+  const upstream = sourceNode(snapshot, nodeId, portId)
+  if (!upstream || upstream.type !== 'file') return []
+  return safeSplitItems((upstream.data as FileNodeData).split)
+}
+
+function hasPlinkFilterParam(data: ToolNodeData): boolean {
+  const params = data.paramValues ?? {}
+  return [
+    'maf',
+    'geno',
+    'hwe',
+    'chr',
+    'keep',
+    'remove',
+    'extract',
+    'exclude',
+    'rm-dup',
+    'read-freq',
+  ].some((key) => {
+    const value = params[key]
+    return value !== undefined && value !== null && value !== '' && value !== false
+  })
+}
+
+function quickFixDetails(flagId: string, value: string | number | boolean, label: string): Record<string, string | number | boolean> {
+  return { quickFixFlagId: flagId, quickFixValue: value, quickFixLabel: label }
+}
+
+function plinkFlagEnabled(tool: NonNullable<ReturnType<typeof getTool>>, data: ToolNodeData, connectedPortIds: string[], flagId: string): boolean {
+  if (data.paramValues?.[flagId] === true) return true
+  return getEnabledAnalysisOptions(tool, data, { connectedPortIds }).some((option) => option.optionId === flagId || option.subOptions?.[flagId]?.enabled)
+}
+
+function plinkFlagValue(tool: NonNullable<ReturnType<typeof getTool>>, data: ToolNodeData, connectedPortIds: string[], flagId: string): unknown {
+  if (data.paramValues?.[flagId] !== undefined) return data.paramValues[flagId]
+  for (const option of getEnabledAnalysisOptions(tool, data, { connectedPortIds })) {
+    if (option.optionId === flagId) return option.value
+    if (option.subOptions?.[flagId]) return option.subOptions[flagId].value
+  }
+  return undefined
+}
+
+function binaryCaseControlBalance(values: string[], oneEnabled: boolean): { cases: number; controls: number } | null {
+  const allowed = oneEnabled ? new Set(['0', '1']) : new Set(['1', '2'])
+  if (!values.every((value) => allowed.has(value))) return null
+  return oneEnabled
+    ? { controls: values.filter((value) => value === '0').length, cases: values.filter((value) => value === '1').length }
+    : { controls: values.filter((value) => value === '1').length, cases: values.filter((value) => value === '2').length }
+}
+
+function numericPreviewValues(rows: string[][], columnIndex: number): number[] {
+  return rows
+    .map((row) => Number(row[columnIndex]?.trim()))
+    .filter((value) => Number.isFinite(value))
+}
+
+function variantRowsForProbe(probe: FileProbeResult | null): { header: string[]; rows: string[][] } | null {
+  if (!probe) return null
+  if ((probe.variantHeader?.length ?? 0) > 0 && (probe.variantPreviewRows?.length ?? 0) > 0) {
+    return { header: probe.variantHeader!, rows: probe.variantPreviewRows! }
+  }
+  if ((probe.header?.length ?? 0) > 0 && (probe.previewRows?.length ?? 0) > 0) {
+    return { header: probe.header!, rows: probe.previewRows! }
+  }
+  return null
+}
+
+function variantColumnIndex(header: string[], aliases: string[]): number {
+  const normalized = header.map((column) => column.trim().replace(/^#/, '').toUpperCase())
+  for (const alias of aliases) {
+    const idx = normalized.indexOf(alias.replace(/^#/, '').toUpperCase())
+    if (idx >= 0) return idx
+  }
+  return -1
+}
+
+function firstColumnIndex(header: string[], aliases: string[]): number {
+  const normalized = header.map((column) => column.trim().toLowerCase())
+  for (const alias of aliases) {
+    const idx = normalized.indexOf(alias.trim().toLowerCase())
+    if (idx >= 0) return idx
+  }
+  return -1
+}
+
+function firstDuplicate(values: string[]): string | null {
+  const seen = new Set<string>()
+  for (const value of values) {
+    if (seen.has(value)) return value
+    seen.add(value)
+  }
+  return null
+}
+
+function isSimpleSnpAllele(value: string | undefined): boolean {
+  if (!value) return false
+  return /^[ACGT]$/i.test(value.trim())
+}
+
+function normalizeChrom(raw: string | undefined): string {
+  return String(raw ?? '').trim().replace(/^chr/i, '').toUpperCase()
+}
+
+function isStandardHumanChrom(chrom: string): boolean {
+  if (/^(?:[1-9]|1[0-9]|2[0-2])$/.test(chrom)) return true
+  return chrom === 'X' || chrom === 'Y' || chrom === 'XY' || chrom === 'M' || chrom === 'MT'
+}
+
+function scoreColumnNumsFromRoles(columns: string[]): string | null {
+  const id = firstColumnIndex(columns, ['ID', 'SNP', 'RSID'])
+  const allele = firstColumnIndex(columns, ['A1', 'ALT', 'ALLELE', 'EFFECT_ALLELE'])
+  const weight = firstColumnIndex(columns, ['BETA', 'OR', 'LOG_OR', 'SCORE'])
+  if (id < 0 || allele < 0 || weight < 0) return null
+  return `${id + 1} ${allele + 1} ${weight + 1}`
+}
+
+function scoreColumnNums(tool: NonNullable<ReturnType<typeof getTool>>, data: ToolNodeData, connectedPortIds: string[]): string | null {
+  const raw = plinkFlagValue(tool, data, connectedPortIds, 'score-col-nums')
+  const values = selectedParamColumns(raw ?? '1 2 3', true)
+  return values.length > 0 ? values.join(' ') : null
+}
+
+function alleleMapForProbe(probe: FileProbeResult | null): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  const variants = variantRowsForProbe(probe)
+  if (!variants) return out
+  const idIdx = variantColumnIndex(variants.header, ['ID', 'SNP', 'RSID'])
+  const refIdx = variantColumnIndex(variants.header, ['REF', 'A2'])
+  const altIdx = variantColumnIndex(variants.header, ['ALT', 'A1'])
+  if (idIdx < 0 || refIdx < 0 || altIdx < 0) return out
+  for (const row of variants.rows) {
+    const id = row[idIdx]?.trim()
+    if (!id) continue
+    const alleles = new Set<string>()
+    for (const allele of [row[refIdx], row[altIdx]]) {
+      for (const token of String(allele ?? '').split(',')) {
+        const value = token.trim().toUpperCase()
+        if (value) alleles.add(value)
+      }
+    }
+    out.set(id, alleles)
+  }
+  return out
+}
+
+function previewCorrelation(rows: string[][], aIdx: number, bIdx: number): number | null {
+  const pairs = rows
+    .map((row) => [Number(row[aIdx]), Number(row[bIdx])] as const)
+    .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b))
+  if (pairs.length < 4) return null
+  const meanA = pairs.reduce((sum, [a]) => sum + a, 0) / pairs.length
+  const meanB = pairs.reduce((sum, [, b]) => sum + b, 0) / pairs.length
+  let numerator = 0
+  let denomA = 0
+  let denomB = 0
+  for (const [a, b] of pairs) {
+    const da = a - meanA
+    const db = b - meanB
+    numerator += da * db
+    denomA += da * da
+    denomB += db * db
+  }
+  if (denomA === 0 || denomB === 0) return null
+  return numerator / Math.sqrt(denomA * denomB)
 }
 
 function checkParameterRules(
@@ -661,6 +1411,15 @@ export function evaluateWorkflowReadiness(
         }
       }
       checkSampleOverlap(snapshot, node, probes, schemas, roleMappings, issues)
+      checkPlinkTableModifiers(snapshot, node, connected, probes, issues)
+      checkPlinkNoCovars(snapshot, node, connected, issues)
+      checkPlinkPhenotypeCoding(snapshot, node, connected, probes, schemas, issues)
+      checkPlinkNeg9Phenotypes(snapshot, node, connected, probes, schemas, issues)
+      checkPlinkKeepFileShape(snapshot, node, probes, issues)
+      checkPlinkVariantPreview(snapshot, node, connected, probes, issues)
+      checkPlinkScoreReadiness(snapshot, node, connected, probes, schemas, issues)
+      checkPlinkCovariatePreview(snapshot, node, probes, schemas, issues)
+      checkPlinkGwasResources(snapshot, node, connected, probes, issues)
       checkParameterRules(snapshot, node, probes, issues)
     } else if (node.type === 'transform') {
       checkTransformPreset(snapshot, node, probes, schemas, roleMappings, issues)
@@ -691,6 +1450,7 @@ export function mergeReadinessIntoValidation(
     code: issue.code,
     message: issue.message,
     suggestion: issue.suggestion,
+    details: issue.details,
   }))
   const issues = [...base.issues, ...readinessIssues]
   return {

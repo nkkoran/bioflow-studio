@@ -22,7 +22,7 @@ export function AxedEdge(props: EdgeProps) {
 
   return (
     <>
-      <BaseEdge id={props.id} path={edgePath} style={props.style} markerEnd={props.markerEnd} />
+      <BaseEdge id={props.id} path={edgePath} style={props.style} markerEnd={props.markerEnd} interactionWidth={24} />
       {label && (
         <EdgeLabelRenderer>
           <div

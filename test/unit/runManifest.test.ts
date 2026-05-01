@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildRunManifest } from '@/lib/runManifest'
+import { buildRunManifest, renderRunManifestHtml, renderRunManifestMarkdown } from '@/lib/runManifest'
 import type { DryRunScript, PipelineSnapshot, RunState } from '@/types/pipeline'
 
 describe('runManifest', () => {
@@ -53,5 +53,7 @@ describe('runManifest', () => {
       label: 'GRS',
       paths: ['/work/grs.profile.tsv'],
     })
+    expect(renderRunManifestMarkdown(manifest)).toContain('# Example Dossier')
+    expect(renderRunManifestHtml(manifest)).toContain('<html>')
   })
 })

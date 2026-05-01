@@ -1,7 +1,7 @@
 import type { SFTPWrapper, FileEntry as SshFileEntry } from 'ssh2'
 import { SshManager } from './SshManager'
 import type { RemoteFileEntry, FileStat } from './types'
-import { createReadStream } from 'fs'
+import { createReadStream, createWriteStream } from 'fs'
 import { promises as fs } from 'fs'
 
 interface PoolEntry {
@@ -20,6 +20,7 @@ interface CacheEntry {
 const MAX_PER_CONNECTION = 1
 const MAX_IDLE_PER_CONNECTION = 1
 const CACHE_TTL = 30_000
+export type SftpProgressCallback = (bytesTransferred: number, totalBytes?: number) => void
 
 export class SftpPool {
   private static instance: SftpPool
@@ -121,10 +122,10 @@ export class SftpPool {
     }
   }
 
-  async ls(connectionId: string, remotePath: string): Promise<RemoteFileEntry[]> {
+  async ls(connectionId: string, remotePath: string, opts: { force?: boolean } = {}): Promise<RemoteFileEntry[]> {
     const cacheKey = `${connectionId}:${remotePath}`
     const cached = this.cache.get(cacheKey)
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    if (!opts.force && cached && Date.now() - cached.timestamp < CACHE_TTL) {
       return cached.entries
     }
 
@@ -297,12 +298,7 @@ export class SftpPool {
   async mkdir(connectionId: string, remotePath: string): Promise<void> {
     const sftp = await this.acquire(connectionId)
     try {
-      await new Promise<void>((resolve, reject) => {
-        sftp.mkdir(remotePath, (err) => {
-          if (err) reject(err)
-          else resolve()
-        })
-      })
+      await this.mkdirRecursive(sftp, remotePath)
       this.invalidateCache(connectionId, parentDir(remotePath))
     } finally {
       this.release(connectionId, sftp)
@@ -332,16 +328,79 @@ export class SftpPool {
   async remove(connectionId: string, remotePath: string): Promise<void> {
     const sftp = await this.acquire(connectionId)
     try {
+      await this.removePath(sftp, remotePath)
+      this.invalidateCache(connectionId, parentDir(remotePath))
+    } finally {
+      this.release(connectionId, sftp)
+    }
+  }
+
+  private async mkdirRecursive(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+    const clean = remotePath.replace(/\/+$/, '')
+    if (!clean || clean === '/' || clean === '.') return
+    const parts = clean.split('/').filter(Boolean)
+    let current = clean.startsWith('/') ? '' : '.'
+    for (const part of parts) {
+      current = current === '' ? `/${part}` : `${current.replace(/\/+$/, '')}/${part}`
+      const exists = await new Promise<boolean>((resolve, reject) => {
+        sftp.stat(current, (err, stats) => {
+          if (!err) {
+            const isDirectory = (((stats as { mode?: number }).mode ?? 0) & 0o170000) === 0o040000
+            resolve(isDirectory)
+            return
+          }
+          const message = String((err as Error).message ?? err)
+          if (message.includes('No such file') || message.includes('not found') || (err as { code?: number }).code === 2) {
+            resolve(false)
+            return
+          }
+          reject(err)
+        })
+      })
+      if (exists) continue
+      await new Promise<void>((resolve, reject) => {
+        sftp.mkdir(current, (err) => {
+          if (err) reject(err)
+          else resolve()
+        })
+      })
+    }
+  }
+
+  private async removePath(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+    const stat = await new Promise<{ mode: number }>((resolve, reject) => {
+      sftp.stat(remotePath, (err, stats) => {
+        if (err) reject(err)
+        else resolve(stats as { mode: number })
+      })
+    })
+    const isDirectory = ((stat.mode ?? 0) & 0o170000) === 0o040000
+    if (!isDirectory) {
       await new Promise<void>((resolve, reject) => {
         sftp.unlink(remotePath, (err) => {
           if (err) reject(err)
           else resolve()
         })
       })
-      this.invalidateCache(connectionId, parentDir(remotePath))
-    } finally {
-      this.release(connectionId, sftp)
+      return
     }
+
+    const entries = await new Promise<SshFileEntry[]>((resolve, reject) => {
+      sftp.readdir(remotePath, (err, fileList) => {
+        if (err) reject(err)
+        else resolve(Array.isArray(fileList) ? fileList : [])
+      })
+    })
+    for (const entry of entries) {
+      if (entry.filename === '.' || entry.filename === '..') continue
+      await this.removePath(sftp, `${remotePath.replace(/\/+$/, '')}/${entry.filename}`)
+    }
+    await new Promise<void>((resolve, reject) => {
+      sftp.rmdir(remotePath, (err) => {
+        if (err) reject(err)
+        else resolve()
+      })
+    })
   }
 
   async write(
@@ -363,33 +422,54 @@ export class SftpPool {
     }
   }
 
-  async upload(connectionId: string, localPath: string, remotePath: string): Promise<void> {
+  async upload(connectionId: string, localPath: string, remotePath: string, onProgress?: SftpProgressCallback): Promise<void> {
     const sftp = await this.acquire(connectionId)
     try {
+      const total = await fs.stat(localPath).then((stat) => stat.size).catch(() => undefined)
       await new Promise<void>((resolve, reject) => {
         const readStream = createReadStream(localPath)
         const writeStream = sftp.createWriteStream(remotePath)
+        let transferred = 0
         readStream.on('error', reject)
+        readStream.on('data', (chunk: Buffer) => {
+          transferred += chunk.length
+          onProgress?.(transferred, total)
+        })
         writeStream.on('error', reject)
         writeStream.on('finish', resolve)
         readStream.pipe(writeStream)
       })
+      onProgress?.(total ?? 0, total)
       this.invalidateCache(connectionId, parentDir(remotePath))
     } finally {
       this.release(connectionId, sftp)
     }
   }
 
-  async download(connectionId: string, remotePath: string, localPath: string): Promise<void> {
+  async download(connectionId: string, remotePath: string, localPath: string, onProgress?: SftpProgressCallback): Promise<void> {
     const sftp = await this.acquire(connectionId)
     try {
       await fs.mkdir(localPath.replace(/\/[^/]+$/, ''), { recursive: true }).catch(() => undefined)
-      await new Promise<void>((resolve, reject) => {
-        sftp.fastGet(remotePath, localPath, {}, (err) => {
-          if (err) reject(err)
-          else resolve()
+      const total = await new Promise<number | undefined>((resolve) => {
+        sftp.stat(remotePath, (err, attrs) => {
+          if (err) resolve(undefined)
+          else resolve(Number((attrs as { size?: number }).size ?? 0))
         })
       })
+      await new Promise<void>((resolve, reject) => {
+        const readStream = sftp.createReadStream(remotePath)
+        const writeStream = createWriteStream(localPath)
+        let transferred = 0
+        readStream.on('data', (chunk: Buffer) => {
+          transferred += chunk.length
+          onProgress?.(transferred, total)
+        })
+        readStream.on('error', reject)
+        writeStream.on('error', reject)
+        writeStream.on('finish', resolve)
+        readStream.pipe(writeStream)
+      })
+      onProgress?.(total ?? 0, total)
     } finally {
       this.release(connectionId, sftp)
     }

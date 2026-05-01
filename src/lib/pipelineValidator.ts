@@ -7,7 +7,7 @@
  * submit time via its own axis planner, but we surface problems here first so
  * users see them before they click Run.
  */
-import type { PipelineSnapshot } from '@/types/pipeline'
+import type { FileType, PipelineSnapshot, ToolPort } from '@/types/pipeline'
 import type {
   ToolNodeData,
   FileNodeData,
@@ -32,6 +32,7 @@ export interface ValidationIssue {
   code: string
   message: string
   suggestion?: string
+  details?: Record<string, string | number | boolean | null>
 }
 
 export interface ValidationResult {
@@ -147,18 +148,49 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
     const sourceNode = nodeById.get(edge.source)
     const targetNode = nodeById.get(edge.target)
     if (!sourceNode || !targetNode) continue
-    if (sourceNode.type === 'transfer' || targetNode.type === 'transfer') continue
     const sourceBackend = nodeBackend(sourceNode, 'output')
     const targetBackend = nodeBackend(targetNode, 'input')
-    if (!sourceBackend || !targetBackend || sourceBackend === targetBackend) continue
-    issues.push({
-      severity: 'warning',
-      edgeId: edge.id,
-      nodeId: edge.target,
-      code: 'BACKEND_MISMATCH_NEEDS_TRANSFER',
-      message: `This edge crosses backends (${backendLabel(sourceBackend)} -> ${backendLabel(targetBackend)}) without a Transfer node.`,
-      suggestion: 'Insert a Transfer node so the cross-backend copy is explicit and editable.',
-    })
+    if (targetBackend === 'dnx' && sourceBackend && sourceBackend !== 'dnx' && targetNode.type !== 'transfer') {
+      const sourceType = sourcePortType(sourceNode, edge.sourceHandle ?? 'output')
+      const largeLabel = isLargeGenomicFileType(sourceType) ? ' large genomic data' : ' input files'
+      issues.push({
+        severity: 'warning',
+        edgeId: edge.id,
+        nodeId: edge.target,
+        code: 'DNX_UPLOAD_ADVISORY',
+        message: `Running this DNAnexus/RAP step will stage${largeLabel} from ${backendLabel(sourceBackend)} to RAP.`,
+        suggestion: 'If the file already exists on RAP, replace this input with a DNAnexus file node or add an explicit Transfer node and review it before running.',
+      })
+    }
+    if (sourceNode.type !== 'transfer' && targetNode.type !== 'transfer' && sourceBackend && targetBackend && sourceBackend !== targetBackend) {
+      issues.push({
+        severity: 'warning',
+        edgeId: edge.id,
+        nodeId: edge.target,
+        code: 'BACKEND_MISMATCH_NEEDS_TRANSFER',
+        message: `This edge crosses backends (${backendLabel(sourceBackend)} -> ${backendLabel(targetBackend)}) without a Transfer node.`,
+        suggestion: 'Insert a Transfer node so the cross-backend copy is explicit and editable.',
+      })
+    }
+
+    const sourceBuild = nodeOutputBuild(sourceNode, edge.sourceHandle ?? 'output')
+    const expectedBuild = nodeInputExpectedBuild(targetNode, edge.targetHandle ?? 'input')
+    if (sourceBuild && expectedBuild) {
+      const normalizedSource = normalizeGenomeBuild(sourceBuild)
+      const normalizedExpected = normalizeGenomeBuild(expectedBuild)
+      if (normalizedSource && normalizedExpected && normalizedSource !== normalizedExpected) {
+        issues.push({
+          severity: 'warning',
+          edgeId: edge.id,
+          nodeId: edge.target,
+          portId: edge.targetHandle ?? 'input',
+          code: 'GENOME_BUILD_MISMATCH',
+          message: `This connection appears to mix genomic builds (${sourceBuild} -> ${expectedBuild}).`,
+          suggestion: 'Insert a CrossMap Liftover node, or update the build metadata if the files already match.',
+          details: { sourceBuild, targetBuild: expectedBuild },
+        })
+      }
+    }
   }
 
   const labelCounts = new Map<string, number>()
@@ -172,6 +204,14 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
       const split = d.split
       if (split) {
         const splitItems = Array.isArray((split as { items?: unknown }).items) ? split.items : []
+        if (d.isInput && (d.origin === 'local' || d.source === 'local')) {
+          issues.push({
+            severity: 'error', nodeId: node.id,
+            code: 'LOCAL_SPLIT_NOT_UPLOADED',
+            message: `Split input "${d.label}" is still local and must be transferred before running on Rorqual.`,
+            suggestion: 'Add an explicit Local -> Rorqual Transfer node, or upload the split files and point this node at the remote paths.',
+          })
+        }
         if (!split.axis || !split.axis.trim()) {
           issues.push({
             severity: 'error', nodeId: node.id,
@@ -216,6 +256,16 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
             suggestion: 'Enter a remote path or use the file browser "Pick..." button.',
           })
         }
+      }
+      if (d.isInput && (d.fileType === 'pgen' || d.fileType === 'plink') && /\.(pgen|bed)$/i.test(d.path)) {
+        issues.push({
+          severity: 'info', nodeId: node.id,
+          code: 'PLINK_SIDECAR_CHECK',
+          message: `PLINK input "${d.label}" uses a prefix-based fileset; matching sidecar files will be checked when the run starts.`,
+          suggestion: d.path.toLowerCase().endsWith('.pgen')
+            ? 'Keep the matching .pvar and .psam next to this .pgen file.'
+            : 'Keep the matching .bim and .fam next to this .bed file.',
+        })
       }
       continue
     }
@@ -289,6 +339,10 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           message: `Input "${portId}" is connected but its analysis option is disabled.`,
           suggestion: 'Enable the matching option or remove this connection.',
         })
+      }
+
+      for (const issue of validateToolAxisChoices(snapshot, node.id, activeInputs, d, inMap, nodeById)) {
+        issues.push(issue)
       }
 
       for (const issue of validateAnalysisOptions(tool, d, [...inMap.keys()])) {
@@ -422,6 +476,50 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
             code: 'VEP_PATH_MISSING',
             message: 'VEP needs either a module or the path to a VEP executable before it can run.',
             suggestion: 'Set the VEP executable path in Settings or on this node, or use the setup button to install it under your tools folder.',
+          })
+        }
+      }
+
+      if (d.toolId === 'crossmap.liftover') {
+        const selectedFormat = String(d.paramValues?.format ?? 'auto').trim().toLowerCase()
+        const inputTypes = (inMap.get('input') ?? [])
+          .map((edge) => {
+            const source = nodeById.get(edge.source)
+            return source ? sourcePortType(source, edge.sourceHandle ?? 'output') : null
+          })
+          .filter(Boolean)
+        const needsReference = selectedFormat === 'vcf' || selectedFormat === 'gvcf' || (
+          selectedFormat === 'auto' && inputTypes.some((type) => type === 'vcf' || type === 'bcf')
+        )
+        if (needsReference && !(inMap.get('reference')?.length)) {
+          issues.push({
+            severity: 'error', nodeId: node.id, portId: 'reference',
+            code: 'LIFTOVER_REFERENCE_REQUIRED',
+            message: 'CrossMap VCF/gVCF liftover needs the target reference FASTA.',
+            suggestion: 'Connect the target-build FASTA to the Target FASTA input before running.',
+          })
+        }
+        const sourceBuild = normalizeGenomeBuild(String(d.paramValues?.['source-build'] ?? ''))
+        const targetBuild = normalizeGenomeBuild(String(d.paramValues?.['target-build'] ?? ''))
+        if (sourceBuild && targetBuild && sourceBuild === targetBuild) {
+          issues.push({
+            severity: 'warning', nodeId: node.id,
+            code: 'LIFTOVER_SAME_BUILD',
+            message: 'CrossMap source and target builds are the same.',
+            suggestion: 'Remove the liftover node unless you only need chromosome-name conversion.',
+          })
+        }
+      }
+
+      if (d.toolId === 'plink2.phewas') {
+        const typedPhenotypes = splitListValue(d.paramValues?.phenotypes)
+        const hasPhenotypeList = Boolean(inMap.get('phenoList')?.length)
+        if (typedPhenotypes.length === 0 && !hasPhenotypeList) {
+          issues.push({
+            severity: 'error', nodeId: node.id, portId: 'phenoList',
+            code: 'PHEWAS_NO_PHENOTYPES',
+            message: 'PLINK2 PheWAS needs either phenotype columns or a phenotype-list file.',
+            suggestion: 'Choose phenotype columns from the phenotype table, type a list, or connect a one-column phenotype-list file.',
           })
         }
       }
@@ -566,6 +664,21 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           suggestion: 'Remove it unless you need the explicit relocation step.',
         })
       }
+      if (d.to === 'dnx' && d.from !== 'dnx') {
+        const sourceTypes = (edges ?? [])
+          .map((edge) => {
+            const source = nodeById.get(edge.source)
+            return source ? sourcePortType(source, edge.sourceHandle ?? 'output') : null
+          })
+          .filter(Boolean)
+        const largeLabel = sourceTypes.some(isLargeGenomicFileType) ? ' large genomic files' : ' files'
+        issues.push({
+          severity: 'warning', nodeId: node.id,
+          code: 'DNX_UPLOAD_ADVISORY',
+          message: `Transfer "${d.label}" will upload${largeLabel} to DNAnexus/RAP.`,
+          suggestion: 'If these already exist on RAP, use DNAnexus file references instead, or review this transfer before running.',
+        })
+      }
       continue
     }
 
@@ -590,8 +703,38 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           message: `Merge "${d.label}" output is not connected downstream.`,
         })
       }
+      for (const edge of snapshot.edges.filter((candidate) => candidate.target === node.id)) {
+        const source = nodeById.get(edge.source)
+        if (!source) continue
+        const fileType = sourcePortType(source, edge.sourceHandle ?? 'output')
+        if (fileType && fileType !== 'any' && !mergeStrategyCompatible(d.strategy, fileType)) {
+          issues.push({
+            severity: 'error', nodeId: node.id, edgeId: edge.id,
+            code: 'MERGE_STRATEGY_TYPE_MISMATCH',
+            message: `Merge "${d.label}" strategy ${d.strategy} is not compatible with ${fileType} input.`,
+            suggestion: 'Use auto, cat, or a merge strategy matching the upstream file type.',
+          })
+        }
+      }
       continue
     }
+  }
+
+  for (const edge of snapshot.edges) {
+    const sourceNode = nodeById.get(edge.source)
+    const targetNode = nodeById.get(edge.target)
+    if (!sourceNode || !targetNode || targetNode.type !== 'file') continue
+    const targetData = targetNode.data as FileNodeData
+    if (targetData.isInput || targetData.origin !== 'local') continue
+    if (sourceNode.type === 'transfer') continue
+    issues.push({
+      severity: 'error',
+      nodeId: targetNode.id,
+      edgeId: edge.id,
+      code: 'LOCAL_OUTPUT_NEEDS_TRANSFER',
+      message: `Output "${targetData.label}" points to a local path, but upstream jobs run on Rorqual.`,
+      suggestion: 'Insert a Rorqual -> Local Transfer node and set the local destination there.',
+    })
   }
 
   // Duplicate labels (informational)
@@ -733,6 +876,89 @@ function hasAxedInput(snapshot: PipelineSnapshot, nodeId: string): boolean {
   })
 }
 
+function nodeOutputBuild(node: PipelineSnapshot['nodes'][number], portId: string): string | null {
+  if (node.type === 'file') {
+    const data = node.data as FileNodeData
+    return stringValue(data.genomeBuild) || buildFromText(`${data.label} ${data.path}`)
+  }
+  if (node.type === 'tool') {
+    const data = node.data as ToolNodeData
+    if (data.toolId === 'crossmap.liftover') return stringValue(data.paramValues?.['target-build']) || stringValue(data.genomeBuild)
+    if (data.toolId === 'annovar.table_annovar') return normalizeAnnotationBuild(stringValue(data.paramValues?.buildver)) || stringValue(data.genomeBuild)
+    if (data.toolId === 'vep') return stringValue(data.paramValues?.assembly) || stringValue(data.genomeBuild)
+    return stringValue(data.genomeBuild) || paramBuild(data) || buildFromText(`${data.label} ${portId}`)
+  }
+  if (node.type === 'transform') return null
+  if (node.type === 'merge') return null
+  if (node.type === 'transfer') return null
+  return null
+}
+
+function nodeInputExpectedBuild(node: PipelineSnapshot['nodes'][number], portId: string): string | null {
+  if (node.type === 'file') {
+    const data = node.data as FileNodeData
+    return stringValue(data.genomeBuild) || buildFromText(`${data.label} ${data.path}`)
+  }
+  if (node.type !== 'tool') return null
+  const data = node.data as ToolNodeData
+  if (data.toolId === 'crossmap.liftover') {
+    if (portId !== 'input') return null
+    return stringValue(data.paramValues?.['source-build'])
+  }
+  if (data.toolId === 'annovar.table_annovar') return normalizeAnnotationBuild(stringValue(data.paramValues?.buildver))
+  if (data.toolId === 'vep') return stringValue(data.paramValues?.assembly)
+  return stringValue(data.genomeBuild) || paramBuild(data)
+}
+
+function paramBuild(data: ToolNodeData): string | null {
+  return stringValue(data.paramValues?.['target-build'])
+    || stringValue(data.paramValues?.['source-build'])
+    || normalizeAnnotationBuild(stringValue(data.paramValues?.buildver))
+    || stringValue(data.paramValues?.assembly)
+}
+
+function normalizeGenomeBuild(raw: string | null | undefined): string | null {
+  const value = stringValue(raw)?.toLowerCase()
+  if (!value) return null
+  if (value === 'hg19' || value === 'grch37' || value === 'b37') return 'GRCh37'
+  if (value === 'hg38' || value === 'grch38' || value === 'b38') return 'GRCh38'
+  return value.toUpperCase()
+}
+
+function normalizeAnnotationBuild(value: string | null): string | null {
+  if (!value) return null
+  return value === 'hg19' ? 'GRCh37' : value === 'hg38' ? 'GRCh38' : value
+}
+
+function buildFromText(text: string): string | null {
+  const lower = text.toLowerCase()
+  if (/(^|[^a-z0-9])(grch37|hg19|b37)([^a-z0-9]|$)/.test(lower)) return 'GRCh37'
+  if (/(^|[^a-z0-9])(grch38|hg38|b38)([^a-z0-9]|$)/.test(lower)) return 'GRCh38'
+  return null
+}
+
+function stringValue(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  const rendered = String(value).trim()
+  return rendered ? rendered : null
+}
+
+function splitListValue(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map(String).map((value) => value.trim()).filter(Boolean)
+  if (raw === undefined || raw === null) return []
+  return String(raw).split(/[,\s]+/).map((value) => value.trim()).filter(Boolean)
+}
+
+function isLargeGenomicFileType(fileType: string | null | undefined): fileType is FileType {
+  return fileType === 'plink'
+    || fileType === 'pgen'
+    || fileType === 'bgen'
+    || fileType === 'vcf'
+    || fileType === 'bcf'
+    || fileType === 'bam'
+    || fileType === 'cram'
+}
+
 /**
  * Resolve the output file type for a given source-node port. Used by the
  * TYPE_MISMATCH check. Returns null when the type can't be determined (e.g.,
@@ -797,6 +1023,73 @@ function mergeStrategyCompatible(strategy: MergeNodeData['strategy'], fileType: 
   if (strategy === 'bcftools-concat') return fileType === 'vcf' || fileType === 'bcf'
   if (strategy === 'plink-pmerge-list') return fileType === 'plink' || fileType === 'pgen'
   return true
+}
+
+function validateToolAxisChoices(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  activeInputs: ToolPort[],
+  data: ToolNodeData,
+  inMap: Map<string, typeof snapshot.edges>,
+  nodeById: Map<string, PipelineSnapshot['nodes'][number]>,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const candidates: Array<{ portId: string; axis: string; keys: string[] }> = []
+  for (const port of activeInputs) {
+    if (port.multi || port.arrayable === false) continue
+    const edges = inMap.get(port.id) ?? []
+    if (edges.length !== 1) continue
+    const source = nodeById.get(edges[0].source)
+    const split = source?.type === 'file' ? (source.data as FileNodeData).split : undefined
+    const items = (split as { items?: Array<{ key?: unknown }> } | undefined)?.items
+    if (!split || !Array.isArray(items) || items.length === 0) continue
+    candidates.push({
+      portId: port.id,
+      axis: split.axis || 'item',
+      keys: items.map((item, index) => typeof item.key === 'string' && item.key ? item.key : String(index + 1)),
+    })
+  }
+  if (candidates.length === 0) return issues
+  if (data.arrayOver === null) {
+    issues.push({
+      severity: 'error',
+      nodeId,
+      code: 'ARRAY_OVER_NULL_WITH_AXED',
+      message: `"${data.label}" is set to a single job, but receives split input files.`,
+      suggestion: 'Choose a split input to array over, or remove the split before running.',
+    })
+    return issues
+  }
+  if (data.arrayOver && !candidates.some((candidate) => candidate.portId === data.arrayOver)) {
+    issues.push({
+      severity: 'error',
+      nodeId,
+      portId: data.arrayOver,
+      code: 'ARRAY_OVER_INVALID',
+      message: `"${data.label}" is configured to array over "${data.arrayOver}", but that port is not a split input.`,
+      suggestion: 'Pick a connected split input in the node inspector.',
+    })
+    return issues
+  }
+  if (candidates.length <= 1) return issues
+  const reference = data.arrayOver
+    ? candidates.find((candidate) => candidate.portId === data.arrayOver) ?? candidates[0]
+    : candidates[0]
+  const aligned = candidates.every((candidate) =>
+    candidate.axis === reference.axis &&
+    candidate.keys.length === reference.keys.length &&
+    candidate.keys.every((key, index) => key === reference.keys[index]),
+  )
+  if (!aligned) {
+    issues.push({
+      severity: 'error',
+      nodeId,
+      code: 'MULTIPLE_AXES_NO_CHOICE',
+      message: `"${data.label}" has multiple split inputs whose axes or keys do not match.`,
+      suggestion: 'Use split inputs with the same keys, or choose one array-over input and collapse/merge the other input first.',
+    })
+  }
+  return issues
 }
 
 function blockProvidesInput(data: ToolNodeData, portId: string, hasConnectedEdge: boolean): boolean {

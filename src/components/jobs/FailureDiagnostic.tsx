@@ -64,15 +64,16 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
         nextBlocks.push(block)
       }
       const tool = getTool(data.toolId)
+      const blockParams = flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues)
       const migratedOptions = tool
-        ? normalizeAnalysisOptions(tool, { ...data, flagBlocks: nextBlocks, paramValues: flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues) })
+        ? normalizeAnalysisOptions(tool, { flagBlocks: nextBlocks, paramValues: blockParams })
         : data.analysisOptions
       updateNodeData(nodeId, {
         flagBlocks: nextBlocks,
         analysisOptions: migratedOptions,
         paramValues: tool && migratedOptions
-          ? analysisOptionsToParamValues(tool, migratedOptions, flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues))
-          : flagBlocksToParamValues(data.toolId, nextBlocks, data.paramValues),
+          ? analysisOptionsToParamValues(tool, migratedOptions, blockParams)
+          : blockParams,
       })
     } else {
       updateNodeData(nodeId, {

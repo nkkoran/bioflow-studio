@@ -49,6 +49,7 @@ interface DataPreviewStore {
 
   loadSavedViews: () => Promise<void>
   openFile: (filePath: string, fileName: string, mode?: PreviewMode) => void
+  openText: (fileName: string, text: string) => void
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
   setTabData: (id: string, data: DataPreviewData) => void
@@ -122,6 +123,24 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
         draftFilters,
         sort,
         activeSavedViewId,
+      }
+    })
+  },
+
+  openText: (fileName, text) => {
+    set((state) => {
+      const id = `preview-${nextPreviewId++}`
+      const filePath = `clipboard://${Date.now()}-${id}`
+      return {
+        tabs: [...state.tabs, {
+          id,
+          filePath,
+          fileName,
+          mode: 'text',
+          data: { headers: [], rows: [], delimiter: '\t', rawText: text },
+          loading: false,
+        }],
+        activeTabId: id,
       }
     })
   },

@@ -18,6 +18,34 @@ function singleAxisPlan(inputs: AxisPlan['inputs'], outputs: AxisPlan['outputs']
 }
 
 describe('ScriptGenerator', () => {
+  it('routes Slurm stdout and stderr into one job log file', () => {
+    const tool = getTool('samtools.sort')
+    if (!tool) throw new Error('missing tool')
+    const nodeData: ToolNodeData = {
+      toolId: 'samtools.sort',
+      label: 'Sort',
+      paramValues: {},
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'sort',
+      nodeSlug: 'samtools-sort',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        { input: { kind: 'single', path: '/data/input.bam' } },
+        { output: { kind: 'single', path: '/work/sorted.bam' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.script).toContain('#SBATCH --output=/logs/samtools-sort-%j.slurm.log')
+    expect(generated.script).toContain('#SBATCH --error=/logs/samtools-sort-%j.slurm.log')
+    expect(generated.script).not.toContain('.err')
+  })
+
   it('does not emit generic boolean flags whose default is false', () => {
     const tool = getTool('samtools.sort')
     if (!tool) throw new Error('missing tool')
@@ -57,6 +85,7 @@ describe('ScriptGenerator', () => {
         geno: 0.05,
         hwe: 1e-6,
         'pheno-name': 'trait',
+        one: true,
         'covar-name': 'age sex PC1 PC2',
       },
       flagBlocks: ensureFlagBlocks('plink2.assoc', undefined, {
@@ -65,6 +94,7 @@ describe('ScriptGenerator', () => {
         geno: 0.05,
         hwe: 1e-6,
         'pheno-name': 'trait',
+        one: true,
         'covar-name': 'age sex PC1 PC2',
       }),
       status: 'idle',
@@ -91,8 +121,87 @@ describe('ScriptGenerator', () => {
     })
 
     expect(generated.script).toContain('--pheno /data/pheno.tsv')
+    expect(generated.script).toContain('--1')
     expect(generated.script).toContain('--covar /data/covar.tsv')
     expect(generated.script).toContain('--keep /data/keep.txt')
+  })
+
+  it('renders multi-phenotype PLINK association as a Slurm array', () => {
+    const tool = getTool('plink2.assoc')
+    if (!tool) throw new Error('missing tool')
+    const nodeData: ToolNodeData = {
+      toolId: 'plink2.assoc',
+      label: 'Assoc',
+      paramValues: {
+        glm: 'hide-covar',
+        'pheno-name': 'bmi asthma height',
+        'covar-name': 'age sex PC1',
+      },
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'assoc',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        {
+          input: { kind: 'single', path: '/data/cohort.pgen' },
+          pheno: { kind: 'single', path: '/data/pheno.tsv' },
+          covar: { kind: 'single', path: '/data/covar.tsv' },
+        },
+        { output: { kind: 'single', path: '/work/assoc.tsv' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.arraySize).toBe(3)
+    expect(generated.script).toContain('#SBATCH --array=0-2')
+    expect(generated.script).toContain('# --- PLINK2 association phenotype array ---')
+    expect(generated.script).toContain('--pheno /data/pheno.tsv')
+    expect(generated.script).toContain('--covar /data/covar.tsv')
+    expect(generated.script).toContain('--pheno-name "$pheno"')
+  })
+
+  it('renders typed PLINK PheWAS phenotypes as a Slurm array', () => {
+    const tool = getTool('plink2.phewas')
+    if (!tool) throw new Error('missing tool')
+    const nodeData: ToolNodeData = {
+      toolId: 'plink2.phewas',
+      label: 'PheWAS',
+      paramValues: {
+        phenotypes: 'bmi asthma height',
+        glm: 'hide-covar',
+        one: true,
+        'covar-name': 'age sex PC1',
+      },
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'phewas',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        {
+          input: { kind: 'single', path: '/data/cohort.pgen' },
+          pheno: { kind: 'single', path: '/data/pheno.tsv' },
+          covar: { kind: 'single', path: '/data/covar.tsv' },
+        },
+        { output: { kind: 'single', path: '/work/phewas.tsv' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.arraySize).toBe(3)
+    expect(generated.script).toContain('#SBATCH --array=0-2')
+    expect(generated.script).toContain('PHENO="${PHENOS[$SLURM_ARRAY_TASK_ID]}"')
+    expect(generated.script).toContain('--pheno /data/pheno.tsv')
+    expect(generated.script).toContain('--1')
+    expect(generated.script).toContain('--covar /data/covar.tsv')
+    expect(generated.script).toContain('--pheno-name "$pheno"')
   })
 
   it('renders curated PLINK QC options and dynamic keep input', () => {
@@ -207,7 +316,7 @@ describe('ScriptGenerator', () => {
       logDir: '/logs',
     })
 
-    expect(generated.script).toContain('--score /data/score.tsv 3 4 5 header center')
+    expect(generated.script).toContain('--score /data/score.tsv 1 2 3 header center')
     expect(generated.script).toContain('--extract /data/leads.txt')
     expect(generated.script).not.toContain('--score-col-nums')
   })

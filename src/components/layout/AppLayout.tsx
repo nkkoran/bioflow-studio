@@ -264,15 +264,21 @@ export function AppLayout() {
     }
     const onDrop = (event: DragEvent) => {
       if (!hasFiles(event)) return
+      if (event.defaultPrevented) return
       event.preventDefault()
       dragDepth.current = 0
       setWindowDragActive(false)
-      const paths = Array.from(event.dataTransfer?.files ?? [])
-        .map((file) => window.api.local.pathForFile(file))
-        .filter(Boolean)
+      const files = Array.from(event.dataTransfer?.files ?? [])
+      const pairs = files
+        .map((file) => ({ file, path: window.api.local.pathForFile(file) }))
+        .filter((entry) => Boolean(entry.path))
+      const paths = pairs.map((entry) => entry.path)
       if (paths.length === 0) return
+      const rootDirectory = uniqueValue(pairs
+        .map((entry) => rootDirectoryFromDraggedFile(entry.file, entry.path))
+        .filter(Boolean))
       window.dispatchEvent(new CustomEvent('bioflow:global-file-drop', {
-        detail: { clientX: event.clientX, clientY: event.clientY, paths },
+        detail: { clientX: event.clientX, clientY: event.clientY, paths, rootDirectory },
       }))
     }
     window.addEventListener('dragenter', onDragEnter)
@@ -322,7 +328,7 @@ export function AppLayout() {
       {windowDragActive && (
         <div className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-accent/10 backdrop-blur-[1px]">
           <div className="rounded-2xl border border-accent/30 bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">
-            Drop file here to add it to the pipeline
+            Drop file or folder here to add it to the pipeline
           </div>
         </div>
       )}
@@ -352,4 +358,17 @@ export function AppLayout() {
       </div>
     </div>
   )
+}
+
+function rootDirectoryFromDraggedFile(file: File, absolutePath: string): string {
+  const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+  if (!relativePath || !relativePath.includes('/') || !absolutePath.endsWith(relativePath)) return ''
+  const rootName = relativePath.split('/')[0]
+  const basePath = absolutePath.slice(0, absolutePath.length - relativePath.length).replace(/\/+$/, '')
+  return `${basePath}/${rootName}`.replace(/\/{2,}/g, '/')
+}
+
+function uniqueValue(values: string[]): string | undefined {
+  const unique = [...new Set(values.filter(Boolean))]
+  return unique.length === 1 ? unique[0] : undefined
 }

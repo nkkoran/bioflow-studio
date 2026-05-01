@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRunStore } from '@/stores/runStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { Button } from '@/components/ui/Button'
-import { ChevronLeft, ChevronRight, FolderOpen, RefreshCw, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Copy, FileText, FolderOpen, RefreshCw, RotateCcw, X } from 'lucide-react'
 import { NodeRunList } from './NodeRunList'
 import { LogViewer } from './LogViewer'
 import { JobSummary } from './JobSummary'
@@ -18,6 +18,10 @@ import type { NodeRunState, RunState } from '@/types/pipeline'
 import { useFileStore } from '@/stores/fileStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useDialogStore } from '@/stores/dialogStore'
+import { buildRunManifest } from '@/lib/runManifest'
+import { RunReportModal } from '@/components/pipeline/RunReportModal'
+import type { RunManifest } from '@/types/workspace'
 
 export function JobsPanel() {
   const runs = useRunStore((s) => s.runs)
@@ -29,12 +33,17 @@ export function JobsPanel() {
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
   const diagnostics = useRunStore((s) => s.diagnostics)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const loadSnapshot = usePipelineStore((s) => s.loadSnapshot)
+  const dirty = usePipelineStore((s) => s.dirty)
   const pipelineId = usePipelineStore((s) => s.pipelineId)
   const pipelineNodes = usePipelineStore((s) => s.nodes)
   const navigate = useFileStore((s) => s.navigate)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
+  const confirmDialog = useDialogStore((s) => s.confirm)
   const [nodesCollapsed, setNodesCollapsed] = useState(false)
+  const [reporting, setReporting] = useState(false)
+  const [reportPreview, setReportPreview] = useState<RunManifest | null>(null)
 
   // Sort runs most-recent-first for the selector
   const sortedRuns = useMemo(
@@ -62,6 +71,62 @@ export function JobsPanel() {
     })
   }, [activeRun])
   const activeRunHasSshSteps = !activeRunIsDnxOnly && activeRun?.connectionId && activeRun.connectionId !== LOCAL_CONNECTION_ID
+
+  const openReport = async () => {
+    if (!activeRun) return
+    setReporting(true)
+    try {
+      const scripts = activeRun.snapshot
+        ? await window.api.pipeline.generateScriptsDry(activeRun.connectionId, activeRun.snapshot, activeRun.workDir).catch(() => [])
+        : []
+      setReportPreview(buildRunManifest(activeRun, activeRun.snapshot, activeRun.workspace ?? null, { scripts }))
+    } finally {
+      setReporting(false)
+    }
+  }
+
+  const restoreRunSnapshot = async () => {
+    if (!activeRun?.snapshot) return
+    if (dirty) {
+      const ok = await confirmDialog({
+        title: 'Restore run pipeline',
+        message: 'Replace the current canvas with the exact pipeline snapshot captured for this run?',
+        detail: 'Unsaved canvas changes will be discarded. The submitted run is kept in history.',
+        confirmLabel: 'Restore snapshot',
+        cancelLabel: 'Keep current',
+      })
+      if (!ok) return
+    }
+    loadSnapshot(activeRun.snapshot)
+    window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'success', message: 'Restored run pipeline snapshot' } }))
+  }
+
+  const copyWorkDir = async () => {
+    if (!activeRun?.workDir) return
+    await navigator.clipboard.writeText(activeRun.workDir)
+    window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'success', message: 'Copied run folder path' } }))
+  }
+
+  const retryFromNode = async (nodeId: string) => {
+    if (!activeRun || activeRun.pipelineId !== pipelineId) return
+    const snapshot = exportSnapshot()
+    const affected = downstreamNodeIds(snapshot, nodeId)
+    const reused = Object.values(activeRun.nodes)
+      .filter((node) => node.nodeId !== nodeId && !affected.includes(node.nodeId) && node.status === 'done' && (node.outputPaths?.length ?? 0) > 0)
+      .map((node) => labelForNode(activeRun.snapshot?.nodes as Array<{ id: string; type?: string; data: Record<string, unknown> }> | undefined ?? pipelineNodes, node.nodeId))
+    const ok = await confirmDialog({
+      title: 'Retry from here',
+      message: `Rerun ${affected.length} step${affected.length === 1 ? '' : 's'} from this point downstream?`,
+      detail: [
+        `Will rerun: ${affected.map((id) => labelForNode(snapshot.nodes as Array<{ id: string; type?: string; data: Record<string, unknown> }>, id)).join(', ')}`,
+        reused.length ? `Will reuse completed upstream outputs from: ${reused.join(', ')}` : 'No completed upstream outputs will be reused.',
+      ].join('\n'),
+      confirmLabel: 'Retry from here',
+      cancelLabel: 'Cancel',
+    })
+    if (!ok) return
+    await rerunNode(activeRun.runId, nodeId, snapshot)
+  }
 
   useEffect(() => {
     if (!activeRunId && sortedRuns[0]) setActiveRun(sortedRuns[0].runId)
@@ -118,6 +183,32 @@ export function JobsPanel() {
           Refresh
         </Button>
 
+        {activeRun?.workDir && (
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<Copy size={12} />}
+            onClick={() => void copyWorkDir()}
+            className="h-6 text-xs"
+            title="Copy run folder path"
+          >
+            Copy folder
+          </Button>
+        )}
+
+        {activeRun?.snapshot && (
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<RotateCcw size={12} />}
+            onClick={() => void restoreRunSnapshot()}
+            className="h-6 text-xs"
+            title="Restore the exact pipeline snapshot captured for this run"
+          >
+            Restore pipeline
+          </Button>
+        )}
+
         {activeRun?.workDir && activeRunHasSshSteps && (
           <Button
             variant="ghost"
@@ -146,14 +237,29 @@ export function JobsPanel() {
           </Button>
         )}
 
+        {activeRun && (
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<FileText size={12} />}
+            onClick={() => void openReport()}
+            disabled={reporting}
+            className="h-6 text-xs"
+            title="Generate a reproducibility report for this run"
+          >
+            {reporting ? 'Building...' : 'Report'}
+          </Button>
+        )}
+
         {activeRun && selectedNodeId && activeRun.nodes[selectedNodeId]?.status === 'failed' && activeRun.pipelineId === pipelineId && (
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => void rerunNode(activeRun.runId, selectedNodeId, exportSnapshot())}
+            onClick={() => void retryFromNode(selectedNodeId)}
+            title="Retry this failed step and every downstream step, reusing completed upstream outputs"
             className="h-6 text-xs"
           >
-            Re-run step
+            Retry from here
           </Button>
         )}
 
@@ -208,7 +314,7 @@ export function JobsPanel() {
               canRerun={activeRun.pipelineId === pipelineId}
               onRerun={(nodeId) => {
                 if (activeRun.pipelineId !== pipelineId) return
-                void rerunNode(activeRun.runId, nodeId, exportSnapshot())
+                void retryFromNode(nodeId)
               }}
             />
             {selectedNodeId && activeRun.nodes[selectedNodeId] && (
@@ -229,7 +335,7 @@ export function JobsPanel() {
               <FailureDiagnostic
                 nodeId={selectedNodeId}
                 diagnostic={diagnostics[selectedNodeId]}
-                onRerun={() => void rerunNode(activeRun.runId, selectedNodeId, exportSnapshot())}
+                onRerun={() => void retryFromNode(selectedNodeId)}
               />
             )}
             {activeRunIsDnxOnly ? (
@@ -251,8 +357,33 @@ export function JobsPanel() {
           Select a run to view its status.
         </div>
       )}
+      {reportPreview && (
+        <RunReportModal report={reportPreview} onClose={() => setReportPreview(null)} />
+      )}
     </div>
   )
+}
+
+function downstreamNodeIds(snapshot: RunState['snapshot'], nodeId: string): string[] {
+  if (!snapshot) return [nodeId]
+  const outgoing = new Map<string, string[]>()
+  for (const edge of snapshot.edges) {
+    const list = outgoing.get(edge.source) ?? []
+    list.push(edge.target)
+    outgoing.set(edge.source, list)
+  }
+  const seen = new Set<string>([nodeId])
+  const queue = [nodeId]
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    for (const next of outgoing.get(current) ?? []) {
+      if (seen.has(next)) continue
+      seen.add(next)
+      queue.push(next)
+    }
+  }
+  const runnable = new Set(snapshot.nodes.filter((node) => node.type === 'tool' || node.type === 'merge' || node.type === 'transform' || node.type === 'transfer').map((node) => node.id))
+  return [...seen].filter((id) => runnable.has(id))
 }
 
 function RunHistoryList({

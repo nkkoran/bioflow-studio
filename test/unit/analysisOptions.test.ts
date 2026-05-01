@@ -204,7 +204,7 @@ describe('analysisOptions', () => {
       (portId) => (portId === 'input' ? '/data/cohort.pgen' : null),
     )
 
-    expect(preview).toContain('--glm firth-fallback hide-covar')
+    expect(preview).toContain('--glm hide-covar')
     expect(preview).not.toContain('--glm <')
   })
 })

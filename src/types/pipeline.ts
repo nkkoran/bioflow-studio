@@ -14,6 +14,7 @@ import type {
   RoleMapping,
 } from './readiness'
 import type { FileOrigin } from '@/constants/connections'
+import type { RunReadinessReport } from '@/types/workspace'
 
 /** File-type categories used to validate connections between nodes. */
 export type FileType =
@@ -25,6 +26,33 @@ export type FileType =
   | 'tsv' | 'csv' | 'txt'    // generic tabular
   | 'json' | 'yaml'          // config
   | 'any'                    // anything
+
+export type GenomeBuild = '' | 'GRCh37' | 'GRCh38' | 'hg19' | 'hg38' | string
+
+export interface ArtifactRef {
+  origin: FileOrigin
+  path: string
+  projectId?: string
+  fileId?: string
+  size?: number
+  modified?: number
+  fileType?: FileType
+  genomeBuild?: GenomeBuild
+}
+
+export interface TransferPlan {
+  id: string
+  edgeId?: string
+  nodeId?: string
+  source: ArtifactRef
+  target: ArtifactRef
+  route: `${FileOrigin}->${FileOrigin}`
+  mode: 'implicit' | 'explicit'
+  status: 'planned' | 'running' | 'done' | 'failed' | 'skipped'
+  bytesTransferred?: number
+  totalBytes?: number
+  warnings?: string[]
+}
 
 /** A single parameter on a tool. */
 export interface ToolParam {
@@ -209,6 +237,8 @@ export interface ToolNodeData {
   roleMappings?: Record<string, RoleMapping>
   outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
   outputIntermediate?: Record<string, boolean>
+  /** Reference/genome build for outputs when the tool preserves or changes coordinates. */
+  genomeBuild?: GenomeBuild
   /** Optional module name to load instead of the registry default. */
   moduleOverride?: string
   slurmOverride?: {
@@ -236,6 +266,15 @@ export interface ToolNodeData {
   status?: 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
   /** Slurm job id when running */
   jobId?: string
+  /** Related jobs submitted for the same logical node, such as auto-merge follow-ups. */
+  childJobs?: Array<{
+    kind: 'primary' | 'auto-merge'
+    jobId: string
+    label?: string
+    scriptPath?: string
+    stdoutPath?: string
+    stderrPath?: string
+  }>
   /** Last error message if failed */
   error?: string
   [key: string]: unknown
@@ -252,6 +291,8 @@ export type SlurmOverride = NonNullable<ToolNodeData['slurmOverride']>
 export interface FileNodeSplit {
   axis: string                  // e.g., "chrom"
   items: Array<{ key: string; path: string }>
+  /** Exact folder that was scanned or dragged in to create this split. */
+  folderPath?: string
   glob?: string                 // optional — original pattern, display only
   pattern?: SplitPattern        // source pattern used to materialize items
 }
@@ -276,9 +317,13 @@ export interface NodeGroup {
 export interface FileNodeData {
   label: string
   path: string                  // remote path; used when split is absent
+  pathKind?: 'file' | 'directory'
   source?: 'local' | 'remote'
   origin?: FileOrigin
+  artifactRef?: ArtifactRef
   fileType: FileType
+  /** Reference/genome build represented by this file, when coordinates are present. */
+  genomeBuild?: GenomeBuild
   isInput: boolean              // true = source, false = sink
   outputFilename?: string
   outputDir?: string
@@ -309,6 +354,8 @@ export interface MergeNodeData {
   inputHandles?: Array<{ id: string; label: string }>
   columnPreview?: MergeColumnPreview
   outputIntermediate?: Record<string, boolean>
+  /** Optional module name to load instead of the strategy default. */
+  moduleOverride?: string
   /** See ToolNodeData.outputDirOverride. */
   outputDirOverride?: string
   slurmOverride?: {
@@ -336,7 +383,9 @@ export interface TransferNodeData {
   dnxProjectId?: string
   dnxFolder?: string
   sshFolder?: string
+  localFolder?: string
   outputName?: string
+  transferPlanId?: string
   status?: ToolNodeData['status']
   jobId?: string
   error?: string
@@ -438,6 +487,15 @@ export interface NodeRunState {
   toolId?: string
   status: ToolNodeData['status']
   jobId?: string                // Slurm job id (array jobs use the parent id)
+  /** Related jobs submitted for the same logical node, such as auto-merge follow-ups. */
+  childJobs?: Array<{
+    kind: 'primary' | 'auto-merge'
+    jobId: string
+    label?: string
+    scriptPath?: string
+    stdoutPath?: string
+    stderrPath?: string
+  }>
   scriptPath?: string           // remote path to the submitted sbatch script
   stdoutPath?: string           // pattern; for arrays contains %A_%a
   stderrPath?: string
@@ -454,6 +512,13 @@ export interface NodeRunState {
   isArray?: boolean
   /** For array jobs: number of tasks. */
   arraySize?: number
+  transferProgress?: {
+    route?: TransferPlan['route']
+    status: TransferPlan['status']
+    bytesTransferred?: number
+    totalBytes?: number
+    warnings?: string[]
+  }
 }
 
 export interface RunState {
@@ -493,6 +558,8 @@ export interface RunState {
   status: RunStatus
   /** Serialized as a plain record so it survives IPC. */
   nodes: Record<string, NodeRunState>
+  transferPlans?: TransferPlan[]
+  runReadiness?: RunReadinessReport | null
 }
 
 export interface DryRunScript {

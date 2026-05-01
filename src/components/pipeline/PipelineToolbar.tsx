@@ -6,10 +6,11 @@
  *
  * On Run: validates the pipeline. If there are errors a blocking modal is
  * shown (fix required). If there are only warnings the modal offers "Run
- * anyway". If everything is clean the run starts immediately.
+ * anyway". If everything is clean, or only informational notes are present,
+ * the run starts immediately.
  */
-import { useState, useCallback, useEffect, useRef } from 'react'
-import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate, CheckSquare, CheckCircle2, Info, FileText } from 'lucide-react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate, CheckSquare, CheckCircle2, Info, Loader2, ListChecks } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { usePipelineStore } from '@/stores/pipelineStore'
@@ -18,10 +19,17 @@ import { useRunStore } from '@/stores/runStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useUIStore } from '@/stores/uiStore'
 import { classNames } from '@/lib/utils'
 import { validatePipeline, type ValidationIssue, type ValidationResult } from '@/lib/pipelineValidator'
 import { mergeReadinessIntoValidation } from '@/lib/workflowReadiness'
-import type { PipelineSnapshot, ToolNodeData } from '@/types/pipeline'
+import { buildRunReadinessReport } from '@/lib/runReadiness'
+import { getTool } from '@/lib/toolRegistry'
+import {
+  nodeDataWithAnalysisOptionEnabled,
+  snapshotWithAnalysisOptionEnabled,
+} from '@/lib/plinkQuickFix'
+import type { MergeNodeData, PipelineSnapshot, ToolNodeData, TransferPlan } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import { Dialog } from '@/components/ui/Dialog'
@@ -29,12 +37,11 @@ import { savePipelineSnapshot, savePipelineSnapshotAs } from '@/lib/pipelinePers
 import { useDialogStore } from '@/stores/dialogStore'
 import { useClusterDoctorStore } from '@/stores/clusterDoctorStore'
 import { ClusterDoctorDialog } from '@/components/connection/ClusterDoctorDialog'
-import type { ClusterDoctorReport } from '@/types/workspace'
+import type { ClusterDoctorReport, RunReadinessReport } from '@/types/workspace'
+import type { ClusterModuleSuggestion } from '@/types/ssh'
 import { useWorkflowReadinessStore } from '@/stores/readinessStore'
-import { buildRunManifest } from '@/lib/runManifest'
-import type { RunManifest } from '@/types/workspace'
 import type { DryRunScript } from '@/types/pipeline'
-import { RunReportModal } from './RunReportModal'
+import { buildWorkflowGuide, type WorkflowGuideStep } from '@/lib/workflowGuide'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
@@ -42,19 +49,26 @@ interface ConfirmDialogProps {
   result: ValidationResult
   /** Called when the user confirms they want to run despite warnings. */
   onRunAnyway: () => void
+  onQuickFix?: (issue: ValidationIssue) => void
+  onCreateRemoteFolder?: (issue: ValidationIssue) => void
+  onApplyModule?: (issue: ValidationIssue, moduleName: string) => void
+  onSelectNode?: (issue: ValidationIssue) => void
   onClose: () => void
 }
 
-function RunConfirmDialog({ result, onRunAnyway, onClose }: ConfirmDialogProps) {
+function RunConfirmDialog({ result, onRunAnyway, onQuickFix, onCreateRemoteFolder, onApplyModule, onSelectNode, onClose }: ConfirmDialogProps) {
   const hasErrors = result.errorCount > 0
   const hasWarnings = result.warningCount > 0
+  const isClean = !hasErrors && !hasWarnings
 
-  const headerBg = hasErrors ? 'bg-error/10 border-error/30' : 'bg-warning/10 border-warning/30'
-  const headerText = hasErrors ? 'text-error' : 'text-warning'
-  const HeaderIcon = hasErrors ? XCircle : AlertTriangle
+  const headerBg = hasErrors ? 'bg-error/10 border-error/30' : hasWarnings ? 'bg-warning/10 border-warning/30' : 'bg-success/10 border-success/30'
+  const headerText = hasErrors ? 'text-error' : hasWarnings ? 'text-warning' : 'text-success'
+  const HeaderIcon = hasErrors ? XCircle : hasWarnings ? AlertTriangle : CheckCircle2
   const title = hasErrors
     ? `${result.errorCount} error${result.errorCount === 1 ? '' : 's'} must be fixed before running`
-    : `${result.warningCount} warning${result.warningCount === 1 ? '' : 's'} — review before running`
+    : hasWarnings
+      ? `${result.warningCount} warning${result.warningCount === 1 ? '' : 's'} — review before running`
+      : 'Ready to run'
 
   // Group by severity for display.
   const errors = result.issues.filter((i) => i.severity === 'error')
@@ -87,10 +101,13 @@ function RunConfirmDialog({ result, onRunAnyway, onClose }: ConfirmDialogProps) 
                   {label} ({items.length})
                 </div>
                 {items.map((issue, i) => (
-                  <ModalIssueRow key={i} issue={issue} color={color} />
+                  <ModalIssueRow key={i} issue={issue} color={color} onQuickFix={onQuickFix} onCreateRemoteFolder={onCreateRemoteFolder} onApplyModule={onApplyModule} onSelectNode={onSelectNode} />
                 ))}
               </div>
             ),
+          )}
+          {result.issues.length === 0 && (
+            <div className="px-4 py-6 text-sm text-text-secondary">All blocking checks are clear.</div>
           )}
         </div>
 
@@ -105,13 +122,13 @@ function RunConfirmDialog({ result, onRunAnyway, onClose }: ConfirmDialogProps) 
             </>
           ) : (
             <>
-              <span className="text-xs text-text-muted mr-auto">Warnings won't stop the run.</span>
+              <span className="text-xs text-text-muted mr-auto">{isClean ? 'Ready to submit.' : "Warnings won't stop the run."}</span>
               <Button variant="secondary" size="sm" onClick={onClose}>
                 Go back
               </Button>
               <Button variant="primary" size="sm" onClick={onRunAnyway}>
                 <Play size={11} className="mr-1" />
-                Run anyway
+                {isClean ? 'Run' : 'Run anyway'}
               </Button>
             </>
           )}
@@ -121,7 +138,21 @@ function RunConfirmDialog({ result, onRunAnyway, onClose }: ConfirmDialogProps) 
   )
 }
 
-function ModalIssueRow({ issue, color }: { issue: ValidationIssue; color: string }) {
+function ModalIssueRow({
+  issue,
+  color,
+  onQuickFix,
+  onCreateRemoteFolder,
+  onApplyModule,
+  onSelectNode,
+}: {
+  issue: ValidationIssue
+  color: string
+  onQuickFix?: (issue: ValidationIssue) => void
+  onCreateRemoteFolder?: (issue: ValidationIssue) => void
+  onApplyModule?: (issue: ValidationIssue, moduleName: string) => void
+  onSelectNode?: (issue: ValidationIssue) => void
+}) {
   return (
     <div className="px-4 py-2 border-b border-border-light/50 last:border-0 flex items-start gap-2">
       <span className={`text-[10px] font-mono shrink-0 mt-px ${color}`}>{issue.code}</span>
@@ -131,22 +162,361 @@ function ModalIssueRow({ issue, color }: { issue: ValidationIssue; color: string
           <div className="text-[10px] text-text-muted mt-0.5 leading-snug">{issue.suggestion}</div>
         )}
       </div>
+      {onSelectNode && issue.nodeId && (
+        <button
+          type="button"
+          onClick={() => onSelectNode(issue)}
+          className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
+        >
+          Select
+        </button>
+      )}
+      {onQuickFix && canApplyValidationQuickFix(issue) && (
+        <button
+          type="button"
+          onClick={() => onQuickFix(issue)}
+          className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+        >
+          {validationQuickFixLabel(issue)}
+        </button>
+      )}
+      {onCreateRemoteFolder && canCreateRemoteFolderQuickFix(issue) && (
+        <button
+          type="button"
+          onClick={() => onCreateRemoteFolder(issue)}
+          className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+        >
+          Create folder
+        </button>
+      )}
+      {onApplyModule && moduleCandidatesFromIssue(issue).length > 0 && (
+        <ModuleSuggestionPicker issue={issue} onApply={onApplyModule} />
+      )}
     </div>
   )
 }
 
-function groupIssues(issues: ValidationIssue[]): Record<'Pipeline structure' | 'Files and columns' | 'Cluster readiness', ValidationIssue[]> {
-  const groups = {
-    'Pipeline structure': [] as ValidationIssue[],
-    'Files and columns': [] as ValidationIssue[],
-    'Cluster readiness': [] as ValidationIssue[],
+function canInsertTransferQuickFix(issue: ValidationIssue): boolean {
+  return Boolean(issue.edgeId) && (
+    issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER'
+    || issue.code === 'DNX_UPLOAD_ADVISORY'
+    || issue.code === 'IMPLICIT_TRANSFER_PLANNED'
+  )
+}
+
+function canInsertLiftoverQuickFix(issue: ValidationIssue): boolean {
+  return Boolean(issue.edgeId) && issue.code === 'GENOME_BUILD_MISMATCH'
+}
+
+function canApplyValidationQuickFix(issue: ValidationIssue): boolean {
+  return canInsertTransferQuickFix(issue)
+    || canInsertLiftoverQuickFix(issue)
+    || Boolean(resourceQuickFix(issue))
+    || Boolean(analysisOptionQuickFix(issue))
+}
+
+function validationQuickFixLabel(issue: ValidationIssue): string {
+  const resourceFix = resourceQuickFix(issue)
+  if (resourceFix) return resourceFix.label
+  const optionFix = analysisOptionQuickFix(issue)
+  if (optionFix) return optionFix.label
+  if (canInsertLiftoverQuickFix(issue)) return 'Insert liftover'
+  return 'Insert transfer'
+}
+
+function resourceQuickFix(issue: ValidationIssue): { cpus: number; memoryGB: number; timeHours: number; label: string } | null {
+  const cpus = Number(issue.details?.quickFixResourceCpus)
+  const memoryGB = Number(issue.details?.quickFixResourceMemoryGB)
+  const timeHours = Number(issue.details?.quickFixResourceTimeHours)
+  if (!Number.isFinite(cpus) || !Number.isFinite(memoryGB) || !Number.isFinite(timeHours)) return null
+  if (cpus <= 0 || memoryGB <= 0 || timeHours <= 0) return null
+  return {
+    cpus: Math.ceil(cpus),
+    memoryGB: Math.ceil(memoryGB),
+    timeHours,
+    label: typeof issue.details?.quickFixLabel === 'string' ? issue.details.quickFixLabel : 'Apply resources',
   }
+}
+
+function analysisOptionQuickFix(issue: ValidationIssue): { optionId: string; value: string | number | boolean; label: string } | null {
+  const rawFlag = issue.details?.quickFixFlagId
+  if (typeof rawFlag === 'string' && rawFlag.trim()) {
+    const value = issue.details?.quickFixValue
+    return {
+      optionId: rawFlag.trim(),
+      value: typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : true,
+      label: typeof issue.details?.quickFixLabel === 'string' ? issue.details.quickFixLabel : `Enable ${rawFlag.trim()}`,
+    }
+  }
+  if (issue.code === 'PLINK_BINARY_PHENO_01_NEEDS_ONE' && issue.nodeId) {
+    return { optionId: 'one', value: true, label: 'Enable --1' }
+  }
+  if (issue.code === 'INACTIVE_INPUT_CONNECTED' && issue.nodeId && issue.portId) {
+    return { optionId: issue.portId, value: true, label: `Enable ${issue.portId}` }
+  }
+  return null
+}
+
+function canCreateRemoteFolderQuickFix(issue: ValidationIssue): boolean {
+  return issue.code === 'CLUSTER_TOOLS_ROOT' || issue.code === 'CLUSTER_ANALYSIS_ROOT_WRITE'
+}
+
+function remoteFolderFromClusterIssue(issue: ValidationIssue): string | null {
+  const detailPath = issue.details?.path
+  if (typeof detailPath === 'string' && detailPath.trim()) return detailPath.trim()
+
+  const text = `${issue.message}\n${issue.suggestion ?? ''}`
+  const notFound = text.match(/not found:\s*([^\n]+)/i)
+  if (notFound?.[1]) return notFound[1].trim().replace(/\.$/, '')
+  const cannotWrite = text.match(/cannot write to\s+([^\n]+)/i)
+  if (cannotWrite?.[1]) return cannotWrite[1].trim().replace(/\.$/, '')
+  return null
+}
+
+function shellQuoteClient(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function moduleCandidatesFromIssue(issue: ValidationIssue): string[] {
+  if (issue.code !== 'MODULE_UNAVAILABLE') return []
+  const raw = issue.details?.moduleCandidates
+  return typeof raw === 'string'
+    ? raw.split('|').map((value) => value.trim()).filter(Boolean)
+    : []
+}
+
+function ModuleSuggestionPicker({
+  issue,
+  onApply,
+}: {
+  issue: ValidationIssue
+  onApply: (issue: ValidationIssue, moduleName: string) => void
+}) {
+  const candidates = moduleCandidatesFromIssue(issue)
+  const [selected, setSelected] = useState(candidates[0] ?? '')
+  if (candidates.length === 0) return null
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      <select
+        value={selected}
+        onChange={(event) => setSelected(event.target.value)}
+        className="h-6 max-w-[150px] rounded border border-border bg-bg-tertiary px-1 text-[10px] text-text-primary"
+        title="Available modules found on this cluster"
+      >
+        {candidates.map((candidate) => (
+          <option key={candidate} value={candidate}>{candidate}</option>
+        ))}
+      </select>
+      <button
+        type="button"
+        onClick={() => selected && onApply(issue, selected)}
+        className="rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+      >
+        Use
+      </button>
+    </div>
+  )
+}
+
+function workflowStatusDot(status: WorkflowGuideStep['status']): string {
+  if (status === 'done') return 'bg-success'
+  if (status === 'blocked') return 'bg-error'
+  if (status === 'active') return 'bg-accent'
+  return 'bg-text-muted/40'
+}
+
+const READINESS_GROUPS = ['Structure', 'Files', 'Columns', 'IDs', 'Backends', 'Cluster', 'Resources', 'Results'] as const
+type ReadinessCategory = typeof READINESS_GROUPS[number]
+
+interface RunCheckResult {
+  validation: ValidationResult
+  readiness: RunReadinessReport
+}
+
+function groupIssues(issues: ValidationIssue[]): Record<ReadinessCategory, ValidationIssue[]> {
+  const groups = {} as Record<ReadinessCategory, ValidationIssue[]>
+  for (const group of READINESS_GROUPS) groups[group] = []
   for (const issue of issues) {
-    if (issue.code.startsWith('CLUSTER_')) groups['Cluster readiness'].push(issue)
-    else if (/(FILE|INPUT|OUTPUT|COLUMN|READINESS|ROLE|SAMPLE|EXPORT|OPTION_FILE)/i.test(issue.code)) groups['Files and columns'].push(issue)
-    else groups['Pipeline structure'].push(issue)
+    groups[issueReadinessCategory(issue)].push(issue)
   }
   return groups
+}
+
+function issueReadinessCategory(issue: ValidationIssue): ReadinessCategory {
+  const category = issue.details?.category
+  if (typeof category === 'string' && READINESS_GROUPS.includes(category as ReadinessCategory)) return category as ReadinessCategory
+  if (issue.code.includes('DNX') || issue.code.includes('BACKEND') || issue.code.includes('TRANSFER')) return 'Backends'
+  if (issue.code.startsWith('CLUSTER_')) return 'Cluster'
+  if (issue.code.includes('MODULE')) return 'Cluster'
+  if (issue.code.includes('COLUMN') || issue.code.includes('SCHEMA')) return 'Columns'
+  if (issue.code.includes('ID') || issue.code.includes('SAMPLE')) return 'IDs'
+  if (issue.code.includes('FILE') || issue.code.includes('PATH') || issue.code.includes('READINESS') || issue.code.includes('OPTION_FILE')) return 'Files'
+  if (issue.code.includes('SLURM') || issue.code.includes('RESOURCE')) return 'Resources'
+  if (issue.code.includes('OUTPUT') || issue.code.includes('EXPORT') || issue.code.includes('ORPHAN')) return 'Results'
+  return 'Structure'
+}
+
+function validationFromRunReadiness(report: RunReadinessReport): ValidationResult {
+  const issues: ValidationIssue[] = report.issues.map((issue) => ({
+    code: issue.code,
+    severity: issue.severity,
+    message: issue.message,
+    suggestion: issue.suggestion,
+    nodeId: issue.nodeId,
+    edgeId: issue.edgeId,
+    details: {
+      ...(issue.details ?? {}),
+      category: issue.category,
+      action: issue.action ?? null,
+    },
+  }))
+  return {
+    ok: report.ok,
+    issues,
+    errorCount: report.errorCount,
+    warningCount: report.warningCount,
+    infoCount: report.infoCount,
+  }
+}
+
+function appendValidationIssues(result: ValidationResult, issues: ValidationIssue[]): ValidationResult {
+  const nextIssues = [...result.issues, ...issues]
+  return validationResultFromIssues(nextIssues)
+}
+
+function validationResultFromIssues(issues: ValidationIssue[]): ValidationResult {
+  const errorCount = issues.filter((issue) => issue.severity === 'error').length
+  const warningCount = issues.filter((issue) => issue.severity === 'warning').length
+  const infoCount = issues.filter((issue) => issue.severity === 'info').length
+  return {
+    ok: errorCount === 0,
+    issues,
+    errorCount,
+    warningCount,
+    infoCount,
+  }
+}
+
+function removeValidationIssues(result: ValidationResult, shouldRemove: (issue: ValidationIssue) => boolean): ValidationResult {
+  return validationResultFromIssues(result.issues.filter((issue) => !shouldRemove(issue)))
+}
+
+function removeReadinessIssues(report: RunReadinessReport | null | undefined, shouldRemove: (issue: RunReadinessReport['issues'][number]) => boolean): RunReadinessReport | null | undefined {
+  if (!report) return report
+  const issues = report.issues.filter((issue) => !shouldRemove(issue))
+  return {
+    ...report,
+    issues,
+    ok: issues.every((issue) => issue.severity !== 'error'),
+    errorCount: issues.filter((issue) => issue.severity === 'error').length,
+    warningCount: issues.filter((issue) => issue.severity === 'warning').length,
+    infoCount: issues.filter((issue) => issue.severity === 'info').length,
+  }
+}
+
+async function moduleIssuesForSnapshot(connectionId: string, snapshot: PipelineSnapshot): Promise<ValidationIssue[]> {
+  const moduleToNodes = requiredModulesForSnapshot(snapshot)
+  const modules = [...moduleToNodes.keys()]
+  if (modules.length === 0) return []
+  try {
+    const result = await window.api.cluster.checkModules(connectionId, modules)
+    return result.checks.flatMap((check): ValidationIssue[] => {
+      if (check.ok) return []
+      const nodes = moduleToNodes.get(check.requested) ?? []
+      const candidates = moduleCandidateNames(check.suggestions)
+      const primary = nodes[0]
+      return [{
+        severity: 'error',
+        code: 'MODULE_UNAVAILABLE',
+        nodeId: primary?.nodeId,
+        message: `Cluster module "${check.requested}" is not loadable${primary ? ` for ${primary.label}` : ''}.`,
+        suggestion: candidates.length > 0
+          ? `Choose an available replacement module, or open the node inspector and set a module override. ${check.message ?? ''}`.trim()
+          : `Open the node inspector and set a module override that exists on this cluster. ${check.message ?? ''}`.trim(),
+        details: {
+          category: 'Cluster',
+          requestedModule: check.requested,
+          moduleCandidate: candidates[0] ?? '',
+          moduleCandidates: candidates.join('|'),
+        },
+      }]
+    })
+  } catch (err: any) {
+    return [{
+      severity: 'warning',
+      code: 'MODULE_CHECK_FAILED',
+      message: `Could not check cluster modules: ${err?.message ?? String(err)}`,
+      suggestion: 'The run can continue, but module names will only be validated by Slurm when the job starts.',
+      details: { category: 'Cluster' },
+    }]
+  }
+}
+
+function requiredModulesForSnapshot(snapshot: PipelineSnapshot): Map<string, Array<{ nodeId: string; label: string }>> {
+  const out = new Map<string, Array<{ nodeId: string; label: string }>>()
+  const add = (moduleName: string | undefined, nodeId: string, label: string) => {
+    const value = moduleName?.trim()
+    if (!value) return
+    out.set(value, [...(out.get(value) ?? []), { nodeId, label }])
+  }
+  for (const node of snapshot.nodes) {
+    if (node.type === 'tool') {
+      const data = node.data as ToolNodeData
+      const tool = getTool(data.toolId)
+      add(data.moduleOverride || tool?.module, node.id, data.label || tool?.name || data.toolId)
+      continue
+    }
+    if (node.type === 'merge') {
+      const data = node.data as MergeNodeData
+      add(data.moduleOverride || defaultMergeModule(data), node.id, data.label || 'Merge')
+    }
+  }
+  return out
+}
+
+function defaultMergeModule(data: MergeNodeData): string | undefined {
+  if (data.strategy === 'bcftools-concat') return 'bcftools/1.19'
+  if (data.strategy === 'plink-pmerge-list') return 'plink/2.00a3'
+  return undefined
+}
+
+function moduleCandidateNames(suggestions: ClusterModuleSuggestion[]): string[] {
+  const names = suggestions.flatMap((entry) => (
+    entry.versions.length > 0 ? entry.versions.map((version) => `${entry.name}/${version}`) : [entry.name]
+  ))
+  return [...new Set(names)].slice(0, 8)
+}
+
+function isMatchingModuleIssue(candidate: ValidationIssue | RunReadinessReport['issues'][number], issue: ValidationIssue): boolean {
+  if (candidate.code !== 'MODULE_UNAVAILABLE') return false
+  if (candidate.nodeId !== issue.nodeId) return false
+  const requested = issue.details?.requestedModule
+  if (typeof requested !== 'string' || requested.length === 0) return true
+  return candidate.details?.requestedModule === requested
+}
+
+function snapshotWithModuleOverride(snapshot: PipelineSnapshot, nodeId: string, moduleName: string): PipelineSnapshot {
+  return {
+    ...snapshot,
+    nodes: snapshot.nodes.map((node) => (
+      node.id === nodeId && (node.type === 'tool' || node.type === 'merge')
+        ? { ...node, data: { ...node.data, moduleOverride: moduleName } }
+        : node
+    )),
+    updatedAt: Date.now(),
+  }
+}
+
+function snapshotWithSlurmOverride(snapshot: PipelineSnapshot, nodeId: string, patch: NonNullable<ToolNodeData['slurmOverride']>): PipelineSnapshot {
+  return {
+    ...snapshot,
+    nodes: snapshot.nodes.map((node) => (
+      node.id === nodeId && node.type === 'tool'
+        ? { ...node, data: { ...node.data, slurmOverride: { ...(node.data as ToolNodeData).slurmOverride, ...patch } } }
+        : node
+    )),
+    updatedAt: Date.now(),
+  }
 }
 
 function snapshotNeedsSsh(snapshot: PipelineSnapshot): boolean {
@@ -168,10 +538,6 @@ function snapshotNeedsSsh(snapshot: PipelineSnapshot): boolean {
 export function PipelineToolbar() {
   const pipelineName = usePipelineStore((s) => s.pipelineName)
   const setPipelineName = usePipelineStore((s) => s.setPipelineName)
-  const arrayChainMode = usePipelineStore((s) => s.arrayChainMode)
-  const fileLifecyclePolicy = usePipelineStore((s) => s.fileLifecyclePolicy)
-  const setArrayChainMode = usePipelineStore((s) => s.setArrayChainMode)
-  const setFileLifecyclePolicy = usePipelineStore((s) => s.setFileLifecyclePolicy)
   const dirty = usePipelineStore((s) => s.dirty)
   const past = usePipelineStore((s) => s.past)
   const future = usePipelineStore((s) => s.future)
@@ -182,8 +548,14 @@ export function PipelineToolbar() {
   const loadSnapshot = usePipelineStore((s) => s.loadSnapshot)
   const markSaved = usePipelineStore((s) => s.markSaved)
   const insertTransferNodeForEdge = usePipelineStore((s) => s.insertTransferNodeForEdge)
+  const insertLiftoverNodeForEdge = usePipelineStore((s) => s.insertLiftoverNodeForEdge)
+  const setSelectedNode = usePipelineStore((s) => s.setSelectedNode)
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const nodes = usePipelineStore((s) => s.nodes)
+  const edges = usePipelineStore((s) => s.edges)
   const schemas = useDataPreviewStore((s) => s.schemas)
+  const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
+  const openConnectionDialog = useUIStore((s) => s.openConnectionDialog)
 
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const activeRunId = useRunStore((s) => s.activeRunId)
@@ -200,7 +572,6 @@ export function PipelineToolbar() {
   const confirmAction = useDialogStore((s) => s.confirm)
   const runDoctorReport = useClusterDoctorStore((s) => s.runReport)
   const evaluateReadiness = useWorkflowReadinessStore((s) => s.evaluateSnapshot)
-  const lastReadinessReport = useWorkflowReadinessStore((s) => s.lastReport)
 
   const [editingName, setEditingName] = useState(false)
   const [savedMessage, setSavedMessage] = useState<{ text: string; isError: boolean } | null>(null)
@@ -208,15 +579,19 @@ export function PipelineToolbar() {
   const [runStatus, setRunStatus] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [scriptPreview, setScriptPreview] = useState<DryRunScript[] | null>(null)
-  const [reportPreview, setReportPreview] = useState<RunManifest | null>(null)
-  const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot } | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot; readiness?: RunReadinessReport | null } | null>(null)
   const [doctorDialog, setDoctorDialog] = useState<ClusterDoctorReport | null>(null)
   const [checkReport, setCheckReport] = useState<ValidationResult | null>(null)
+  const [checkReadinessReport, setCheckReadinessReport] = useState<RunReadinessReport | null>(null)
   const [checkOpen, setCheckOpen] = useState(false)
+  const [checkRunning, setCheckRunning] = useState(false)
+  const [checkStatus, setCheckStatus] = useState<string | null>(null)
+  const [workflowOpen, setWorkflowOpen] = useState(false)
   const [openPicker, setOpenPicker] = useState<Array<{ id: string; name: string }> | null>(null)
   const [templatePicker, setTemplatePicker] = useState(false)
   const activeRunIsCancellable = activeRun?.status === 'queued' || activeRun?.status === 'running'
   const checkRef = useRef<HTMLDivElement | null>(null)
+  const workflowRef = useRef<HTMLDivElement | null>(null)
 
   const flashMessage = useCallback((msg: string, isError = false) => {
     setSavedMessage({ text: msg, isError })
@@ -225,17 +600,61 @@ export function PipelineToolbar() {
 
   useEffect(() => {
     if (!checkOpen) return
-    const onDown = (event: MouseEvent) => {
+    const onDown = (event: PointerEvent) => {
       if (checkRef.current && !checkRef.current.contains(event.target as Node)) setCheckOpen(false)
     }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
   }, [checkOpen])
+
+  useEffect(() => {
+    if (!workflowOpen) return
+    const onDown = (event: PointerEvent) => {
+      if (workflowRef.current && !workflowRef.current.contains(event.target as Node)) setWorkflowOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [workflowOpen])
+
+  useEffect(() => {
+    if (!settings.workflowGuideEnabled) setWorkflowOpen(false)
+  }, [settings.workflowGuideEnabled])
+
+  const guideSnapshot = useMemo(() => exportSnapshot(), [edges, exportSnapshot, nodes])
+  const guideValidation = useMemo(() => validatePipeline(guideSnapshot, {
+    schemas,
+    annotationDefaults: {
+      annovarDbPath: settings.annovarDbPath,
+      annovarScriptsPath: settings.annovarScriptsPath,
+      vepCachePath: settings.vepCachePath,
+      vepPath: settings.vepPath,
+    },
+    dnx: {
+      defaultProjectId: dnxDefaultProjectId,
+      authenticated: dnxAuthenticated,
+    },
+  }), [dnxAuthenticated, dnxDefaultProjectId, guideSnapshot, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath])
+  const activeRunOutputCount = useMemo(() => (
+    activeRun ? Object.values(activeRun.nodes).reduce((sum, node) => sum + (node.outputPaths?.length ?? 0), 0) : 0
+  ), [activeRun])
+  const workflowGuide = useMemo(() => buildWorkflowGuide(guideSnapshot, {
+    validation: guideValidation,
+    activeConnectionId,
+    localConnectionId: LOCAL_CONNECTION_ID,
+    activeRunStatus: activeRun?.status ?? null,
+    activeRunOutputCount,
+  }), [activeConnectionId, activeRun?.status, activeRunOutputCount, guideSnapshot, guideValidation])
 
   const runChecks = useCallback(async (
     snapshot: PipelineSnapshot,
-    opts: { includeDoctor?: boolean; onProgress?: (msg: string) => void } = {},
-  ) => {
+    opts: {
+      includeDoctor?: boolean
+      includeFileReadiness?: boolean
+      includeModuleChecks?: boolean
+      includeTransfers?: boolean
+      onProgress?: (msg: string) => void
+    } = {},
+  ): Promise<RunCheckResult> => {
     opts.onProgress?.('Validating pipeline...')
     let result = validatePipeline(snapshot, {
       schemas,
@@ -252,12 +671,15 @@ export function PipelineToolbar() {
     })
 
     if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
-      if (!skipPreRunFileCheck) {
+      if (opts.includeFileReadiness) {
         opts.onProgress?.('Checking input files...')
         const readiness = await evaluateReadiness(activeConnectionId, snapshot)
         result = mergeReadinessIntoValidation(result, readiness)
-      } else if (lastReadinessReport) {
-        result = mergeReadinessIntoValidation(result, lastReadinessReport)
+      }
+      if (opts.includeModuleChecks) {
+        opts.onProgress?.('Checking cluster modules...')
+        const moduleIssues = await moduleIssuesForSnapshot(activeConnectionId, snapshot)
+        if (moduleIssues.length > 0) result = appendValidationIssues(result, moduleIssues)
       }
       if (opts.includeDoctor && !skipPreRunDoctorCheck) {
         opts.onProgress?.('Checking cluster...')
@@ -269,19 +691,26 @@ export function PipelineToolbar() {
             message: check.detail,
             suggestion: check.suggestion,
           }))
-          result = {
-            ok: false,
-            issues: [...result.issues, ...doctorIssues],
-            errorCount: result.errorCount + doctorIssues.filter((issue) => issue.severity === 'error').length,
-            warningCount: result.warningCount + doctorIssues.filter((issue) => issue.severity === 'warning').length,
-            infoCount: result.infoCount + doctorIssues.filter((issue) => issue.severity === 'info').length,
-          }
+          result = appendValidationIssues(result, doctorIssues)
         }
       }
     }
 
-    return result
-  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, lastReadinessReport, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, skipPreRunDoctorCheck, skipPreRunFileCheck])
+    let transferPlans: TransferPlan[] = []
+    if (opts.includeTransfers) {
+      opts.onProgress?.('Planning transfers...')
+      transferPlans = await window.api.pipeline.planTransfersDry(snapshot)
+    }
+    const readiness = buildRunReadinessReport({
+      validation: result,
+      transferPlans,
+    })
+
+    return {
+      validation: validationFromRunReadiness(readiness),
+      readiness,
+    }
+  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, skipPreRunDoctorCheck])
 
   const handleNew = useCallback(async () => {
     if (dirty) {
@@ -423,7 +852,7 @@ export function PipelineToolbar() {
   }, [exportSnapshot, flashMessage])
 
   /** Actually submit the run (called directly if no issues, or via modal "Run anyway"). */
-  const submitRun = useCallback(async (snapshot: PipelineSnapshot) => {
+  const submitRun = useCallback(async (snapshot: PipelineSnapshot, readiness?: RunReadinessReport | null) => {
     if (!activeConnectionId) { flashMessage('No active connection', true); return }
     if (snapshotNeedsSsh(snapshot) && activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run requires an SSH connection', true); return }
     const loginNodes = snapshot.nodes.filter((node) => node.type === 'tool' && (node.data as any).executionMode === 'login')
@@ -440,7 +869,7 @@ export function PipelineToolbar() {
     setRunning(true)
     try {
       const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
-      await startRun(activeConnectionId, snapshot)
+      await startRun(activeConnectionId, snapshot, readiness ?? null)
       flashMessage(`Submitting ${runnable.length} node${runnable.length === 1 ? '' : 's'}...`)
     } catch (err: any) {
       console.error('Run failed:', err)
@@ -463,6 +892,9 @@ export function PipelineToolbar() {
       try {
         result = await runChecks(snapshot, {
           includeDoctor: true,
+          includeFileReadiness: !skipPreRunFileCheck,
+          includeModuleChecks: true,
+          includeTransfers: true,
           onProgress: setRunStatus,
         })
       } catch (err: any) {
@@ -477,19 +909,19 @@ export function PipelineToolbar() {
       // Checks done — clear running before any modal or handoff to submitRun.
       setRunning(false)
 
-      if (result.errorCount > 0 || result.issues.length > 0) {
-        setConfirmDialog({ result, snapshot })
+      if (result.validation.errorCount > 0 || result.validation.warningCount > 0) {
+        setConfirmDialog({ result: result.validation, snapshot, readiness: result.readiness })
         return
       }
 
       // No issues → run immediately.
-      await submitRun(snapshot)
+      await submitRun(snapshot, result.readiness)
     } catch (err: any) {
       console.error('[PipelineToolbar] handleRun threw:', err)
       flashMessage(err?.message ?? String(err), true)
       setRunning(false)
     }
-  }, [activeConnectionId, exportSnapshot, flashMessage, runChecks, submitRun])
+  }, [activeConnectionId, exportSnapshot, flashMessage, runChecks, skipPreRunFileCheck, submitRun])
 
   const handlePreviewScripts = useCallback(async () => {
     const snapshot = exportSnapshot()
@@ -518,7 +950,7 @@ export function PipelineToolbar() {
       return
     }
     if (result.errorCount > 0) {
-      setConfirmDialog({ result, snapshot })
+      setConfirmDialog({ result, snapshot, readiness: null })
       return
     }
 
@@ -534,98 +966,182 @@ export function PipelineToolbar() {
     }
   }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, exportSnapshot, flashMessage, schemas, settings.annovarDbPath, settings.vepCachePath])
 
-  const handlePreviewReport = useCallback(async () => {
+  const handleCheck = useCallback(async () => {
     const snapshot = exportSnapshot()
-    const runnable = snapshot.nodes.filter((n) => n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer')
-    if (runnable.length === 0) { flashMessage('No tools to report'); return }
-    if (!activeConnectionId) { flashMessage('No active connection', true); return }
-    if (snapshotNeedsSsh(snapshot) && activeConnectionId === LOCAL_CONNECTION_ID) { flashMessage('Run report requires an SSH connection', true); return }
-
-    let result
-    try {
-      result = validatePipeline(snapshot, {
-        schemas,
-        annotationDefaults: {
-          annovarDbPath: settings.annovarDbPath,
-          annovarScriptsPath: settings.annovarScriptsPath,
-          vepCachePath: settings.vepCachePath,
-          vepPath: settings.vepPath,
-        },
-        dnx: {
-          defaultProjectId: dnxDefaultProjectId,
-          authenticated: dnxAuthenticated,
-        },
-      })
-    } catch (err: any) {
-      flashMessage(`Validation error: ${err?.message ?? String(err)}`, true)
-      return
-    }
-    if (result.errorCount > 0) {
-      setConfirmDialog({ result, snapshot })
-      return
-    }
-
-    setPreviewLoading(true)
-    try {
-      const readiness = snapshotNeedsSsh(snapshot) && activeConnectionId !== LOCAL_CONNECTION_ID
-        ? await evaluateReadiness(activeConnectionId, snapshot)
-        : null
-      const scripts = await window.api.pipeline.generateScriptsDry(activeConnectionId, snapshot)
-      const report = buildRunManifest({
-        runId: 'preview',
-        pipelineId: snapshot.id,
-        pipelineName: snapshot.name,
-        snapshot,
-        workspace: null,
-        connectionId: activeConnectionId,
-        arrayChainMode: snapshot.execution?.arrayChainMode,
-        fileLifecyclePolicy: snapshot.execution?.fileLifecyclePolicy,
-        workDir: '(preview)',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        status: 'queued',
-        nodes: {},
-      }, snapshot, null, { scripts, validation: result, readiness })
-      setReportPreview(report)
-    } catch (err: any) {
-      console.error('Run report preview failed:', err)
-      flashMessage(err?.message ?? String(err), true)
-    } finally {
-      setPreviewLoading(false)
-    }
-  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, exportSnapshot, flashMessage, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath])
-
-  const handleCheck = useCallback(() => {
-    const snapshot = exportSnapshot()
-    let result = validatePipeline(snapshot, {
-      schemas,
-      annotationDefaults: {
-        annovarDbPath: settings.annovarDbPath,
-        annovarScriptsPath: settings.annovarScriptsPath,
-        vepCachePath: settings.vepCachePath,
-        vepPath: settings.vepPath,
-      },
-      dnx: {
-        defaultProjectId: dnxDefaultProjectId,
-        authenticated: dnxAuthenticated,
-      },
-    })
-    if (lastReadinessReport) {
-      result = mergeReadinessIntoValidation(result, lastReadinessReport)
-    }
-    setCheckReport(result)
+    setCheckRunning(true)
     setCheckOpen(true)
-  }, [dnxAuthenticated, dnxDefaultProjectId, exportSnapshot, lastReadinessReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath])
+    setCheckStatus('Fast-checking pipeline...')
+    try {
+      const result = await runChecks(snapshot, {
+        includeDoctor: false,
+        includeFileReadiness: false,
+        includeModuleChecks: false,
+        includeTransfers: false,
+        onProgress: setCheckStatus,
+      })
+      setCheckReport(result.validation)
+      setCheckReadinessReport(result.readiness)
+    } catch (err: any) {
+      setCheckReport({
+        ok: false,
+        issues: [{
+          severity: 'error',
+          code: 'CHECK_FAILED',
+          message: err?.message ?? String(err),
+        }],
+        errorCount: 1,
+        warningCount: 0,
+        infoCount: 0,
+      })
+      setCheckReadinessReport(null)
+    } finally {
+      setCheckRunning(false)
+      setCheckStatus(null)
+    }
+  }, [exportSnapshot, runChecks])
+
+  const handleWorkflowAction = useCallback((step: WorkflowGuideStep) => {
+    setWorkflowOpen(false)
+    if (step.action === 'connect') {
+      openConnectionDialog()
+      return
+    }
+    if (step.action === 'templates') {
+      setTemplatePicker(true)
+      return
+    }
+    if (step.action === 'select-node' && step.nodeId) {
+      setSelectedNode(step.nodeId)
+      return
+    }
+    if (step.action === 'check') {
+      void handleCheck()
+      return
+    }
+    if (step.action === 'run') {
+      void handleRun()
+      return
+    }
+    if (step.action === 'jobs') {
+      setBottomPanelMode('jobs')
+      return
+    }
+    if (step.action === 'results') {
+      setBottomPanelMode('results')
+    }
+  }, [handleCheck, handleRun, openConnectionDialog, setBottomPanelMode, setSelectedNode])
 
   const applyValidationQuickFix = useCallback((issue: ValidationIssue) => {
-    if (issue.code !== 'BACKEND_MISMATCH_NEEDS_TRANSFER' || !issue.edgeId) return
-    const inserted = insertTransferNodeForEdge(issue.edgeId)
+    if (!canApplyValidationQuickFix(issue)) return
+    const resourceFix = resourceQuickFix(issue)
+    if (resourceFix && issue.nodeId) {
+      const node = nodes.find((candidate) => candidate.id === issue.nodeId)
+      if (!node || node.type !== 'tool') return
+      const patch = {
+        cpus: resourceFix.cpus,
+        memoryGB: resourceFix.memoryGB,
+        timeHours: resourceFix.timeHours,
+      }
+      updateNodeData(issue.nodeId, {
+        slurmOverride: { ...((node.data as ToolNodeData).slurmOverride ?? {}), ...patch },
+      })
+      setSelectedNode(issue.nodeId)
+      const shouldRemove = (candidate: ValidationIssue) => candidate.code === issue.code && candidate.nodeId === issue.nodeId && candidate.message === issue.message
+      setCheckReport((current) => current ? removeValidationIssues(current, shouldRemove) : current)
+      setConfirmDialog((current) => current ? {
+        ...current,
+        snapshot: snapshotWithSlurmOverride(current.snapshot, issue.nodeId!, patch),
+        result: removeValidationIssues(current.result, shouldRemove),
+        readiness: removeReadinessIssues(current.readiness, (candidate) => candidate.code === issue.code && candidate.nodeId === issue.nodeId && candidate.message === issue.message),
+      } : current)
+      flashMessage(resourceFix.label)
+      return
+    }
+    const optionFix = analysisOptionQuickFix(issue)
+    if (optionFix && issue.nodeId) {
+      const node = nodes.find((candidate) => candidate.id === issue.nodeId)
+      if (!node || node.type !== 'tool') return
+      updateNodeData(issue.nodeId, nodeDataWithAnalysisOptionEnabled(node.data as ToolNodeData, optionFix.optionId, optionFix.value))
+      setSelectedNode(issue.nodeId)
+      const shouldRemove = (candidate: ValidationIssue) => candidate.code === issue.code && candidate.nodeId === issue.nodeId && candidate.message === issue.message
+      setCheckReport((current) => current ? removeValidationIssues(current, shouldRemove) : current)
+      setConfirmDialog((current) => current ? {
+        ...current,
+        snapshot: snapshotWithAnalysisOptionEnabled(current.snapshot, issue.nodeId!, optionFix.optionId, optionFix.value),
+        result: removeValidationIssues(current.result, shouldRemove),
+        readiness: removeReadinessIssues(current.readiness, (candidate) => candidate.code === issue.code && candidate.nodeId === issue.nodeId && candidate.message === issue.message),
+      } : current)
+      flashMessage(optionFix.label)
+      return
+    }
+    if (!issue.edgeId) return
+    const inserted = canInsertLiftoverQuickFix(issue)
+      ? insertLiftoverNodeForEdge(
+          issue.edgeId,
+          String(issue.details?.sourceBuild ?? ''),
+          String(issue.details?.targetBuild ?? ''),
+        )
+      : insertTransferNodeForEdge(issue.edgeId)
     if (inserted) {
       setCheckOpen(false)
       setCheckReport(null)
-      flashMessage('Inserted Transfer node')
+      setCheckReadinessReport(null)
+      setConfirmDialog(null)
+      flashMessage(canInsertLiftoverQuickFix(issue) ? 'Inserted CrossMap Liftover node' : 'Inserted Transfer node')
     }
-  }, [flashMessage, insertTransferNodeForEdge])
+  }, [flashMessage, insertLiftoverNodeForEdge, insertTransferNodeForEdge, nodes, setSelectedNode, updateNodeData])
+
+  const createRemoteFolderQuickFix = useCallback(async (issue: ValidationIssue) => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
+      flashMessage('Connect to SSH before creating a remote folder', true)
+      return
+    }
+    if (!canCreateRemoteFolderQuickFix(issue)) return
+    const folder = remoteFolderFromClusterIssue(issue)
+    if (!folder) {
+      flashMessage('Could not determine which remote folder to create', true)
+      return
+    }
+    try {
+      const quoted = shellQuoteClient(folder)
+      const result = await window.api.ssh.exec(activeConnectionId, `mkdir -p ${quoted} && test -d ${quoted} && test -w ${quoted}`)
+      if (result.exitCode !== 0) {
+        throw new Error((result.stderr || result.stdout || `Could not create ${folder}`).trim())
+      }
+      const shouldRemove = (candidate: ValidationIssue) => candidate.code === issue.code && candidate.message === issue.message
+      setCheckReport((current) => current ? removeValidationIssues(current, shouldRemove) : current)
+      setConfirmDialog((current) => current ? {
+        ...current,
+        result: removeValidationIssues(current.result, shouldRemove),
+        readiness: removeReadinessIssues(current.readiness, (candidate) => candidate.code === issue.code && candidate.message === issue.message),
+      } : current)
+      flashMessage(`Created ${folder}`)
+    } catch (err: any) {
+      flashMessage(err?.message ?? String(err), true)
+    }
+  }, [activeConnectionId, flashMessage])
+
+  const applyModuleSuggestion = useCallback((issue: ValidationIssue, moduleName: string) => {
+    const trimmed = moduleName.trim()
+    if (!issue.nodeId || !trimmed) return
+    updateNodeData(issue.nodeId, { moduleOverride: trimmed } as Partial<ToolNodeData>)
+    setSelectedNode(issue.nodeId)
+    setCheckReport((current) => current ? removeValidationIssues(current, (candidate) => isMatchingModuleIssue(candidate, issue)) : current)
+    setConfirmDialog((current) => current ? {
+      ...current,
+      snapshot: snapshotWithModuleOverride(current.snapshot, issue.nodeId!, trimmed),
+      result: removeValidationIssues(current.result, (candidate) => isMatchingModuleIssue(candidate, issue)),
+      readiness: removeReadinessIssues(current.readiness, (candidate) => isMatchingModuleIssue(candidate, issue)),
+    } : current)
+    flashMessage(`Using module ${trimmed}`)
+  }, [flashMessage, setSelectedNode, updateNodeData])
+
+  const selectValidationIssueNode = useCallback((issue: ValidationIssue) => {
+    if (!issue.nodeId) return
+    setSelectedNode(issue.nodeId)
+    setCheckOpen(false)
+    setConfirmDialog(null)
+  }, [setSelectedNode])
 
   const handleCancelRun = useCallback(async () => {
     if (!activeRunId || !activeRunIsCancellable) return
@@ -684,38 +1200,62 @@ export function PipelineToolbar() {
           )}
           {dirty && <span className="w-1.5 h-1.5 rounded-full bg-accent" title="Unsaved changes" />}
           <span className="text-[10px] text-text-muted">{nodes.length} node{nodes.length === 1 ? '' : 's'}</span>
-          <div className="hidden xl:flex items-center gap-1 text-[10px] text-text-muted">
-            <span>Chain</span>
-            <select
-              value={arrayChainMode}
-              onChange={(e) => setArrayChainMode(e.target.value === 'job-level' ? 'job-level' : 'task-level')}
-              className="h-6 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
-              title="Per-pipeline array dependency mode"
-            >
-              <option value="task-level">Task</option>
-              <option value="job-level">Job</option>
-            </select>
-            <span>Files</span>
-            <select
-              value={fileLifecyclePolicy}
-              onChange={(e) => setFileLifecyclePolicy(
-                e.target.value === 'keep-outputs-only' || e.target.value === 'delete-intermediates-on-success'
-                  ? e.target.value
-                  : 'keep-all',
+          {settings.workflowGuideEnabled && (
+            <div className="relative" ref={workflowRef}>
+              <button
+                type="button"
+                onClick={() => setWorkflowOpen((open) => !open)}
+                className={classNames(
+                  'inline-flex h-6 max-w-[230px] items-center gap-1.5 rounded px-2 text-[10px] font-medium transition-colors',
+                  workflowGuide.current.status === 'blocked'
+                    ? 'bg-error/15 text-error'
+                    : workflowGuide.current.status === 'active'
+                      ? 'bg-accent/10 text-accent'
+                      : 'text-text-muted hover:bg-bg-tertiary hover:text-text-primary',
+                )}
+                title={workflowGuide.current.detail}
+              >
+                <ListChecks size={12} />
+                <span className="truncate">Next: {workflowGuide.current.title}</span>
+              </button>
+              {workflowOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-[390px] rounded-lg border border-border bg-bg-secondary p-2 shadow-lg">
+                  <div className="mb-1 px-1 text-[10px] uppercase tracking-wider text-text-muted">Workflow guide</div>
+                  <div className="flex flex-col gap-1">
+                    {workflowGuide.steps.map((step) => (
+                      <div key={step.id} className="rounded-md border border-border-light bg-bg-primary px-2 py-2">
+                        <div className="flex items-start gap-2">
+                          <span className={classNames('mt-0.5 h-2 w-2 shrink-0 rounded-full', workflowStatusDot(step.status))} />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-medium text-text-primary">{step.title}</div>
+                            <div className="mt-0.5 text-[10px] leading-snug text-text-muted">{step.detail}</div>
+                          </div>
+                          {step.action && (
+                            <button
+                              type="button"
+                              onClick={() => handleWorkflowAction(step)}
+                              className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
+                            >
+                              {step.actionLabel ?? 'Open'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
-              className="h-6 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
-              title="Per-pipeline intermediate file policy"
-            >
-              <option value="keep-all">Keep all</option>
-              <option value="keep-outputs-only">Keep outputs</option>
-              <option value="delete-intermediates-on-success">Clean up</option>
-            </select>
-          </div>
+            </div>
+          )}
           <div className="relative" ref={checkRef}>
             <button
-              onClick={handleCheck}
+              onClick={() => void handleCheck()}
+              disabled={checkRunning}
               className={classNames(
                 'inline-flex items-center gap-1.5 rounded px-2 h-6 text-[10px] font-medium transition-colors',
+                checkRunning
+                  ? 'bg-accent/10 text-accent'
+                  : '',
                 !checkReport
                   ? 'text-text-muted hover:text-text-primary hover:bg-bg-tertiary'
                   : checkReport.errorCount > 0
@@ -726,12 +1266,16 @@ export function PipelineToolbar() {
                         ? 'bg-accent/10 text-accent'
                         : 'bg-success/10 text-success',
               )}
-              title="Check pipeline structure (file readiness updates when you run)"
+              title={checkStatus ?? 'Check pipeline structure and file readiness'}
             >
-              {checkReport ? (
+              {checkRunning ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : checkReport ? (
                 checkReport.errorCount > 0 ? <XCircle size={12} /> : checkReport.warningCount > 0 ? <AlertTriangle size={12} /> : checkReport.infoCount > 0 ? <Info size={12} /> : <CheckCircle2 size={12} />
               ) : <CheckSquare size={11} />}
-              {checkReport
+              {checkRunning
+                ? 'Checking...'
+                : checkReport
                 ? checkReport.errorCount > 0
                   ? `${checkReport.errorCount} errors`
                   : checkReport.warningCount > 0
@@ -741,9 +1285,22 @@ export function PipelineToolbar() {
                       : 'Checked'
                 : 'Check'}
             </button>
-            {checkOpen && checkReport && (
+            {checkOpen && (checkReport || checkRunning) && (
               <div className="absolute left-0 top-full z-50 mt-1 max-h-[420px] w-[420px] overflow-auto rounded-lg border border-border bg-bg-secondary py-1 shadow-lg">
-                {(['Pipeline structure', 'Files and columns', 'Cluster readiness'] as const).map((group) => {
+                {checkRunning && (
+                  <div className="flex items-center gap-2 border-b border-border-light px-3 py-2 text-xs text-text-secondary">
+                    <Loader2 size={13} className="animate-spin text-accent" />
+                    <span>{checkStatus ?? 'Checking...'}</span>
+                  </div>
+                )}
+                {checkReport && (
+                  <>
+                {checkReadinessReport && (
+                  <div className="border-b border-border-light px-3 py-2 text-[10px] text-text-muted">
+                    Fast check: {checkReadinessReport.errorCount} errors, {checkReadinessReport.warningCount} warnings, {checkReadinessReport.infoCount} notes. File probes, module checks, transfer planning, and cluster doctor run when you press Run.
+                  </div>
+                )}
+                {READINESS_GROUPS.map((group) => {
                   const issues = groupIssues(checkReport.issues)[group]
                   if (issues.length === 0) return null
                   return (
@@ -762,14 +1319,35 @@ export function PipelineToolbar() {
                               <div className="text-[10px] text-text-muted mt-0.5 leading-snug">{issue.suggestion}</div>
                             )}
                           </div>
-                          {issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER' && issue.edgeId && (
+                          {issue.nodeId && (
+                            <button
+                              type="button"
+                              onClick={() => selectValidationIssueNode(issue)}
+                              className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
+                            >
+                              Select
+                            </button>
+                          )}
+                          {canApplyValidationQuickFix(issue) && (
                             <button
                               type="button"
                               onClick={() => applyValidationQuickFix(issue)}
                               className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
                             >
-                              Insert
+                              {validationQuickFixLabel(issue)}
                             </button>
+                          )}
+                          {canCreateRemoteFolderQuickFix(issue) && (
+                            <button
+                              type="button"
+                              onClick={() => void createRemoteFolderQuickFix(issue)}
+                              className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+                            >
+                              Create folder
+                            </button>
+                          )}
+                          {moduleCandidatesFromIssue(issue).length > 0 && (
+                            <ModuleSuggestionPicker issue={issue} onApply={applyModuleSuggestion} />
                           )}
                         </div>
                       ))}
@@ -777,7 +1355,9 @@ export function PipelineToolbar() {
                   )
                 })}
                 {checkReport.issues.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-text-secondary">Pipeline structure, files, and cluster checks look ready.</div>
+                  <div className="px-3 py-2 text-xs text-text-secondary">Fast check passed. Full file, module, transfer, and cluster checks run when you press Run.</div>
+                )}
+                  </>
                 )}
               </div>
             )}
@@ -882,16 +1462,6 @@ export function PipelineToolbar() {
             <FileCode2 size={12} className="mr-1" />
             {previewLoading ? 'Previewing...' : 'Preview'}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={handlePreviewReport}
-            disabled={previewLoading}
-            className="h-7 px-2.5 text-xs"
-          >
-            <FileText size={12} className="mr-1" />
-            {previewLoading ? 'Building...' : 'Report'}
-          </Button>
 
           <Button
             variant="primary"
@@ -925,19 +1495,21 @@ export function PipelineToolbar() {
       {confirmDialog && (
         <RunConfirmDialog
           result={confirmDialog.result}
+          onQuickFix={applyValidationQuickFix}
+          onCreateRemoteFolder={(issue) => void createRemoteFolderQuickFix(issue)}
+          onApplyModule={applyModuleSuggestion}
+          onSelectNode={selectValidationIssueNode}
           onClose={() => setConfirmDialog(null)}
           onRunAnyway={async () => {
             const snapshot = confirmDialog.snapshot
+            const readiness = confirmDialog.readiness
             setConfirmDialog(null)
-            await submitRun(snapshot)
+            await submitRun(snapshot, readiness)
           }}
         />
       )}
       {scriptPreview && (
         <ScriptPreviewModal scripts={scriptPreview} onClose={() => setScriptPreview(null)} />
-      )}
-      {reportPreview && (
-        <RunReportModal report={reportPreview} onClose={() => setReportPreview(null)} />
       )}
       <ClusterDoctorDialog open={Boolean(doctorDialog)} onClose={() => setDoctorDialog(null)} connectionId={activeConnectionId} report={doctorDialog} />
 

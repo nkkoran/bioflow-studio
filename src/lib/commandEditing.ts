@@ -1,4 +1,4 @@
-import { analysisOptionsToParamValues, getAnalysisOptionDefs, normalizeAnalysisOptions } from '@/lib/analysisOptions'
+import { analysisOptionsToParamValues, customFileOptionPortId, getAnalysisOptionDefs, normalizeAnalysisOptions } from '@/lib/analysisOptions'
 import type { AnalysisOptionState, ToolDef, ToolNodeData } from '@/types/pipeline'
 
 export interface CommandParseResult {
@@ -35,12 +35,16 @@ export function parseToolCommand(tool: ToolDef, nodeData: ToolNodeData, command:
     if (!def) {
       const nextToken = tokens[index + 1]
       const hasValue = nextToken && !nextToken.startsWith('-')
+      const optionId = `custom_${custom.length}_${token.replace(/[^A-Za-z0-9_]/g, '_')}`
+      const looksFile = Boolean(hasValue && (isPathLike(nextToken) || KNOWN_FILE_FLAGS.has(token)))
+      const portId = customFileOptionPortId({ optionId })
       custom.push({
-        optionId: `custom_${custom.length}_${token}`,
+        optionId,
         enabled: true,
         customFlag: token,
-        customInputKind: hasValue ? 'text' : 'text',
-        value: hasValue ? nextToken : '',
+        customInputKind: looksFile ? 'file' : 'text',
+        value: looksFile ? undefined : hasValue ? nextToken : '',
+        source: looksFile ? { kind: 'path', value: nextToken, portId } : undefined,
       })
       index += hasValue ? 2 : 1
       continue
@@ -115,6 +119,21 @@ export function parseToolCommand(tool: ToolDef, nodeData: ToolNodeData, command:
     paramValues,
     changes: summarizeCommandChanges(normalizeAnalysisOptions(tool, nodeData), analysisOptions, defs),
   }
+}
+
+const KNOWN_FILE_FLAGS = new Set([
+  '--read-freq',
+  '--extract',
+  '--exclude',
+  '--keep',
+  '--remove',
+  '--keep-fam',
+  '--remove-fam',
+  '--condition-list',
+])
+
+function isPathLike(value: string): boolean {
+  return value.includes('/') || value.startsWith('~') || /\.[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value)
 }
 
 export function tokenizeShell(command: string): string[] {

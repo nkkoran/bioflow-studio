@@ -8,6 +8,9 @@ export interface ToolBundle {
   id: string
   label: string
   description: string
+  pack: 'GWAS/PRS' | 'Variant Annotation' | 'UKB/RAP Extraction' | 'File QC/Transforms' | 'Custom Shell'
+  expectedOutputs?: string[]
+  help?: string
   build: (position: { x: number; y: number }) => { nodes: BundleNode[]; edges: Edge[] }
 }
 
@@ -25,11 +28,29 @@ function defaultParamValues(toolId: string): Record<string, unknown> {
   return values
 }
 
+function toolNode(toolId: string, label: string | undefined, position: { x: number; y: number }): BundleNode {
+  const tool = getTool(toolId)
+  return {
+    id: makeId('node'),
+    type: 'tool',
+    position,
+    data: {
+      toolId,
+      label: label ?? tool?.name ?? toolId,
+      paramValues: defaultParamValues(toolId),
+      status: 'idle',
+    },
+  }
+}
+
 export const TOOL_BUNDLES: ToolBundle[] = [
   {
     id: 'grs.withClumping',
     label: 'GRS with clumping',
     description: 'PLINK2 clumping followed by score calculation with clumped ranges wired into --extract.',
+    pack: 'GWAS/PRS',
+    expectedOutputs: ['Clumped variant ranges', 'PLINK profile/score table'],
+    help: 'Use this when you already have GWAS summary statistics and want a clean PRS/GRS scoring handoff.',
     build: (position) => {
       const clumpId = makeId('node')
       const scoreId = makeId('node')
@@ -70,6 +91,125 @@ export const TOOL_BUNDLES: ToolBundle[] = [
         },
       ]
       return { nodes, edges }
+    },
+  },
+  {
+    id: 'gwas.plink2.basic',
+    label: 'PLINK2 GWAS starter',
+    description: 'Association, clumping, and scoring scaffold for a compact GWAS/PRS run.',
+    pack: 'GWAS/PRS',
+    expectedOutputs: ['GWAS association summary', 'Clumped lead variants', 'PRS/profile table'],
+    help: 'Wire genotype, phenotype, and optional covariates into the first step, then inspect role mappings before running.',
+    build: (position) => {
+      const assoc = toolNode('plink2.assoc', undefined, position)
+      const clump = toolNode('plink2.clump', undefined, { x: position.x + 430, y: position.y })
+      const score = toolNode('plink2.score', undefined, { x: position.x + 860, y: position.y + 20 })
+      return {
+        nodes: [assoc, clump, score],
+        edges: [
+          { id: makeId('edge'), source: assoc.id, sourceHandle: 'output', target: clump.id, targetHandle: 'clump', animated: false },
+          { id: makeId('edge'), source: clump.id, sourceHandle: 'ranges', target: score.id, targetHandle: 'extract', animated: false },
+        ],
+      }
+    },
+  },
+  {
+    id: 'annotation.vcfToTables',
+    label: 'VCF annotation',
+    description: 'Filter variants, lift coordinates if needed, then annotate with ANNOVAR.',
+    pack: 'Variant Annotation',
+    expectedOutputs: ['Filtered VCF/BCF', 'Liftover output', 'Annotation tables'],
+    help: 'Keep liftover only when source and target genome builds differ; readiness will flag build mismatches.',
+    build: (position) => {
+      const view = toolNode('bcftools.view', undefined, position)
+      const liftover = toolNode('crossmap.liftover', undefined, { x: position.x + 420, y: position.y })
+      const annovar = toolNode('annovar.table_annovar', undefined, { x: position.x + 840, y: position.y })
+      return {
+        nodes: [view, liftover, annovar],
+        edges: [
+          { id: makeId('edge'), source: view.id, sourceHandle: 'output', target: liftover.id, targetHandle: 'input', animated: false },
+          { id: makeId('edge'), source: liftover.id, sourceHandle: 'output', target: annovar.id, targetHandle: 'input', animated: false },
+        ],
+      }
+    },
+  },
+  {
+    id: 'ukb.rapExtractToQc',
+    label: 'UKB/RAP extract to QC',
+    description: 'DNAnexus UKB Spark extraction followed by explicit transfer and local/HPC table QC.',
+    pack: 'UKB/RAP Extraction',
+    expectedOutputs: ['Extracted UKB table', 'Explicit cross-backend handoff', 'Filtered analysis table'],
+    help: 'This pack is visible in dev mode only while RAP access is unavailable for testing.',
+    build: (position) => {
+      const extract = toolNode('ukb.spark-extract', undefined, position)
+      const transferId = makeId('transfer')
+      const filter = toolNode('flow.filterFile', 'Filter extracted table', { x: position.x + 840, y: position.y })
+      const transfer: BundleNode = {
+        id: transferId,
+        type: 'transfer',
+        position: { x: position.x + 420, y: position.y },
+        data: {
+          label: 'RAP to cluster transfer',
+          from: 'dnx',
+          to: 'ssh',
+          sshFolder: '~/BioFlow/rap-inputs',
+          status: 'idle',
+        },
+      }
+      return {
+        nodes: [extract, transfer, filter],
+        edges: [
+          { id: makeId('edge'), source: extract.id, sourceHandle: 'output', target: transfer.id, targetHandle: 'input', animated: false },
+          { id: makeId('edge'), source: transfer.id, sourceHandle: 'output', target: filter.id, targetHandle: 'input', animated: false },
+        ],
+      }
+    },
+  },
+  {
+    id: 'qc.fastqcMultiqc',
+    label: 'FastQC to MultiQC',
+    description: 'Run FastQC and aggregate reports with MultiQC.',
+    pack: 'File QC/Transforms',
+    expectedOutputs: ['FastQC reports', 'MultiQC HTML report'],
+    help: 'Use this for FASTQ inspection before alignment or as a standalone QC pipeline.',
+    build: (position) => {
+      const fastqc = toolNode('fastqc', undefined, position)
+      const multiqc = toolNode('multiqc', undefined, { x: position.x + 430, y: position.y })
+      return {
+        nodes: [fastqc, multiqc],
+        edges: [
+          { id: makeId('edge'), source: fastqc.id, sourceHandle: 'output', target: multiqc.id, targetHandle: 'input', animated: false },
+        ],
+      }
+    },
+  },
+  {
+    id: 'custom.shellWithTransfer',
+    label: 'Custom shell with transfer',
+    description: 'Explicitly stage local input to SSH before a custom shell command.',
+    pack: 'Custom Shell',
+    expectedOutputs: ['Staged input', 'Custom command output'],
+    help: 'Use this when the command is unique to the lab but data movement should still be visible and auditable.',
+    build: (position) => {
+      const transfer: BundleNode = {
+        id: makeId('transfer'),
+        type: 'transfer',
+        position,
+        data: {
+          label: 'Upload local input',
+          from: 'local',
+          to: 'ssh',
+          sshFolder: '~/BioFlow/uploads',
+          status: 'idle',
+        },
+      }
+      const shell = toolNode('custom.shell', undefined, { x: position.x + 420, y: position.y })
+      return {
+        nodes: [transfer, shell],
+        edges: [
+          { id: makeId('edge'), source: transfer.id, sourceHandle: 'output', target: shell.id, targetHandle: 'input', animated: false },
+        ],
+      }
     },
   },
 ]

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern } from '../../src/types/pipeline'
+import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern, TransferPlan } from '../../src/types/pipeline'
+import type { RunReadinessReport } from '../../src/types/workspace'
 import type { AnnovarInstallRequest, AnnovarInstallProgress, AnnovarStatusResult } from '../../src/types/annotation'
 import type {
   DnxAppletInstallProgress,
@@ -185,8 +186,8 @@ const api = {
     },
   },
   sftp: {
-    ls: async (id: string, remotePath: string): Promise<RemoteFileEntry[]> =>
-      normalizeRemoteFileEntries(await ipcRenderer.invoke('sftp:ls', id, remotePath)),
+    ls: async (id: string, remotePath: string, opts?: { force?: boolean }): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('sftp:ls', id, remotePath, opts)),
     stat: (id: string, remotePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('sftp:stat', id, remotePath),
     read: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
@@ -204,7 +205,21 @@ const api = {
     write: (id: string, remotePath: string, content: string): Promise<void> =>
       ipcRenderer.invoke('sftp:write', id, remotePath, content),
     upload: (id: string, localPath: string, remotePath: string): Promise<void> =>
-      ipcRenderer.invoke('sftp:upload', id, localPath, remotePath)
+      ipcRenderer.invoke('sftp:upload', id, localPath, remotePath),
+    download: (id: string, remotePath: string, localPath: string): Promise<void> =>
+      ipcRenderer.invoke('sftp:download', id, remotePath, localPath),
+    onTransferProgress: (callback: (data: {
+      connectionId: string
+      direction: 'upload' | 'download'
+      localPath: string
+      remotePath: string
+      bytesTransferred: number
+      totalBytes?: number
+    }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('sftp:transfer-progress', handler)
+      return () => ipcRenderer.removeListener('sftp:transfer-progress', handler)
+    },
   },
   terminal: {
     create: (connectionId: string): Promise<string> =>
@@ -258,6 +273,8 @@ const api = {
       ipcRenderer.invoke('dnx:list-files', args),
     stat: (args: { projectId: string; path: string }): Promise<DnxFileStat> =>
       ipcRenderer.invoke('dnx:stat', args),
+    head: (args: { projectId: string; path: string; lines: number }): Promise<string> =>
+      ipcRenderer.invoke('dnx:head', args),
     upload: (args: { projectId: string; localPath: string; folder: string }): Promise<{ fileId: string }> =>
       ipcRenderer.invoke('dnx:upload', args),
     download: (args: { projectId: string; fileId: string; localPath: string }): Promise<{ path: string }> =>
@@ -310,6 +327,8 @@ const api = {
       ipcRenderer.invoke('local:mkdir', dirPath),
     rename: (oldPath: string, newPath: string): Promise<void> =>
       ipcRenderer.invoke('local:rename', oldPath, newPath),
+    copy: (oldPath: string, newPath: string): Promise<void> =>
+      ipcRenderer.invoke('local:copy', oldPath, newPath),
     delete: (filePath: string): Promise<void> =>
       ipcRenderer.invoke('local:delete', filePath),
     write: (filePath: string, content: string): Promise<void> =>
@@ -326,8 +345,8 @@ const api = {
       ipcRenderer.invoke('dialog:openDirectory', options),
   },
   pipeline: {
-    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string, workspace?: RunState['workspace']): Promise<{ runId: string }> =>
-      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir, workspace }),
+    run: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string, workspace?: RunState['workspace'], runReadiness?: RunReadinessReport | null): Promise<{ runId: string }> =>
+      ipcRenderer.invoke('pipeline:run', { connectionId, snapshot, workDir, workspace, runReadiness }),
     cancel: (runId: string): Promise<void> =>
       ipcRenderer.invoke('pipeline:cancel', runId),
     cancelNode: (runId: string, nodeId: string): Promise<void> =>
@@ -344,6 +363,8 @@ const api = {
       ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId }),
     generateScriptsDry: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<DryRunScript[]> =>
       ipcRenderer.invoke('pipeline:generate-scripts-dry', { connectionId, snapshot, workDir }),
+    planTransfersDry: (snapshot: PipelineSnapshot): Promise<TransferPlan[]> =>
+      ipcRenderer.invoke('pipeline:plan-transfers-dry', snapshot),
     onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: RunStatus | 'idle'; jobId?: string; error?: string; node?: NodeRunState }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('pipeline:node-status', handler)
@@ -371,6 +392,8 @@ const api = {
       ipcRenderer.invoke('cluster:listAccounts', connectionId),
     listModules: (connectionId: string, query?: string, options?: { force?: boolean }) =>
       ipcRenderer.invoke('cluster:listModules', connectionId, query, options),
+    checkModules: (connectionId: string, modules: string[]) =>
+      ipcRenderer.invoke('cluster:checkModules', connectionId, modules),
     getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) =>
       ipcRenderer.invoke('cluster:getLearnedResources', connectionId, toolId, options),
     resetLearnedResources: (connectionId: string, toolId: string) =>

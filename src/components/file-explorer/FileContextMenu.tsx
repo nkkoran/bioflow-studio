@@ -23,6 +23,7 @@ interface FileContextMenuProps {
   onOpen: (entry: RemoteFileEntry) => void
   onPreview: (entry: RemoteFileEntry) => void
   onCopyPath: (path: string) => void
+  onUseAsInput: (entry: RemoteFileEntry) => void
   onBookmark: (path: string) => void
   onUnbookmark: (path: string) => void
   onRename: (entry: RemoteFileEntry) => void
@@ -39,6 +40,7 @@ export function FileContextMenu({
   onOpen,
   onPreview,
   onCopyPath,
+  onUseAsInput,
   onBookmark,
   onUnbookmark,
   onRename,
@@ -69,8 +71,7 @@ export function FileContextMenu({
     {
       label: 'Use as Input',
       icon: <ArrowRightToLine className="h-4 w-4" />,
-      onClick: () => {},
-      disabled: true,
+      onClick: () => onUseAsInput(entry),
     },
     { label: '', onClick: () => {}, separator: true },
     {

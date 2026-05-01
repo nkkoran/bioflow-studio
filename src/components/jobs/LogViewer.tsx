@@ -44,6 +44,8 @@ export function LogViewer({ run, connectionId }: Props) {
   const ns = selectedNodeId ? run.nodes[selectedNodeId] : null
 
   const [stream, setStream] = useState<Stream>('stdout')
+  const sharedSlurmLog = Boolean(ns?.stdoutPath && ns.stdoutPath === ns.stderrPath)
+  const effectiveStream: Stream = sharedSlurmLog ? 'stdout' : stream
   const [taskIdx, setTaskIdx] = useState(0)
   const [loading, setLoading] = useState(false)
   const [diagnosing, setDiagnosing] = useState(false)
@@ -57,13 +59,13 @@ export function LogViewer({ run, connectionId }: Props) {
   // the selector returns a stable reference when empty — a fresh `[]` here
   // causes an infinite re-render loop under Zustand's reference equality.
   const logLines = useRunStore((s) =>
-    ns ? (s.logs[ns.nodeId]?.[stream] ?? EMPTY_LINES) : EMPTY_LINES,
+    ns ? (s.logs[ns.nodeId]?.[effectiveStream] ?? EMPTY_LINES) : EMPTY_LINES,
   ) as readonly string[]
   const stdoutLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stdout?.length ?? 0) : 0)
   const stderrLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stderr?.length ?? 0) : 0)
 
   // The concrete log file path (null when not yet known or array-with-placeholder).
-  const resolvedPath = ns ? resolveLogPath(ns, stream, taskIdx) : null
+  const resolvedPath = ns ? resolveLogPath(ns, effectiveStream, taskIdx) : null
 
   // ── SFTP read ────────────────────────────────────────────────────────────
   // Used for: array jobs (all reads), non-array jobs (manual Refresh only).
@@ -83,8 +85,8 @@ export function LogViewer({ run, connectionId }: Props) {
       const lines = text.length === 0 ? [] : text.split('\n')
       // Array jobs: each task has its own file — switching tasks must replace,
       // not merge, or the previous task's output bleeds in.
-      if (ns.isArray) replaceLog(ns.nodeId, stream, lines)
-      else setLog(ns.nodeId, stream, lines)
+      if (ns.isArray) replaceLog(ns.nodeId, effectiveStream, lines)
+      else setLog(ns.nodeId, effectiveStream, lines)
     } catch (err: any) {
       const msg = String(err?.message ?? err)
       if (msg.includes('No such file') || msg.includes('code 2')) {
@@ -95,14 +97,14 @@ export function LogViewer({ run, connectionId }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [connectionId, resolvedPath, ns, stream, setLog, replaceLog])
+  }, [connectionId, effectiveStream, resolvedPath, ns, setLog, replaceLog])
 
   // Clear the buffer instantly when the user switches array tasks so the
   // prior task's output isn't visible while the SFTP fetch is in flight.
   useEffect(() => {
-    if (ns?.isArray) replaceLog(ns.nodeId, stream, [])
+    if (ns?.isArray) replaceLog(ns.nodeId, effectiveStream, [])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskIdx, ns?.nodeId, stream])
+  }, [taskIdx, ns?.nodeId, effectiveStream])
 
   // Load via SFTP on initial selection AND when a non-array job transitions
   // into a terminal state — streaming (tail -F) may have ended before the
@@ -114,7 +116,7 @@ export function LogViewer({ run, connectionId }: Props) {
       void sftpRefresh()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ns?.nodeId, ns?.status, stream, taskIdx])
+  }, [ns?.nodeId, ns?.status, effectiveStream, taskIdx])
 
   // Array jobs: auto-refresh while running.
   useEffect(() => {
@@ -171,8 +173,14 @@ export function LogViewer({ run, connectionId }: Props) {
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-light shrink-0">
-        <StreamTab label="stdout" count={stdoutLineCount} active={stream === 'stdout'} onClick={() => setStream('stdout')} />
-        <StreamTab label="stderr" count={stderrLineCount} active={stream === 'stderr'} onClick={() => setStream('stderr')} />
+        {sharedSlurmLog ? (
+          <StreamTab label="slurm log" count={stdoutLineCount} active onClick={() => setStream('stdout')} />
+        ) : (
+          <>
+            <StreamTab label="stdout" count={stdoutLineCount} active={stream === 'stdout'} onClick={() => setStream('stdout')} />
+            <StreamTab label="stderr" count={stderrLineCount} active={stream === 'stderr'} onClick={() => setStream('stderr')} />
+          </>
+        )}
 
         {isArray && (
           <>

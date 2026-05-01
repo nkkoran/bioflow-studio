@@ -15,6 +15,8 @@ import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileStore } from '@/stores/fileStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import type { DnxJobStatus } from '@/types/dnx'
 
 interface Props {
   runId: string
@@ -33,12 +35,14 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
   const [outputs, setOutputs] = useState<OutputEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
+  const [dnxStatus, setDnxStatus] = useState<DnxJobStatus | null>(null)
   const openPreview = useDataPreviewStore((s) => s.openFile)
   const navigate = useFileStore((s) => s.navigate)
   const clearSelection = useFileStore((s) => s.clearSelection)
   const selectFile = useFileStore((s) => s.selectFile)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
+  const devMode = useSettingsStore((s) => s.devMode)
 
   useEffect(() => {
     let cancelled = false
@@ -57,6 +61,20 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
     return () => { cancelled = true }
     // Re-fetch when the node or its terminal state changes.
   }, [runId, ns.nodeId, ns.status, ns.finishedAt])
+
+  useEffect(() => {
+    if (!devMode || !ns.jobId?.startsWith('job-') || !window.api?.dnx) {
+      setDnxStatus(null)
+      return
+    }
+    let cancelled = false
+    void window.api.dnx.jobStatus({ jobId: ns.jobId }).then((status) => {
+      if (!cancelled) setDnxStatus(status)
+    }).catch(() => {
+      if (!cancelled) setDnxStatus(null)
+    })
+    return () => { cancelled = true }
+  }, [devMode, ns.jobId, ns.status, ns.finishedAt])
 
   const duration =
     ns.startedAt && ns.finishedAt
@@ -134,6 +152,27 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
         </div>
       )}
 
+      {dnxStatus && (
+        <div className="mt-2 rounded border border-cyan-500/20 bg-cyan-500/5 px-2 py-1.5 text-[11px] text-text-secondary">
+          <div className="flex flex-wrap items-center gap-3">
+            <span>DNAnexus state <span className="font-mono text-text-primary">{dnxStatus.state}</span></span>
+            {dnxStatus.projectId && <span>project <span className="font-mono text-text-primary">{dnxStatus.projectId}</span></span>}
+            {dnxStatus.outputFolder && <span>output <span className="font-mono text-text-primary">{dnxStatus.outputFolder}</span></span>}
+            {dnxStatus.fileIds?.length ? <span>{dnxStatus.fileIds.length} output file{dnxStatus.fileIds.length === 1 ? '' : 's'}</span> : null}
+            {dnxStatus.projectId && (
+              <a
+                href={dnxJobUrl(dnxStatus.projectId, dnxStatus.jobId)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:underline"
+              >
+                Open in DNAnexus
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Files table */}
       <div className="mt-2">
         <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Files created</div>
@@ -196,13 +235,13 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
           <div className="flex flex-wrap gap-1.5">
             {ns.stdoutPath && (
               <LogFileButton
-                label="stdout"
+                label={ns.stdoutPath === ns.stderrPath ? 'slurm log' : 'stdout'}
                 path={ns.stdoutPath}
                 onLocate={handleLocatePath}
                 onCopy={handleCopyPathValue}
               />
             )}
-            {ns.stderrPath && (
+            {ns.stderrPath && ns.stderrPath !== ns.stdoutPath && (
               <LogFileButton
                 label="stderr"
                 path={ns.stderrPath}
@@ -215,6 +254,10 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
       )}
     </div>
   )
+}
+
+function dnxJobUrl(projectId: string, jobId: string): string {
+  return `https://platform.dnanexus.com/panx/projects/${encodeURIComponent(projectId)}/monitor/job/${encodeURIComponent(jobId)}`
 }
 
 function LogFileButton({

@@ -87,11 +87,21 @@ export function NodeRunList({ run }: Props) {
           <div className="flex-1 min-w-0">
             <div className="text-text-primary truncate font-medium">{label}</div>
             <div className="text-[10px] text-text-muted truncate">
-              {ns.jobId ? `job ${ns.jobId}${ns.isArray ? ` [${ns.arraySize}]` : ''}` : '—'}
+              {ns.transferProgress
+                ? transferProgressLabel(ns)
+                : ns.jobId ? `job ${ns.jobId}${ns.isArray ? ` [${ns.arraySize}]` : ''}` : '—'}
               {ns.exitCode !== undefined && ns.exitCode !== 0 && (
                 <span className="text-error ml-2">exit {ns.exitCode}</span>
               )}
             </div>
+            {ns.transferProgress?.totalBytes ? (
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-bg-tertiary">
+                <div
+                  className="h-full rounded-full bg-accent"
+                  style={{ width: `${Math.min(100, Math.round(((ns.transferProgress.bytesTransferred ?? 0) / ns.transferProgress.totalBytes) * 100))}%` }}
+                />
+              </div>
+            ) : null}
           </div>
           <div className="text-[10px] text-text-muted font-mono shrink-0">
             {formatDuration(ns)}
@@ -101,6 +111,14 @@ export function NodeRunList({ run }: Props) {
       })}
     </div>
   )
+}
+
+function transferProgressLabel(ns: NodeRunState): string {
+  const progress = ns.transferProgress
+  if (!progress) return 'transfer'
+  if (!progress.totalBytes) return `${progress.route ?? 'transfer'} ${progress.status}`
+  const pct = Math.min(100, Math.round(((progress.bytesTransferred ?? 0) / progress.totalBytes) * 100))
+  return `${progress.route ?? 'transfer'} ${pct}%`
 }
 
 function StatusIcon({ status }: { status: NodeRunState['status'] }) {

@@ -24,7 +24,9 @@
     "src/lib/annovarCatalog.ts",
     "src/lib/flagRegistry.ts",
     "src/lib/resourceLearning.ts",
+    "src/lib/runReadiness.ts",
     "src/lib/runManifest.ts",
+    "src/lib/transferPlanner.ts",
     "src/lib/toolRegistry.ts"
   ]
 }

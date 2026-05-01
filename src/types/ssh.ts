@@ -72,6 +72,18 @@ export interface ClusterModulesResult {
   cachedAt: number
 }
 
+export interface ClusterModuleCheck {
+  requested: string
+  ok: boolean
+  suggestions: ClusterModuleSuggestion[]
+  message?: string
+}
+
+export interface ClusterModuleCheckResult {
+  checks: ClusterModuleCheck[]
+  cachedAt: number
+}
+
 export interface LearnedResourceSummary {
   toolId: string
   sampleCount: number

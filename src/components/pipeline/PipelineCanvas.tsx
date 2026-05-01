@@ -47,12 +47,13 @@ import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { getToolBundle } from '@/lib/toolBundles'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { edgeAxisChips } from '@/lib/axisPlannerPure'
+import { detectSplitInFolder as detectSmartSplitInFolder } from '@/lib/splitDetection'
 import { pathBasename } from '@/lib/utils'
-import type { FileType } from '@/types/pipeline'
-import type { NodeGroup } from '@/types/pipeline'
+import type { FileNodeSplit, FileType, NodeGroup, SplitPattern } from '@/types/pipeline'
 import { useDialogStore } from '@/stores/dialogStore'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
+const FILE_DRAG_ENTRY_MIME = 'application/x-bioflow-file-entry'
 
 const nodeTypes: NodeTypes = {
   tool: ToolNode,
@@ -71,7 +72,7 @@ const proOptions = { hideAttribution: true }
 
 function CanvasInner() {
   const wrapperRef = useRef<HTMLDivElement>(null)
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, fitView } = useReactFlow()
 
   const nodes = usePipelineStore((s) => s.nodes)
   const theme = useUIStore((s) => s.theme)
@@ -92,6 +93,8 @@ function CanvasInner() {
   const undo = usePipelineStore((s) => s.undo)
   const redo = usePipelineStore((s) => s.redo)
   const duplicateNode = usePipelineStore((s) => s.duplicateNode)
+  const duplicateSelection = usePipelineStore((s) => s.duplicateSelection)
+  const selectAllNodes = usePipelineStore((s) => s.selectAllNodes)
   const copySelection = usePipelineStore((s) => s.copySelection)
   const pasteClipboard = usePipelineStore((s) => s.pasteClipboard)
   const createGroup = usePipelineStore((s) => s.createGroup)
@@ -298,26 +301,42 @@ function CanvasInner() {
     setDropBusy(true)
     try {
       setDropMessage('Creating split input from folder…')
-      const entries = (await window.api.local.ls(folderPath)).filter((entry) => !entry.isDirectory)
+      const entries = await window.api.local.ls(folderPath)
       if (entries.length === 0) {
+        setDropMessage('Folder is empty.')
+        return
+      }
+      const fileEntries = entries.filter((entry) => !entry.isDirectory)
+      const firstType = fileEntries[0] ? inferFileType(fileEntries[0].name) as FileType : 'any'
+      const allSameType = fileEntries.length > 0 && fileEntries.every((entry) => inferFileType(entry.name) === firstType)
+      const splitFileType = allSameType ? firstType : 'any'
+      const detected = await detectSmartSplitInFolder({
+        listFolder: (path) => window.api.local.ls(path),
+        folder: folderPath,
+        mode: 'auto',
+        axis: 'file',
+        fileType: splitFileType,
+        seedPath: folderPath,
+      }).catch(() => detectLocalFolderSplit(folderPath, entries, splitFileType))
+      if (detected.items.length === 0) {
         setDropMessage('Folder has no files to split.')
         return
       }
-      const items = entries.map((entry) => ({ key: entry.name, path: entry.path }))
-      const firstType = inferFileType(entries[0].name) as FileType
-      const allSameType = entries.every((entry) => inferFileType(entry.name) === firstType)
+      const axis = guessAxisFromSplitItems(detected.items)
       const label = pathBasename(folderPath) || 'Folder split'
       const fileId = addFileNode(position, {
         isInput: true,
         label,
-        path: folderPath,
-        fileType: allSameType ? firstType : 'any',
+        path: detected.folderPath ?? folderPath,
+        pathKind: 'directory',
+        fileType: inferSplitFileTypeFromItems(detected.items, splitFileType),
         source: 'local',
         origin: 'local',
         split: {
-          axis: 'file',
-          items,
-          pattern: { kind: 'manual' },
+          axis,
+          folderPath: detected.folderPath ?? folderPath,
+          items: detected.items,
+          pattern: detected.pattern,
         },
       })
       const target = findDropTargetTool(nodes, position)
@@ -325,12 +344,12 @@ function CanvasInner() {
         const tool = getTool((target.data as any).toolId)
         const connectedPortIds = edges.filter((edge) => edge.target === target.id).map((edge) => edge.targetHandle ?? 'input')
         const activeInputs = tool ? getActiveToolInputs(tool, target.data as any, { connectedPortIds }) : []
-        const compatible = activeInputs.find((port) => areTypesCompatible(allSameType ? firstType : 'any', port.fileType))
+        const compatible = activeInputs.find((port) => areTypesCompatible(inferSplitFileTypeFromItems(detected.items, splitFileType), port.fileType))
         if (compatible) {
           onConnect({ source: fileId, sourceHandle: 'output', target: target.id, targetHandle: compatible.id })
         }
       }
-      setDropMessage(`Added ${items.length} files as an axis-split input.`)
+      setDropMessage(detected.summary)
     } catch (err) {
       setDropMessage(err instanceof Error ? err.message : String(err))
     } finally {
@@ -339,13 +358,84 @@ function CanvasInner() {
     }
   }, [addFileNode, edges, nodes, onConnect])
 
+  const handleDroppedSshFolder = useCallback(async (
+    folderPath: string,
+    position: { x: number; y: number },
+  ) => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
+      await handleDroppedFolder(folderPath, position)
+      return
+    }
+    setDropBusy(true)
+    try {
+      setDropMessage('Creating split input from remote folder...')
+      const entries = await window.api.sftp.ls(activeConnectionId, folderPath)
+      if (entries.length === 0) {
+        setDropMessage('Folder is empty.')
+        return
+      }
+      const fileEntries = entries.filter((entry) => !entry.isDirectory)
+      const firstType = fileEntries[0] ? inferFileType(fileEntries[0].name) as FileType : 'any'
+      const allSameType = fileEntries.length > 0 && fileEntries.every((entry) => inferFileType(entry.name) === firstType)
+      const splitFileType = allSameType ? firstType : 'any'
+      const detected = await detectSmartSplitInFolder({
+        listFolder: (path) => window.api.sftp.ls(activeConnectionId, path),
+        folder: folderPath,
+        mode: 'auto',
+        axis: 'file',
+        fileType: splitFileType,
+        seedPath: folderPath,
+      }).catch(() => detectLocalFolderSplit(folderPath, entries, splitFileType))
+      if (detected.items.length === 0) {
+        setDropMessage('Folder has no files to split.')
+        return
+      }
+      const axis = guessAxisFromSplitItems(detected.items)
+      const label = pathBasename(folderPath) || 'Folder split'
+      const fileType = inferSplitFileTypeFromItems(detected.items, splitFileType)
+      const fileId = addFileNode(position, {
+        isInput: true,
+        label,
+        path: detected.folderPath ?? folderPath,
+        pathKind: 'directory',
+        fileType,
+        source: 'remote',
+        origin: 'ssh',
+        split: {
+          axis,
+          folderPath: detected.folderPath ?? folderPath,
+          items: detected.items,
+          pattern: detected.pattern,
+        },
+      })
+      const target = findDropTargetTool(nodes, position)
+      if (target) {
+        const tool = getTool((target.data as any).toolId)
+        const connectedPortIds = edges.filter((edge) => edge.target === target.id).map((edge) => edge.targetHandle ?? 'input')
+        const activeInputs = tool ? getActiveToolInputs(tool, target.data as any, { connectedPortIds }) : []
+        const compatible = activeInputs.find((port) => areTypesCompatible(fileType, port.fileType))
+        if (compatible) {
+          onConnect({ source: fileId, sourceHandle: 'output', target: target.id, targetHandle: compatible.id })
+        }
+      }
+      setDropMessage(detected.summary)
+    } catch (err) {
+      setDropMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDropBusy(false)
+      window.setTimeout(() => setDropMessage(null), 3000)
+    }
+  }, [activeConnectionId, addFileNode, edges, handleDroppedFolder, nodes, onConnect])
+
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
       event.preventDefault()
       const payload = event.dataTransfer.getData(DRAG_MIME)
       const bundlePayload = event.dataTransfer.getData(BUNDLE_DRAG_MIME)
       const filePath = event.dataTransfer.getData(FILE_DRAG_MIME)
-      const droppedLocalPaths = readLocalDropPaths(event)
+      const draggedEntry = parseDraggedFileEntry(event.dataTransfer.getData(FILE_DRAG_ENTRY_MIME))
+      const localDrop = readLocalDrop(event)
+      const droppedLocalPaths = localDrop.paths
       if (!payload && !bundlePayload && !filePath && droppedLocalPaths.length === 0) return
 
       const position = screenToFlowPosition({
@@ -353,7 +443,17 @@ function CanvasInner() {
         y: event.clientY,
       })
 
+      if (localDrop.rootDirectory) {
+        void handleDroppedFolder(localDrop.rootDirectory, position)
+        return
+      }
+
       if (droppedLocalPaths.length > 1) {
+        const folderPath = localDrop.rootDirectory || await resolveDroppedFolderPath(droppedLocalPaths)
+        if (folderPath) {
+          void handleDroppedFolder(folderPath, position)
+          return
+        }
         const items = droppedLocalPaths.map((path) => ({ key: pathBasename(path), path }))
         addFileNode(position, {
           isInput: true,
@@ -385,6 +485,11 @@ function CanvasInner() {
       }
 
       if (filePath || droppedLocalPath) {
+        if (filePath && draggedEntry?.isDirectory) {
+          if (activeConnectionId === LOCAL_CONNECTION_ID) await handleDroppedFolder(filePath, position)
+          else await handleDroppedSshFolder(filePath, position)
+          return
+        }
         await handleDroppedPath(filePath || droppedLocalPath, position, Boolean(droppedLocalPath))
         return
       }
@@ -409,24 +514,34 @@ function CanvasInner() {
         addToolNode(payload, position)
       }
     },
-    [screenToFlowPosition, handleDroppedPath, handleDroppedFolder, addFileNode, addToolNode, addNoteNode, addMergeNode, addTransferNode, addTransformNode, addNodesAndEdges],
+    [activeConnectionId, screenToFlowPosition, handleDroppedPath, handleDroppedFolder, handleDroppedSshFolder, addFileNode, addToolNode, addNoteNode, addMergeNode, addTransferNode, addTransformNode, addNodesAndEdges],
   )
 
   useEffect(() => {
     const onGlobalDrop = (event: Event) => {
-      const detail = (event as CustomEvent<{ clientX: number; clientY: number; paths: string[] }>).detail
+      const detail = (event as CustomEvent<{ clientX: number; clientY: number; paths: string[]; rootDirectory?: string }>).detail
       if (!detail?.paths?.[0]) return
       const position = screenToFlowPosition({ x: detail.clientX, y: detail.clientY })
+      if (detail.rootDirectory) {
+        void handleDroppedFolder(detail.rootDirectory, position)
+        return
+      }
       if (detail.paths.length > 1) {
-        const items = detail.paths.map((path) => ({ key: pathBasename(path), path }))
-        addFileNode(position, {
-          isInput: true,
-          label: 'Dropped file split',
-          path: '',
-          fileType: 'any',
-          source: 'local',
-          origin: 'local',
-          split: { axis: 'file', items, pattern: { kind: 'manual' } },
+        void Promise.resolve(detail.rootDirectory || resolveDroppedFolderPath(detail.paths)).then((folderPath) => {
+          if (!folderPath) {
+            const items = detail.paths.map((path) => ({ key: pathBasename(path), path }))
+            addFileNode(position, {
+              isInput: true,
+              label: 'Dropped file split',
+              path: '',
+              fileType: 'any',
+              source: 'local',
+              origin: 'local',
+              split: { axis: 'file', items, pattern: { kind: 'manual' } },
+            })
+            return
+          }
+          void handleDroppedFolder(folderPath, position)
         })
         return
       }
@@ -527,10 +642,22 @@ function CanvasInner() {
         else undo()
         return
       }
+      if (mod && e.key.toLowerCase() === 'a') {
+        e.preventDefault()
+        selectAllNodes()
+        return
+      }
+      if (mod && e.key === '0') {
+        e.preventDefault()
+        void fitView({ padding: 0.25, maxZoom: 1 })
+        return
+      }
       if (mod && e.key.toLowerCase() === 'd') {
         e.preventDefault()
-        const selected = usePipelineStore.getState().selectedNodeId
-        if (selected) duplicateNode(selected)
+        const state = usePipelineStore.getState()
+        const selected = state.nodes.filter((node) => node.selected || node.id === state.selectedNodeId)
+        if (selected.length > 1) duplicateSelection()
+        else if (selected[0]) duplicateNode(selected[0].id)
         return
       }
       if (mod && e.key.toLowerCase() === 'c') {
@@ -546,7 +673,7 @@ function CanvasInner() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [undo, redo, duplicateNode, copySelection, pasteClipboard])
+  }, [undo, redo, duplicateNode, duplicateSelection, selectAllNodes, copySelection, pasteClipboard, fitView])
 
   const defaultEdgeOptions = useMemo(
     () => ({
@@ -582,6 +709,10 @@ function CanvasInner() {
         onConnect={onConnect}
         onReconnect={handleReconnect}
         onReconnectEnd={handleReconnectEnd}
+        onEdgeDoubleClick={(event, edge) => {
+          event.preventDefault()
+          deleteEdge(edge.id)
+        }}
         onSelectionChange={onSelectionChange}
         onNodeContextMenu={onNodeContextMenu}
         isValidConnection={isValidConnection}
@@ -776,11 +907,158 @@ function CanvasInner() {
   )
 }
 
-function readLocalDropPaths(event: React.DragEvent): string[] {
+function readLocalDrop(event: React.DragEvent): { paths: string[]; rootDirectory?: string } {
   const files = Array.from(event.dataTransfer.files ?? [])
-    .map((file) => window.api.local.pathForFile(file))
+  const pairs = files
+    .map((file) => ({ file, path: window.api.local.pathForFile(file) }))
+    .filter((entry) => Boolean(entry.path))
+  const paths = pairs.map((entry) => entry.path)
+  const roots = pairs
+    .map((entry) => rootDirectoryFromDraggedFile(entry.file, entry.path))
     .filter(Boolean)
-  return [...new Set(files)]
+  return { paths: [...new Set(paths)], rootDirectory: uniqueValue(roots) }
+}
+
+function parseDraggedFileEntry(raw: string): { path: string; name: string; isDirectory: boolean } | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as Partial<{ path: string; name: string; isDirectory: boolean }>
+    if (typeof parsed.path !== 'string' || typeof parsed.name !== 'string' || typeof parsed.isDirectory !== 'boolean') return null
+    return { path: parsed.path, name: parsed.name, isDirectory: parsed.isDirectory }
+  } catch {
+    return null
+  }
+}
+
+async function resolveDroppedFolderPath(paths: string[]): Promise<string> {
+  if (paths.length === 0) return ''
+  const stats = await Promise.all(paths.map(async (path) => ({
+    path,
+    stat: await window.api.local.stat(path).catch(() => null),
+  })))
+  const directories = stats.filter((entry) => entry.stat?.isDirectory).map((entry) => entry.path)
+  if (directories.length === 1) return directories[0]
+  if (directories.length > 1 && directories.length === paths.length) return commonParentPath(directories)
+  return commonParentPath(paths)
+}
+
+function commonParentPath(paths: string[]): string {
+  if (paths.length === 0) return ''
+  const segments = paths.map((path) => path.replace(/\/+$/, '').split('/').filter(Boolean))
+  if (segments.some((parts) => parts.length === 0)) return ''
+  const first = segments[0]
+  let index = 0
+  while (index < first.length && segments.every((parts) => parts[index] === first[index])) {
+    index++
+  }
+  if (index === 0) return ''
+  return `/${first.slice(0, index).join('/')}`
+}
+
+function rootDirectoryFromDraggedFile(file: File, absolutePath: string): string {
+  const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+  if (!relativePath || !relativePath.includes('/') || !absolutePath.endsWith(relativePath)) return ''
+  const rootName = relativePath.split('/')[0]
+  const basePath = absolutePath.slice(0, absolutePath.length - relativePath.length).replace(/\/+$/, '')
+  return `${basePath}/${rootName}`.replace(/\/{2,}/g, '/')
+}
+
+function uniqueValue(values: string[]): string | undefined {
+  const unique = [...new Set(values.filter(Boolean))]
+  return unique.length === 1 ? unique[0] : undefined
+}
+
+function guessAxisFromSplitItems(items: FileNodeSplit['items']): string {
+  if (items.length > 0 && items.every((item) => /^(?:chr)?(?:[0-9]+|x|y|m|mt)$/i.test(item.key))) {
+    return 'chrom'
+  }
+  return 'file'
+}
+
+function inferSplitFileTypeFromItems(items: FileNodeSplit['items'], fallback: FileType): FileType {
+  const types = [...new Set(items.map((item) => inferFileType(item.path) as FileType).filter((type) => type !== 'any'))]
+  return types.length === 1 ? types[0] : fallback
+}
+
+function detectLocalFolderSplit(
+  folderPath: string,
+  entries: Array<{ name: string; path: string; isDirectory?: boolean }>,
+  fileType: FileType,
+): { axis: string; folderPath: string; items: FileNodeSplit['items']; pattern: SplitPattern; summary: string } {
+  const files = fileType === 'any'
+    ? entries
+    : entries.filter((entry) => inferFileType(entry.name) === fileType)
+  const candidates = files.length >= 2 ? files : entries
+  const group = bestLocalVariableGroup(candidates.map((entry) => ({ name: entry.name, path: entry.path })))
+  if (group && group.items.length >= 2) {
+    const axis = group.items.every((item) => /^(?:chr)?(?:[0-9]+|x|y|m|mt)$/i.test(item.key)) ? 'chrom' : 'file'
+    return {
+      axis,
+      folderPath,
+      items: sortLocalSplitRows(group.items),
+      pattern: { kind: 'glob', template: `${folderPath.replace(/\/+$/, '')}/${group.prefix}*${group.suffix}`, capture: 'key' },
+      summary: `Detected ${group.items.length} split files in ${pathBasename(folderPath) || folderPath}.`,
+    }
+  }
+  const items = sortLocalSplitRows(entries.map((entry) => ({ key: entry.name, path: entry.path })))
+  return {
+    axis: 'file',
+    folderPath,
+    items,
+    pattern: { kind: 'manual' },
+    summary: `Added ${items.length} files as an axis-split input.`,
+  }
+}
+
+function bestLocalVariableGroup(files: Array<{ name: string; path: string }>): { prefix: string; suffix: string; items: FileNodeSplit['items'] } | null {
+  const groups = new Map<string, { prefix: string; suffix: string; items: FileNodeSplit['items'] }>()
+  for (const file of files) {
+    for (const match of variableKeyMatches(file.name)) {
+      const prefix = file.name.slice(0, match.index)
+      const suffix = file.name.slice(match.index + match.raw.length)
+      const id = `${prefix}\u0000${suffix}`
+      const group = groups.get(id) ?? { prefix, suffix, items: [] }
+      group.items.push({ key: match.key, path: file.path })
+      groups.set(id, group)
+    }
+  }
+  return [...groups.values()]
+    .filter((group) => new Set(group.items.map((item) => item.key)).size === group.items.length)
+    .sort((a, b) => b.items.length - a.items.length || localGroupScore(b) - localGroupScore(a))[0] ?? null
+}
+
+function variableKeyMatches(name: string): Array<{ raw: string; key: string; index: number }> {
+  const matches: Array<{ raw: string; key: string; index: number }> = []
+  for (const match of name.matchAll(/(?:^|[._-])(chr)?([0-9]{1,2}|x|y|m|mt)(?=[._-]|$)/gi)) {
+    const raw = match[0].startsWith('.') || match[0].startsWith('_') || match[0].startsWith('-')
+      ? match[0].slice(1)
+      : match[0]
+    matches.push({ raw, key: match[2].toUpperCase() === 'M' ? 'MT' : match[2].toUpperCase(), index: match.index! + match[0].length - raw.length })
+  }
+  if (matches.length > 0) return matches
+  for (const match of name.matchAll(/(?:^|[._-])([0-9]+)(?=[._-]|$)/g)) {
+    const raw = match[1]
+    matches.push({ raw, key: raw.replace(/^0+(?=\d)/, ''), index: match.index! + match[0].length - raw.length })
+  }
+  return matches
+}
+
+function localGroupScore(group: { prefix: string; suffix: string; items: FileNodeSplit['items'] }): number {
+  const chromKeys = group.items.filter((item) => /^(?:[0-9]+|X|Y|MT)$/i.test(item.key)).length
+  return chromKeys * 2 + (group.prefix.toLowerCase().includes('chr') ? 2 : 0) + group.suffix.length / 100
+}
+
+function sortLocalSplitRows(items: FileNodeSplit['items']): FileNodeSplit['items'] {
+  return [...items].sort((a, b) => localKeyRank(a.key) - localKeyRank(b.key) || a.key.localeCompare(b.key, undefined, { numeric: true }))
+}
+
+function localKeyRank(key: string): number {
+  const normalized = key.toUpperCase().replace(/^CHR/, '')
+  if (/^\d+$/.test(normalized)) return Number(normalized)
+  if (normalized === 'X') return 23
+  if (normalized === 'Y') return 24
+  if (normalized === 'M' || normalized === 'MT') return 25
+  return 1000
 }
 
 function findDropTargetTool(

@@ -1,8 +1,9 @@
 import { getAnalysisOptionDefs, normalizeAnalysisOptions, optionValue } from './analysisOptions'
 import { getTool } from './toolRegistry'
-import type { DryRunScript, PipelineSnapshot, RunState, ToolNodeData } from '../types/pipeline'
+import type { ArtifactRef, DryRunScript, PipelineSnapshot, RunState, ToolNodeData, TransferPlan } from '../types/pipeline'
 import type { WorkflowReadinessReport } from '../types/readiness'
-import type { BioflowWorkspace, RunManifest } from '../types/workspace'
+import type { BioflowWorkspace, ClusterDoctorReport, RunManifest, RunReadinessReport } from '../types/workspace'
+import { buildRunReadinessReport } from './runReadiness'
 
 type SnapshotNode = PipelineSnapshot['nodes'][number]
 type ValidationSummary = NonNullable<RunManifest['validation']>
@@ -22,6 +23,9 @@ interface BuildRunManifestOptions {
     }>
   }
   readiness?: WorkflowReadinessReport | null
+  runReadiness?: RunReadinessReport | null
+  clusterDoctor?: ClusterDoctorReport | null
+  transferPlans?: TransferPlan[]
 }
 
 export function buildRunManifest(
@@ -45,6 +49,14 @@ export function buildRunManifest(
     runnableCount > 0 ? `${completedCount} finished, ${failedCount} failed, and ${runnableCount - completedCount - failedCount} remain queued or in progress.` : 'No runnable steps are present yet.',
     run.workDir ? `Run folder: ${run.workDir}.` : '',
   ].filter(Boolean).join(' ')
+  const transferPlans = options.transferPlans ?? run.transferPlans ?? []
+  const runReadiness = options.runReadiness ?? run.runReadiness ?? buildRunReadinessReport({
+    validation: options.validation,
+    readiness: options.readiness,
+    clusterDoctor: options.clusterDoctor,
+    transferPlans,
+  })
+  const resultCards = buildResultCards(run, effectiveSnapshot)
 
   return {
     generatedAt: Date.now(),
@@ -92,6 +104,22 @@ export function buildRunManifest(
         path: issue.path,
       })),
     } : null,
+    runReadiness,
+    clusterDoctor: options.clusterDoctor ?? null,
+    transferPlans,
+    observedResources: Object.entries(run.nodes).map(([nodeId, node]) => ({
+      nodeId,
+      runtimeSeconds: node.startedAt && node.finishedAt ? Math.max(0, Math.round((node.finishedAt - node.startedAt) / 1000)) : undefined,
+      exitCode: node.exitCode,
+    })),
+    failureDiagnostics: Object.entries(run.nodes)
+      .filter(([, node]) => node.status === 'failed' && node.error)
+      .map(([nodeId, node]) => ({
+        nodeId,
+        cause: node.error ?? 'Step failed',
+        suggestion: 'Open the Jobs panel, inspect stderr, then rerun this step after adjusting settings.',
+      })),
+    resultCards,
     environment: {
       connectionId: run.connectionId,
       workDir: run.workDir,
@@ -111,6 +139,165 @@ export function buildRunManifest(
         paths: node.outputPaths ?? [],
       })),
   }
+}
+
+export function renderRunManifestMarkdown(report: RunManifest): string {
+  const lines: string[] = [
+    `# ${report.run.pipelineName || report.snapshot?.name || 'BioFlow Run'} Dossier`,
+    '',
+    report.summary,
+    '',
+    '## Run',
+    '',
+    `- Run ID: ${report.run.runId}`,
+    `- Status: ${report.run.status}`,
+    `- Work directory: ${report.environment.workDir}`,
+    `- Generated: ${new Date(report.generatedAt).toISOString()}`,
+    '',
+    '## Readiness',
+    '',
+    ...(report.runReadiness?.issues.length
+      ? report.runReadiness.issues.map((issue) => `- [${issue.severity}] ${issue.category}: ${issue.message}${issue.suggestion ? ` (${issue.suggestion})` : ''}`)
+      : ['- No readiness issues captured.']),
+    '',
+    '## Transfer Plan',
+    '',
+    ...(report.transferPlans?.length
+      ? report.transferPlans.map((plan) => `- ${plan.mode} ${plan.route}: ${plan.source.origin}:${plan.source.path} -> ${plan.target.origin}:${plan.target.path} (${plan.status})`)
+      : ['- No cross-backend transfers planned.']),
+    '',
+    '## Steps',
+    '',
+    ...report.steps.flatMap((step) => [
+      `### ${step.label}`,
+      '',
+      `- Type: ${step.nodeType}`,
+      `- Status: ${step.status ?? 'idle'}`,
+      `- Mode: ${step.mode ?? 'single'}`,
+      '',
+      step.plainLanguage,
+      '',
+      'Inputs:',
+      ...(step.inputs.length ? step.inputs.map((input) => `- ${input}`) : ['- None']),
+      '',
+      'Outputs:',
+      ...(step.outputs.length ? step.outputs.map((output) => `- ${output}`) : ['- None']),
+      '',
+    ]),
+    '## Results',
+    '',
+    ...(report.resultCards?.length
+      ? report.resultCards.flatMap((card) => [
+          `### ${card.label}`,
+          '',
+          `- Kind: ${card.kind}`,
+          `- Class: ${card.primary ? 'primary' : 'intermediate'}`,
+          ...card.artifacts.map((artifact) => `- ${artifact.origin}:${artifact.path}`),
+          '',
+        ])
+      : ['- No result cards generated.']),
+  ]
+  return lines.join('\n')
+}
+
+export function renderRunManifestHtml(report: RunManifest): string {
+  const markdown = renderRunManifestMarkdown(report)
+  const body = markdown
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('# ')) return `<h1>${escapeHtml(line.slice(2))}</h1>`
+      if (line.startsWith('## ')) return `<h2>${escapeHtml(line.slice(3))}</h2>`
+      if (line.startsWith('### ')) return `<h3>${escapeHtml(line.slice(4))}</h3>`
+      if (line.startsWith('- ')) return `<li>${escapeHtml(line.slice(2))}</li>`
+      if (!line.trim()) return ''
+      return `<p>${escapeHtml(line)}</p>`
+    })
+    .join('\n')
+  return [
+    '<!doctype html>',
+    '<html><head><meta charset="utf-8">',
+    `<title>${escapeHtml(report.run.pipelineName || report.snapshot?.name || 'BioFlow Run')} Dossier</title>`,
+    '<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:960px;margin:40px auto;padding:0 24px;line-height:1.45;color:#172033}h1,h2,h3{color:#111827}li{margin:4px 0}code,pre{background:#f3f4f6;padding:2px 4px;border-radius:4px}</style>',
+    '</head><body>',
+    body,
+    '</body></html>',
+  ].join('\n')
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function buildResultCards(
+  run: RunState,
+  snapshot: PipelineSnapshot | undefined,
+): NonNullable<RunManifest['resultCards']> {
+  const nodes = snapshot?.nodes ?? []
+  const edges = snapshot?.edges ?? []
+  return Object.entries(run.nodes)
+    .filter(([, node]) => (node.outputPaths?.length ?? 0) > 0)
+    .map(([nodeId, node]) => {
+      const snapshotNode = nodes.find((candidate) => candidate.id === nodeId)
+      const label = String(snapshotNode?.data?.label ?? nodeId)
+      const terminal = !edges.some((edge) => {
+        if (edge.source !== nodeId) return false
+        const target = nodes.find((candidate) => candidate.id === edge.target)
+        return target?.type === 'tool' || target?.type === 'merge' || target?.type === 'transform' || target?.type === 'transfer'
+      })
+      const artifacts: ArtifactRef[] = (node.outputPaths ?? []).map((path) => ({
+        origin: outputOrigin(snapshotNode),
+        path,
+        fileType: fileTypeFromPath(path),
+      }))
+      const explicitlyIntermediate = isExplicitIntermediate(snapshotNode)
+      return {
+        nodeId,
+        label,
+        kind: resultKind(label, artifacts.map((artifact) => artifact.path)),
+        primary: terminal && !explicitlyIntermediate,
+        artifacts,
+      }
+    })
+}
+
+function isExplicitIntermediate(node: PipelineSnapshot['nodes'][number] | undefined): boolean {
+  const values = (node?.data as { outputIntermediate?: Record<string, boolean> } | undefined)?.outputIntermediate
+  return values ? Object.values(values).some(Boolean) : false
+}
+
+function outputOrigin(node: PipelineSnapshot['nodes'][number] | undefined): ArtifactRef['origin'] {
+  if (!node) return 'ssh'
+  if (node.type === 'tool') return (node.data as ToolNodeData).backend === 'dnx' ? 'dnx' : 'ssh'
+  if (node.type === 'transfer') return String((node.data as { to?: string }).to ?? 'ssh') as ArtifactRef['origin']
+  if (node.type === 'file') return String((node.data as { origin?: string }).origin ?? 'ssh') as ArtifactRef['origin']
+  return 'ssh'
+}
+
+function resultKind(label: string, paths: string[]): NonNullable<RunManifest['resultCards']>[number]['kind'] {
+  const text = `${label} ${paths.join(' ')}`.toLowerCase()
+  if (text.includes('multiqc') || text.endsWith('.html')) return 'multiqc-report'
+  if (text.includes('gwas') || text.includes('glm') || text.includes('assoc')) return 'gwas-summary'
+  if (text.includes('profile') || text.includes('score') || text.includes('prs') || text.includes('grs')) return 'prs-profile'
+  if (text.includes('annovar') || text.includes('vep') || text.includes('annotation')) return 'variant-annotation'
+  if (text.endsWith('.log') || text.endsWith('.out') || text.endsWith('.err')) return 'log'
+  if (/\.(tsv|csv|txt)(\.gz)?$/.test(text)) return 'tabular'
+  return 'generic'
+}
+
+function fileTypeFromPath(path: string): ArtifactRef['fileType'] {
+  const lower = path.toLowerCase()
+  if (lower.endsWith('.vcf.gz') || lower.endsWith('.vcf')) return 'vcf'
+  if (lower.endsWith('.bcf')) return 'bcf'
+  if (lower.endsWith('.bam')) return 'bam'
+  if (lower.endsWith('.cram')) return 'cram'
+  if (lower.endsWith('.tsv') || lower.endsWith('.tsv.gz')) return 'tsv'
+  if (lower.endsWith('.csv')) return 'csv'
+  if (lower.endsWith('.txt') || lower.endsWith('.log') || lower.endsWith('.out') || lower.endsWith('.err')) return 'txt'
+  return 'any'
 }
 
 function buildStep(

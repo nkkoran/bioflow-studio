@@ -458,7 +458,11 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const input = resolvedInputs.input
       const slug = ctx.nodeSlug?.(nodeId) ?? nodeId
       const outputRoot = ctx.outputRootForNode?.(node) ?? ctx.outputRoot
-      const outputDir = resolveNodeOutputDir(undefined, outputRoot, slug, ctx.homeDir)
+      const targetFolder =
+        data.to === 'dnx' ? data.dnxFolder
+        : data.to === 'ssh' ? data.sshFolder
+        : data.localFolder || '~/BioFlow/transfers'
+      const outputDir = resolveNodeOutputDir(targetFolder, outputRoot, slug, ctx.homeDir)
       const nameFor = (index: number, sourcePath: string) => {
         const explicit = data.outputName?.trim()
         if (!explicit) return pathBasename(sourcePath) || `${slug}.${index + 1}`
@@ -503,8 +507,9 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
 
     // Find candidate axed ports: a non-multi port whose resolvedInput kind === 'array'
     const axedCandidates: Array<{ portId: string; axis: string; keys: string[]; paths: string[] }> = []
+    const activeInputDefs = getActiveToolInputs(tool, toolData, { connectedPortIds: Object.keys(resolvedInputs) })
     for (const [portId, val] of Object.entries(resolvedInputs)) {
-      const portDef = tool.inputs.find((p) => p.id === portId)
+      const portDef = activeInputDefs.find((p) => p.id === portId)
       if (!portDef) continue
       if (portDef.multi) continue // multi ports absorb axis (fanIn)
       if (portDef.arrayable === false) continue
@@ -517,6 +522,8 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     let axis: string | undefined
     let keys: string[] | undefined
     let arrayPortId: string | undefined
+
+    const alignedAxedCandidates = coAxedCandidates(axedCandidates)
 
     if (toolData.arrayOver === null) {
       // Explicit opt-out. If any axed candidate exists, it's ambiguous.
@@ -538,6 +545,14 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
           `arrayOver=${toolData.arrayOver} but no axed input on that port`,
         )
       }
+      const aligned = coAxedCandidates(axedCandidates, picked)
+      if (!aligned.ok) {
+        throw new AxisPlanError(
+          'MULTIPLE_AXES_KEY_MISMATCH',
+          nodeId,
+          `Node ${nodeId} has multiple axed inputs, but their axes or keys do not match`,
+        )
+      }
       mode = 'array'
       axis = picked.axis
       keys = picked.keys
@@ -548,6 +563,12 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
         mode = dependsOnArrayNodeIds.size > 0 ? 'fanIn' : 'single'
       } else if (axedCandidates.length === 1) {
         const c = axedCandidates[0]
+        mode = 'array'
+        axis = c.axis
+        keys = c.keys
+        arrayPortId = c.portId
+      } else if (alignedAxedCandidates.ok) {
+        const c = alignedAxedCandidates.reference!
         mode = 'array'
         axis = c.axis
         keys = c.keys
@@ -623,6 +644,19 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
   }
 
   return plans
+}
+
+function coAxedCandidates(
+  candidates: Array<{ portId: string; axis: string; keys: string[]; paths: string[] }>,
+  reference = candidates[0],
+): { ok: boolean; reference?: { portId: string; axis: string; keys: string[]; paths: string[] } } {
+  if (candidates.length === 0 || !reference) return { ok: false }
+  const ok = candidates.every((candidate) =>
+    candidate.axis === reference.axis &&
+    candidate.keys.length === reference.keys.length &&
+    candidate.keys.every((key, index) => key === reference.keys[index]),
+  )
+  return ok ? { ok: true, reference } : { ok: false, reference }
 }
 
 function portIsMulti(

@@ -20,23 +20,24 @@ interface FileStore {
   selectFile: (path: string) => void
   deselectFile: (path: string) => void
   clearSelection: () => void
+  loadPreferences: () => Promise<void>
 }
 
 /**
  * Route file operations through either local or SFTP based on connection type.
  */
-async function listDirectory(path: string): Promise<RemoteFileEntry[]> {
+async function listDirectory(path: string, opts: { force?: boolean } = {}): Promise<RemoteFileEntry[]> {
   const { activeConnectionId } = useConnectionStore.getState()
   if (!activeConnectionId) throw new Error('Not connected')
 
   const request = activeConnectionId === LOCAL_CONNECTION_ID
     ? window.api.local.ls(path)
-    : window.api.sftp.ls(activeConnectionId, path)
+    : window.api.sftp.ls(activeConnectionId, path, opts)
 
   const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
     window.setTimeout(() => {
-      reject(new Error('Directory listing timed out. Please retry.'))
-    }, 15000)
+      reject(new Error('Directory listing timed out. Please retry or narrow the folder/search.'))
+    }, activeConnectionId === LOCAL_CONNECTION_ID ? 15000 : 60000)
   })
 
   if (activeConnectionId === LOCAL_CONNECTION_ID) {
@@ -93,6 +94,13 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
+function persistFileExplorerPreferences(bookmarks: string[], sortField: SortField, sortDirection: SortDirection): void {
+  if (typeof window === 'undefined' || !window.api?.store) return
+  void window.api.store.set('fileExplorer:preferences', { bookmarks, sortField, sortDirection }).catch((err) => {
+    console.warn('[fileStore] failed to persist preferences:', err)
+  })
+}
+
 export const useFileStore = create<FileStore>((set, get) => ({
   cwd: '~',
   entries: [],
@@ -116,22 +124,35 @@ export const useFileStore = create<FileStore>((set, get) => ({
 
   refresh: async () => {
     const { cwd } = get()
-    await get().navigate(cwd)
+    set({ loading: true, error: null })
+    try {
+      const entries = await listDirectory(cwd, { force: true })
+      set({ entries, loading: false })
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to list directory'
+      set({ error: message, loading: false })
+    }
   },
 
   addBookmark: (path) =>
-    set((state) =>
-      state.bookmarks.includes(path)
-        ? state
-        : { bookmarks: [...state.bookmarks, path] }
-    ),
+    set((state) => {
+      if (state.bookmarks.includes(path)) return state
+      const bookmarks = [...state.bookmarks, path]
+      persistFileExplorerPreferences(bookmarks, state.sortField, state.sortDirection)
+      return { bookmarks }
+    }),
 
   removeBookmark: (path) =>
-    set((state) => ({
-      bookmarks: state.bookmarks.filter((b) => b !== path),
-    })),
+    set((state) => {
+      const bookmarks = state.bookmarks.filter((b) => b !== path)
+      persistFileExplorerPreferences(bookmarks, state.sortField, state.sortDirection)
+      return { bookmarks }
+    }),
 
-  setSort: (field, direction) => set({ sortField: field, sortDirection: direction }),
+  setSort: (field, direction) => set((state) => {
+    persistFileExplorerPreferences(state.bookmarks, field, direction)
+    return { sortField: field, sortDirection: direction }
+  }),
 
   selectFile: (path) =>
     set((state) =>
@@ -146,4 +167,26 @@ export const useFileStore = create<FileStore>((set, get) => ({
     })),
 
   clearSelection: () => set({ selectedPaths: [] }),
+
+  loadPreferences: async () => {
+    if (typeof window === 'undefined' || !window.api?.store) return
+    const stored = await window.api.store.get<{
+      bookmarks?: unknown
+      sortField?: unknown
+      sortDirection?: unknown
+    }>('fileExplorer:preferences')
+    if (!stored || typeof stored !== 'object') return
+    const bookmarks = Array.isArray(stored.bookmarks)
+      ? stored.bookmarks.filter((value): value is string => typeof value === 'string')
+      : get().bookmarks
+    const sortField = isSortField(stored.sortField) ? stored.sortField : get().sortField
+    const sortDirection = stored.sortDirection === 'desc' || stored.sortDirection === 'asc'
+      ? stored.sortDirection
+      : get().sortDirection
+    set({ bookmarks, sortField, sortDirection })
+  },
 }))
+
+function isSortField(value: unknown): value is SortField {
+  return value === 'name' || value === 'size' || value === 'modified' || value === 'extension'
+}

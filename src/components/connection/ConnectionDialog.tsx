@@ -55,13 +55,27 @@ const initialFormData: FormData = {
 // Saved connections stored locally for quick access
 const STORAGE_KEY = 'bioflow-saved-connections'
 
-function loadSavedConnections(): ConnectionConfig[] {
+function loadSavedConnectionsFallback(): ConnectionConfig[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     return raw ? JSON.parse(raw) : []
   } catch {
     return []
   }
+}
+
+async function loadSavedConnections(): Promise<ConnectionConfig[]> {
+  try {
+    const stored = await window.api.store.get<ConnectionConfig[]>(STORAGE_KEY)
+    if (Array.isArray(stored)) return stored
+  } catch {
+    // Fall through to the legacy localStorage value.
+  }
+  const fallback = loadSavedConnectionsFallback()
+  if (fallback.length > 0) {
+    await window.api.store.set(STORAGE_KEY, fallback).catch(() => undefined)
+  }
+  return fallback
 }
 
 function connectionSecretKey(config: Pick<ConnectionConfig, 'host' | 'port' | 'username'>): string {
@@ -77,7 +91,7 @@ async function hydrateRememberedPasswords(configs: ConnectionConfig[]): Promise<
 }
 
 async function saveConnection(config: ConnectionConfig) {
-  const existing = loadSavedConnections()
+  const existing = await loadSavedConnections()
   const filtered = existing.filter((c) => c.name !== config.name)
   if (config.authMethod === 'password' && config.rememberPassword && config.password) {
     await window.api.store.setSecret(connectionSecretKey(config), config.password)
@@ -86,10 +100,13 @@ async function saveConnection(config: ConnectionConfig) {
   }
   // Strip password/passphrase before saving; password persistence is explicit.
   const { password: _pw, passphrase: _pp, ...safe } = config
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify([safe, ...filtered].slice(0, 10)),
-  )
+  const next = [safe as ConnectionConfig, ...filtered].slice(0, 10)
+  await window.api.store.set(STORAGE_KEY, next)
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  } catch {
+    // App store is the source of truth; localStorage is only a migration fallback.
+  }
 }
 
 export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
@@ -120,8 +137,8 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
 
   useEffect(() => {
     if (open) {
-      void hydrateRememberedPasswords(loadSavedConnections()).then(setSavedConnections).catch(() => {
-        setSavedConnections(loadSavedConnections())
+      void loadSavedConnections().then(hydrateRememberedPasswords).then(setSavedConnections).catch(() => {
+        void hydrateRememberedPasswords(loadSavedConnectionsFallback()).then(setSavedConnections)
       })
       setErrors({})
       setConnectError(null)
@@ -368,7 +385,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
         <div className="grid grid-cols-[1fr_80px] gap-2">
           <Input
             label="Host"
-            placeholder="rorqual.mcgill.ca"
+            placeholder="rorqual.alliancecan.ca"
             value={form.host}
             onChange={(e) => updateField('host', e.target.value)}
             error={errors.host}
@@ -650,7 +667,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
           </div>
           <div className="rounded-md border border-border bg-bg-primary p-2 text-[11px] leading-relaxed">
             <div><strong className="text-text-primary">What these do:</strong> the SSH key proves this device can log in, the alias gives you a short terminal command, and the OpenSSH session settings can reduce repeated Duo/TOTP prompts during one workday in Terminal sessions.</div>
-            <div className="mt-1">BioFlow will still keep showing MFA prompts in-app if the cluster requires them for new app sessions.</div>
+            <div className="mt-1">BioFlow also uses the keepalive interval for its in-app SSH socket so the already-authenticated session stays reusable while the app is open.</div>
           </div>
           <div className="rounded-md border border-accent/20 bg-accent/10 p-2 text-[11px]">
             Some clusters still require keyboard-interactive MFA after key auth. If that happens, BioFlow will keep showing the MFA prompt and will not claim the connection is fully passwordless.

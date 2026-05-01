@@ -10,7 +10,7 @@ import { DataTable } from './DataTable'
 import { RawTextView } from './RawTextView'
 import { SavedViewsMenu } from './SavedViewsMenu'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
-import { Table2, Loader2, AlertCircle } from 'lucide-react'
+import { Table2, Loader2, AlertCircle, Clipboard, ClipboardCheck, ClipboardPaste } from 'lucide-react'
 import { joinRemotePath, pathBasename, pathDirname } from '@/lib/remotePath'
 import { useDialogStore } from '@/stores/dialogStore'
 import { exportBugReport } from '@/lib/bugReport'
@@ -35,6 +35,7 @@ export function DataPreview() {
     updateSavedView,
     renameSavedView,
     deleteSavedView,
+    openText,
   } = useDataPreviewStore()
   const addTransformNode = usePipelineStore((s) => s.addTransformNode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
@@ -43,6 +44,7 @@ export function DataPreview() {
   const loadingRef = useRef(new Set<string>())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({})
+  const [copyMessage, setCopyMessage] = useState<string | null>(null)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const alertDialog = useDialogStore((s) => s.alert)
   const promptDialog = useDialogStore((s) => s.prompt)
@@ -154,11 +156,39 @@ export function DataPreview() {
     }
   }, [tabs, setTabData])
 
+  const pasteRawText = async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text.trim()) {
+        await alertDialog({ title: 'Clipboard is empty', message: 'No text was available to paste into the preview pane.' })
+        return
+      }
+      openText('Pasted text', text)
+    } catch (err: any) {
+      await alertDialog({ title: 'Could not read clipboard', message: err?.message ?? String(err) })
+    }
+  }
+
+  const copyRawText = async (text: string) => {
+    await navigator.clipboard.writeText(text)
+    setCopyMessage('Copied')
+    window.setTimeout(() => setCopyMessage(null), 1600)
+  }
+
   if (tabs.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted">
         <Table2 size={32} strokeWidth={1.5} />
         <span className="text-sm">Double-click a file to preview</span>
+        <button
+          type="button"
+          onClick={() => void pasteRawText()}
+          className="inline-flex h-7 items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[11px] text-text-secondary hover:text-text-primary"
+          title="Paste clipboard text into a raw preview tab"
+        >
+          <ClipboardPaste size={13} />
+          Paste text
+        </button>
       </div>
     )
   }
@@ -328,9 +358,20 @@ export function DataPreview() {
           {errors[activeTab.id] && (
             <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
           )}
+          {activeTab.data?.rawText !== undefined && activeTab.data.rawText.length > 0 && (
+            <button
+              type="button"
+              className="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border bg-bg-tertiary px-2 text-[11px] text-text-muted hover:text-text-primary"
+              title="Copy the raw preview text to the clipboard"
+              onClick={() => void copyRawText(activeTab.data?.rawText ?? '')}
+            >
+              {copyMessage ? <ClipboardCheck size={13} className="text-success" /> : <Clipboard size={13} />}
+              {copyMessage ?? 'Copy all'}
+            </button>
+          )}
           <button
             type="button"
-            className="ml-auto shrink-0 text-[11px] text-text-muted hover:text-accent"
+            className={`${activeTab.data?.rawText !== undefined && activeTab.data.rawText.length > 0 ? '' : 'ml-auto'} shrink-0 text-[11px] text-text-muted hover:text-accent`}
             title="Save a bug report with the current file state and app context"
             onClick={() => void exportBugReport({
               title: 'data-preview-issue',

@@ -447,9 +447,9 @@ export function instantiateTemplate(template: PipelineTemplate): PipelineSnapsho
     updatedAt: stamp,
     nodes: template.snapshot.nodes.map((node) => ({
       ...node,
-      data: { ...node.data },
+      data: structuredClone(node.data),
     })),
     edges: template.snapshot.edges.map((edge) => ({ ...edge })),
-    groups: template.snapshot.groups?.map((group) => ({ ...group, nodeIds: [...group.nodeIds] })),
+    groups: structuredClone(template.snapshot.groups),
   }
 }

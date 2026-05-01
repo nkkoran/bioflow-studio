@@ -66,8 +66,12 @@ export interface AnalysisValidationIssue {
 }
 
 const PLINK_ASSOC_GLM_MODIFIERS = ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']
-const PLINK_SCORE_MODIFIERS = ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation']
+const PLINK_SCORE_MODIFIERS = ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation', 'ignore-dup-ids']
 const PLINK_OPTIONAL_FILE_DEFAULT_OFF = new Set(['keep', 'remove', 'keep-fam', 'remove-fam', 'extract'])
+
+export function customFileOptionPortId(option: Pick<AnalysisOptionState, 'optionId'>): string {
+  return `custom_${option.optionId.replace(/[^A-Za-z0-9_]/g, '_')}`
+}
 
 function source(kind: ValueSource['kind'], value?: string, portId?: string): ValueSource {
   return { kind, value, portId }
@@ -194,7 +198,7 @@ function plinkOptionDefs(tool: ToolDef): AnalysisOptionDef[] {
       option.kind = 'compound'
       option.requiredValue = true
       option.defaultEnabled = true
-      option.defaultValue = flagDef.defaultValue ?? 'firth-fallback'
+      option.defaultValue = flagDef.defaultValue ?? 'hide-covar'
       option.subOptions = PLINK_ASSOC_GLM_MODIFIERS.map((id) => {
         const sub = getFlagDef(tool.id, id)
         return {
@@ -378,9 +382,11 @@ export function getEnabledAnalysisOptions(tool: ToolDef, nodeData: ToolNodeData,
 }
 
 export function getActiveToolInputs(tool: ToolDef, nodeData: ToolNodeData, opts: { connectedPortIds?: Iterable<string> } = {}): ToolPort[] {
+  if (tool.id === 'custom.shell') return tool.inputs
   const options = normalizeAnalysisOptions(tool, nodeData, opts)
   const enabledFilePorts = new Set<string>()
   const defsById = new Map(getAnalysisOptionDefs(tool).map((def) => [def.id, def]))
+  const customPorts: ToolPort[] = []
   for (const option of options) {
     if (!option.enabled) continue
     const def = defsById.get(option.optionId)
@@ -388,8 +394,24 @@ export function getActiveToolInputs(tool: ToolDef, nodeData: ToolNodeData, opts:
     if (def?.kind === 'file' || def?.kind === 'compound') {
       if (portId) enabledFilePorts.add(portId)
     }
+    if (def?.kind === 'column' && portId) enabledFilePorts.add(portId)
+    if (!def && option.customInputKind === 'file') {
+      const source = option.source ?? (isValueSource(option.value) ? option.value : undefined)
+      if (source?.kind !== 'upstream-file') continue
+      const customPortId = source.portId || customFileOptionPortId(option)
+      customPorts.push({
+        id: customPortId,
+        label: option.customLabel?.trim() || option.customFlag?.trim() || 'Custom file',
+        description: `File value for ${option.customFlag?.trim() || 'custom flag'}.`,
+        fileType: 'any',
+        arrayable: true,
+      })
+    }
   }
-  return tool.inputs.filter((port) => port.required || enabledFilePorts.has(port.id))
+  return [
+    ...tool.inputs.filter((port) => port.required || enabledFilePorts.has(port.id)),
+    ...customPorts,
+  ]
 }
 
 export function isToolInputActive(tool: ToolDef, nodeData: ToolNodeData, portId: string, opts: { connectedPortIds?: Iterable<string> } = {}): boolean {
@@ -521,12 +543,30 @@ export function previewAnalysisCommand(tool: ToolDef, nodeData: ToolNodeData, co
   const mainInput = tool.inputs.find((port) => port.id === 'input')
   if (mainInput) {
     const path = connectedPathForPort(mainInput.id)
-    if (path) parts.push(`${tool.command.includes('plink') ? '--pfile' : ''} ${path}`.trim())
+    if (path && tool.command.includes('plink')) {
+      const prefix = plinkPrefixPath(path)
+      parts.push(`${plinkInputFlag(path)} ${prefix}`.trim())
+    } else if (path) {
+      parts.push(path)
+    }
   }
   for (const option of options) {
     if (!option.enabled) continue
     const def = defsById.get(option.optionId)
-    if (!def?.flag) continue
+    if (!def) {
+      if (!option.customFlag?.trim()) continue
+      if (option.customInputKind === 'file') {
+        const source = option.source ?? (isValueSource(option.value) ? option.value : undefined)
+        const portId = source?.portId || customFileOptionPortId(option)
+        const value = source?.kind === 'upstream-file' ? connectedPathForPort(portId) : source?.value
+        parts.push(`${option.customFlag.trim()} ${value || `<${portId}>`}`)
+      } else {
+        const value = option.value === undefined || option.value === null || option.value === '' ? '' : ` ${option.value}`
+        parts.push(`${option.customFlag.trim()}${value}`)
+      }
+      continue
+    }
+    if (!def.flag) continue
     if (def.kind === 'switch') {
       parts.push(def.flag)
     } else if (def.kind === 'file' || (def.kind === 'compound' && def.filePortId)) {
@@ -543,8 +583,13 @@ export function previewAnalysisCommand(tool: ToolDef, nodeData: ToolNodeData, co
       parts.push(`${def.flag} ${value || `<${def.filePortId ?? 'file'}>`}${extras.length ? ` ${extras.join(' ')}` : ''}`)
     } else if (def.kind === 'compound') {
       const value = optionValue(option)
+      const mainTokens = value === undefined || value === null || value === ''
+        ? []
+        : tool.id === 'plink2.assoc' && def.id === 'glm' && String(value) === 'hide-covar'
+          ? ['hide-covar']
+          : [String(value)]
       const tokens = [
-        ...(value === undefined || value === null || value === '' ? [] : [String(value)]),
+        ...mainTokens,
         ...(def.subOptions ?? []).flatMap((sub) => {
           const subState = option.subOptions?.[sub.id]
           if (!subState?.enabled) return []
@@ -552,7 +597,7 @@ export function previewAnalysisCommand(tool: ToolDef, nodeData: ToolNodeData, co
           return subState.value === undefined || subState.value === null || subState.value === '' ? [] : [String(subState.value)]
         }),
       ]
-      parts.push(`${def.flag}${tokens.length ? ` ${tokens.join(' ')}` : ''}`)
+      parts.push(`${def.flag}${tokens.length ? ` ${[...new Set(tokens)].join(' ')}` : ''}`)
     } else {
       const value = optionValue(option)
       if (value !== undefined && value !== null && value !== '') parts.push(`${def.flag} ${value}`)
@@ -560,6 +605,15 @@ export function previewAnalysisCommand(tool: ToolDef, nodeData: ToolNodeData, co
   }
   parts.push('--out <output-prefix>')
   return parts.filter(Boolean).join(' \\\n  ')
+}
+
+function plinkInputFlag(path: string): string {
+  return /\.bed$/i.test(path) ? '--bfile' : '--pfile'
+}
+
+function plinkPrefixPath(path: string): string {
+  if (/\.(pgen|pvar|psam|bed|bim|fam)$/i.test(path)) return path.slice(0, path.lastIndexOf('.'))
+  return path
 }
 
 export function legacyFlagForAnalysisOption(toolId: string, option: AnalysisOptionState): string {

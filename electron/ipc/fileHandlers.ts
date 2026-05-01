@@ -1,11 +1,23 @@
-import { ipcMain } from 'electron'
+import { BrowserWindow, ipcMain } from 'electron'
 import { SftpPool } from '../ssh/SftpPool'
+
+function broadcastTransferProgress(payload: {
+  connectionId: string
+  direction: 'upload' | 'download'
+  localPath: string
+  remotePath: string
+  bytesTransferred: number
+  totalBytes?: number
+}): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win) win.webContents.send('sftp:transfer-progress', payload)
+}
 
 export function registerFileHandlers(): void {
   const pool = SftpPool.getInstance()
 
-  ipcMain.handle('sftp:ls', async (_event, connectionId: string, remotePath: string) => {
-    return pool.ls(connectionId, remotePath)
+  ipcMain.handle('sftp:ls', async (_event, connectionId: string, remotePath: string, opts?: { force?: boolean }) => {
+    return pool.ls(connectionId, remotePath, opts)
   })
 
   ipcMain.handle('sftp:stat', async (_event, connectionId: string, remotePath: string) => {
@@ -41,6 +53,14 @@ export function registerFileHandlers(): void {
   })
 
   ipcMain.handle('sftp:upload', async (_event, connectionId: string, localPath: string, remotePath: string) => {
-    return pool.upload(connectionId, localPath, remotePath)
+    return pool.upload(connectionId, localPath, remotePath, (bytesTransferred, totalBytes) => {
+      broadcastTransferProgress({ connectionId, direction: 'upload', localPath, remotePath, bytesTransferred, totalBytes })
+    })
+  })
+
+  ipcMain.handle('sftp:download', async (_event, connectionId: string, remotePath: string, localPath: string) => {
+    return pool.download(connectionId, remotePath, localPath, (bytesTransferred, totalBytes) => {
+      broadcastTransferProgress({ connectionId, direction: 'download', localPath, remotePath, bytesTransferred, totalBytes })
+    })
   })
 }

@@ -8,6 +8,8 @@ import {
   unlinkSync,
   writeFileSync,
   existsSync,
+  copyFileSync,
+  rmSync,
 } from 'fs'
 import { join, extname, basename } from 'path'
 import { homedir } from 'os'
@@ -127,8 +129,15 @@ export function registerLocalFileHandlers(): void {
     renameSync(resolvePath(oldPath), resolvePath(newPath))
   })
 
+  ipcMain.handle('local:copy', async (_event, oldPath: string, newPath: string): Promise<void> => {
+    copyFileSync(resolvePath(oldPath), resolvePath(newPath))
+  })
+
   ipcMain.handle('local:delete', async (_event, filePath: string): Promise<void> => {
-    unlinkSync(resolvePath(filePath))
+    const resolved = resolvePath(filePath)
+    const stats = statSync(resolved)
+    if (stats.isDirectory()) rmSync(resolved, { recursive: true, force: true })
+    else unlinkSync(resolved)
   })
 
   ipcMain.handle('local:write', async (_event, filePath: string, content: string): Promise<void> => {

@@ -4,7 +4,7 @@ import { SftpPool } from '../ssh/SftpPool'
 import { getSettingsStore } from '../store/settingsStore'
 import { PipelineRunner } from '../pipeline/PipelineRunner'
 import type { RunState } from '../../src/types/pipeline'
-import type { ClusterModuleSuggestion } from '../../src/types/ssh'
+import type { ClusterModuleCheckResult, ClusterModuleSuggestion } from '../../src/types/ssh'
 import {
   parseSacctElapsedHours,
   parseSacctMemoryGB,
@@ -50,31 +50,36 @@ export function registerClusterHandlers(): void {
 
   ipcMain.handle('cluster:listModules', async (_event, connectionId: string, query?: string) => {
     const needle = String(query ?? '').trim()
-    const commands: Array<{ source: 'module-spider' | 'module-avail'; command: string }> = [
-      {
-        source: 'module-spider',
-        command: needle
-          ? `module spider ${shellWord(needle)} 2>&1`
-          : 'module -t avail 2>&1',
-      },
-      {
-        source: 'module-avail',
-        command: needle
-          ? `module -t avail ${shellWord(needle)} 2>&1`
-          : 'module -t avail 2>&1',
-      },
-    ]
+    return queryModuleSuggestions(manager, connectionId, needle)
+  })
 
-    for (const attempt of commands) {
-      const result = await manager.exec(connectionId, attempt.command)
-      const text = `${result.stdout}\n${result.stderr}`.trim()
-      const modules = parseModuleSuggestions(text, needle)
-      if (modules.length > 0) {
-        return { modules, source: attempt.source, cachedAt: Date.now() }
+  ipcMain.handle('cluster:checkModules', async (_event, connectionId: string, modules: string[]): Promise<ClusterModuleCheckResult> => {
+    const requested = [...new Set(modules.map((moduleName) => String(moduleName ?? '').trim()).filter(Boolean))]
+    const checks: ClusterModuleCheckResult['checks'] = []
+    for (const moduleName of requested) {
+      const quotedModule = shellWord(moduleName)
+      const result = await manager.exec(
+        connectionId,
+        [
+          'module --force purge >/dev/null 2>&1 || true',
+          'module load StdEnv/2023 >/dev/null 2>&1 || true',
+          `(module --ignore_cache load ${quotedModule} 2>&1 || module load ${quotedModule} 2>&1)`,
+        ].join('; '),
+      )
+      if (result.exitCode === 0) {
+        checks.push({ requested: moduleName, ok: true, suggestions: [] })
+        continue
       }
+      const baseName = moduleName.split('/')[0] || moduleName
+      const suggestions = (await queryModuleSuggestions(manager, connectionId, baseName)).modules
+      checks.push({
+        requested: moduleName,
+        ok: false,
+        suggestions,
+        message: firstUsefulLine(`${result.stderr}\n${result.stdout}`) || `Could not load module ${moduleName}.`,
+      })
     }
-
-    return { modules: [], source: 'module-avail' as const, cachedAt: Date.now() }
+    return { checks, cachedAt: Date.now() }
   })
 
   ipcMain.handle('cluster:getLearnedResources', async (_event, connectionId: string, toolId: string, options?: { force?: boolean }) => {
@@ -120,6 +125,41 @@ function uniqueLines(text: string): string[] {
 function shellWord(value: string): string {
   if (/^[A-Za-z0-9._+\-]+$/.test(value)) return value
   return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+async function queryModuleSuggestions(manager: SshManager, connectionId: string, needle: string) {
+  const commands: Array<{ source: 'module-spider' | 'module-avail'; command: string }> = [
+    {
+      source: 'module-spider',
+      command: needle
+        ? `module spider ${shellWord(needle)} 2>&1`
+        : 'module -t avail 2>&1',
+    },
+    {
+      source: 'module-avail',
+      command: needle
+        ? `module -t avail ${shellWord(needle)} 2>&1`
+        : 'module -t avail 2>&1',
+    },
+  ]
+
+  for (const attempt of commands) {
+    const result = await manager.exec(connectionId, attempt.command)
+    const text = `${result.stdout}\n${result.stderr}`.trim()
+    const modules = parseModuleSuggestions(text, needle)
+    if (modules.length > 0) {
+      return { modules, source: attempt.source, cachedAt: Date.now() }
+    }
+  }
+
+  return { modules: [], source: 'module-avail' as const, cachedAt: Date.now() }
+}
+
+function firstUsefulLine(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith('-')) ?? ''
 }
 
 function parseModuleSuggestions(text: string, query: string): ClusterModuleSuggestion[] {

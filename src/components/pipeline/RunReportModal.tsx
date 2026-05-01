@@ -9,7 +9,7 @@ interface Props {
   onClose: () => void
 }
 
-type ViewTab = 'summary' | 'steps' | 'commands' | 'scripts' | 'json'
+type ViewTab = 'summary' | 'readiness' | 'transfers' | 'results' | 'steps' | 'commands' | 'scripts' | 'json'
 
 export function RunReportModal({ report, onClose }: Props) {
   const [tab, setTab] = useState<ViewTab>('summary')
@@ -25,6 +25,9 @@ export function RunReportModal({ report, onClose }: Props) {
     if (tab === 'commands') return selectedStep.commands.join('\n\n')
     if (tab === 'scripts') return selectedStep.script ?? ''
     if (tab === 'json') return JSON.stringify(report, null, 2)
+    if (tab === 'readiness') return readinessText(report)
+    if (tab === 'transfers') return transferText(report)
+    if (tab === 'results') return resultText(report)
     return `${selectedStep.plainLanguage}\n\nInputs:\n${selectedStep.inputs.join('\n') || 'None'}\n\nOutputs:\n${selectedStep.outputs.join('\n') || 'None'}`
   }, [report, selectedStep, tab])
 
@@ -53,6 +56,9 @@ export function RunReportModal({ report, onClose }: Props) {
           <Tabs
             tabs={[
               { id: 'summary', label: 'Summary' },
+              { id: 'readiness', label: 'Readiness' },
+              { id: 'transfers', label: 'Transfers' },
+              { id: 'results', label: 'Results' },
               { id: 'steps', label: 'Steps' },
               { id: 'commands', label: 'Commands' },
               { id: 'scripts', label: 'Scripts' },
@@ -83,10 +89,12 @@ export function RunReportModal({ report, onClose }: Props) {
             <div className="flex items-center gap-2 border-b border-border-light bg-bg-secondary/30 px-3 py-2">
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs font-medium text-text-primary">
-                  {tab === 'summary' ? report.run.pipelineName || report.snapshot?.name || 'Run summary' : selectedStep?.label || 'No step selected'}
+                  {tab === 'summary' || tab === 'readiness' || tab === 'transfers' || tab === 'results'
+                    ? report.run.pipelineName || report.snapshot?.name || 'Run summary'
+                    : selectedStep?.label || 'No step selected'}
                 </div>
                 <div className="truncate text-[10px] text-text-muted">
-                  {tab === 'summary'
+                  {tab === 'summary' || tab === 'readiness' || tab === 'transfers' || tab === 'results'
                     ? report.summary
                     : selectedStep?.plainLanguage || 'No step details available.'}
                 </div>
@@ -108,10 +116,61 @@ export function RunReportModal({ report, onClose }: Props) {
                   <div className="rounded-md border border-border bg-bg-secondary p-3 text-text-primary">{report.summary}</div>
                   <div className="grid gap-2 md:grid-cols-2">
                     <InfoCard label="Validation" value={summarizeValidation(report.validation)} />
-                    <InfoCard label="Readiness" value={summarizeReadiness(report.readiness)} />
+                    <InfoCard label="Run readiness" value={summarizeRunReadiness(report.runReadiness, report.readiness)} />
+                    <InfoCard label="Transfers" value={`${report.transferPlans?.length ?? 0} planned`} />
+                    <InfoCard label="Result cards" value={`${report.resultCards?.length ?? 0} classified`} />
                     <InfoCard label="Run folder" value={report.environment.workDir} />
                     <InfoCard label="Lifecycle" value={report.environment.fileLifecyclePolicy ?? 'keep-all'} />
                   </div>
+                </div>
+              )}
+
+              {tab === 'readiness' && (
+                <div className="flex flex-col gap-2">
+                  {(report.runReadiness?.issues.length ?? 0) === 0 ? (
+                    <Section label="Run readiness" body="No readiness issues captured." />
+                  ) : report.runReadiness?.issues.map((issue, index) => (
+                    <IssueSection key={`${issue.code}-${issue.nodeId ?? issue.edgeId ?? index}`} issue={issue} />
+                  ))}
+                </div>
+              )}
+
+              {tab === 'transfers' && (
+                <div className="flex flex-col gap-2">
+                  {(report.transferPlans?.length ?? 0) === 0 ? (
+                    <Section label="Transfer plan" body="No cross-backend transfers were planned for this run." />
+                  ) : report.transferPlans?.map((plan) => (
+                    <Section
+                      key={plan.id}
+                      label={`${plan.mode === 'implicit' ? 'Implicit' : 'Explicit'} ${plan.route}`}
+                      body={[
+                        `Source: ${formatArtifact(plan.source)}`,
+                        `Target: ${formatArtifact(plan.target)}`,
+                        `Status: ${plan.status}`,
+                        plan.totalBytes ? `Bytes: ${plan.bytesTransferred ?? 0} / ${plan.totalBytes}` : null,
+                        plan.warnings?.length ? `Warnings: ${plan.warnings.join(' ')}` : null,
+                      ].filter(Boolean).join('\n')}
+                      mono
+                    />
+                  ))}
+                </div>
+              )}
+
+              {tab === 'results' && (
+                <div className="flex flex-col gap-2">
+                  {(report.resultCards?.length ?? 0) === 0 ? (
+                    <Section label="Results" body="No result cards were generated." />
+                  ) : report.resultCards?.map((card) => (
+                    <Section
+                      key={`${card.nodeId}-${card.kind}`}
+                      label={`${card.primary ? 'Primary' : 'Intermediate'} ${card.kind}`}
+                      body={[
+                        card.label,
+                        ...card.artifacts.map((artifact) => formatArtifact(artifact)),
+                      ].join('\n')}
+                      mono
+                    />
+                  ))}
                 </div>
               )}
 
@@ -169,16 +228,78 @@ function Section({ label, body, mono = false }: { label: string; body: string; m
   )
 }
 
+function IssueSection({ issue }: { issue: NonNullable<RunManifest['runReadiness']>['issues'][number] }) {
+  return (
+    <div className="rounded-md border border-border bg-bg-secondary p-3">
+      <div className="flex items-center gap-2">
+        <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(issue.severity)}`}>{issue.severity}</span>
+        <span className="text-[10px] uppercase tracking-wide text-text-muted">{issue.category}</span>
+        {issue.action && <span className="text-[10px] text-text-muted">Action: {issue.action}</span>}
+      </div>
+      <div className="mt-2 text-sm text-text-primary">{issue.message}</div>
+      {issue.suggestion && <div className="mt-1 text-xs text-text-secondary">{issue.suggestion}</div>}
+    </div>
+  )
+}
+
+function severityClass(severity: 'error' | 'warning' | 'info'): string {
+  if (severity === 'error') return 'bg-red-500/15 text-red-300'
+  if (severity === 'warning') return 'bg-amber-500/15 text-amber-300'
+  return 'bg-blue-500/15 text-blue-300'
+}
+
 function summarizeValidation(validation: RunManifest['validation']): string {
   if (!validation) return 'Not captured'
   if (validation.errorCount === 0 && validation.warningCount === 0) return 'No blocking validation issues'
   return `${validation.errorCount} errors, ${validation.warningCount} warnings`
 }
 
-function summarizeReadiness(readiness: RunManifest['readiness']): string {
+function summarizeRunReadiness(runReadiness: RunManifest['runReadiness'], readiness: RunManifest['readiness']): string {
+  if (runReadiness) {
+    if (runReadiness.ok) return 'Ready'
+    return `${runReadiness.errorCount} errors, ${runReadiness.warningCount} warnings`
+  }
   if (!readiness) return 'Not captured'
   if (readiness.ok) return 'Ready'
   return `${readiness.blockingCount} blocking issue${readiness.blockingCount === 1 ? '' : 's'}`
+}
+
+function readinessText(report: RunManifest): string {
+  const issues = report.runReadiness?.issues ?? []
+  if (issues.length === 0) return 'No readiness issues captured.'
+  return issues.map((issue) => [
+    `[${issue.severity}] ${issue.category}: ${issue.message}`,
+    issue.suggestion ? `Suggestion: ${issue.suggestion}` : null,
+    issue.action ? `Action: ${issue.action}` : null,
+  ].filter(Boolean).join('\n')).join('\n\n')
+}
+
+function transferText(report: RunManifest): string {
+  const plans = report.transferPlans ?? []
+  if (plans.length === 0) return 'No cross-backend transfers were planned for this run.'
+  return plans.map((plan) => [
+    `${plan.mode} ${plan.route}`,
+    `Source: ${formatArtifact(plan.source)}`,
+    `Target: ${formatArtifact(plan.target)}`,
+    `Status: ${plan.status}`,
+    plan.warnings?.length ? `Warnings: ${plan.warnings.join(' ')}` : null,
+  ].filter(Boolean).join('\n')).join('\n\n')
+}
+
+function resultText(report: RunManifest): string {
+  const cards = report.resultCards ?? []
+  if (cards.length === 0) return 'No result cards were generated.'
+  return cards.map((card) => [
+    `${card.primary ? 'Primary' : 'Intermediate'} ${card.kind}: ${card.label}`,
+    ...card.artifacts.map((artifact) => formatArtifact(artifact)),
+  ].join('\n')).join('\n\n')
+}
+
+function formatArtifact(artifact: NonNullable<RunManifest['resultCards']>[number]['artifacts'][number]): string {
+  const id = artifact.fileId ? ` (${artifact.fileId})` : ''
+  const project = artifact.projectId ? ` project=${artifact.projectId}` : ''
+  const type = artifact.fileType ? ` type=${artifact.fileType}` : ''
+  return `${artifact.origin}:${artifact.path}${id}${project}${type}`
 }
 
 async function copyText(text: string): Promise<void> {

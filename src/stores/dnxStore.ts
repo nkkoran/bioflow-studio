@@ -168,7 +168,7 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
   },
 
   runBootstrap: async () => {
-    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP is under development.')
+    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP beta is hidden until DNAnexus access can be tested.')
     if (!window.api?.dnx) throw new Error('DNAnexus preload API is unavailable.')
     set({ bootstrapStatus: 'bootstrapping', bridgeStatus: null })
     try {
@@ -187,7 +187,7 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
   },
 
   authenticate: async (opts) => {
-    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP is under development.')
+    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP beta is hidden until DNAnexus access can be tested.')
     if (!window.api?.dnx) throw new Error('DNAnexus preload API is unavailable.')
     const token = opts?.token ?? get().authToken
     const projectId = opts?.projectId ?? get().defaultProjectId
@@ -211,7 +211,7 @@ export const useDnxStore = create<DnxStoreState>((set, get) => ({
   },
 
   refreshProjects: async () => {
-    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP is under development.')
+    if (!useSettingsStore.getState().devMode) throw new Error('DNAnexus RAP beta is hidden until DNAnexus access can be tested.')
     if (!window.api?.dnx) throw new Error('DNAnexus preload API is unavailable.')
     const currentProjectId = get().defaultProjectId
     const projects = await window.api.dnx.listProjects()

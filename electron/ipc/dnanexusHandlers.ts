@@ -2,6 +2,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 
 import { DnxBridgeManager } from '../dnx/DnxBridgeManager'
 import { PythonEnvBootstrap } from '../dnx/PythonEnvBootstrap'
+import { DnxBackendAdapter } from '../pipeline/DnxBackendAdapter'
 
 let listenersRegistered = false
 
@@ -14,6 +15,7 @@ function broadcast(channel: string, payload: unknown): void {
 export function registerDnanexusHandlers(): void {
   const bridge = DnxBridgeManager.getInstance()
   const bootstrap = PythonEnvBootstrap.getInstance()
+  const adapter = new DnxBackendAdapter()
 
   if (!listenersRegistered) {
     listenersRegistered = true
@@ -55,6 +57,10 @@ export function registerDnanexusHandlers(): void {
 
   ipcMain.handle('dnx:stat', async (_event, args: { projectId: string; path: string }) => {
     return bridge.stat(args)
+  })
+
+  ipcMain.handle('dnx:head', async (_event, args: { projectId: string; path: string; lines: number }) => {
+    return adapter.headText(args.projectId, args.path, args.lines)
   })
 
   ipcMain.handle('dnx:upload', async (_event, args: { projectId: string; localPath: string; folder: string }) => {

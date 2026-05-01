@@ -24,6 +24,7 @@ import { ensureFlagBlocks, flagBlocksToParamValues, toolUsesFlagBuilder } from '
 import { analysisOptionsToParamValues, getActiveToolInputs, normalizeAnalysisOptions } from '@/lib/analysisOptions'
 import { defaultTransformPresetConfig } from '@/lib/transformPresets'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { artifactRefForFileNode } from '@/lib/transferPlanner'
 
 export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransferNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
 export type BioflowEdge = Edge
@@ -88,12 +89,14 @@ interface PipelineState {
   addNoteNode: (position: { x: number; y: number }) => string
   addNodesAndEdges: (nodes: BioflowNode[], edges: BioflowEdge[]) => void
   insertTransferNodeForEdge: (edgeId: string) => string | null
+  insertLiftoverNodeForEdge: (edgeId: string, sourceBuild?: string, targetBuild?: string) => string | null
   wireFileNodeToCompatibleInputs: (nodeId: string) => number
 
   updateNodeData: (nodeId: string, patch: Partial<ToolNodeData | FileNodeData | MergeNodeData | TransferNodeData | TransformNodeData | NoteNodeData>) => void
   deleteNode: (nodeId: string) => void
   deleteEdge: (edgeId: string) => void
   duplicateNode: (nodeId: string) => void
+  duplicateSelection: () => void
   copySelection: () => void
   pasteClipboard: () => void
   createGroup: (nodeIds: string[], label?: string) => string
@@ -101,6 +104,7 @@ interface PipelineState {
   deleteGroup: (groupId: string) => void
 
   setSelectedNode: (nodeId: string | null) => void
+  selectAllNodes: () => void
 
   undo: () => void
   redo: () => void
@@ -119,6 +123,12 @@ const HISTORY_LIMIT = 50
 
 function makeId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function cloneData<T>(value: T): T {
+  return typeof structuredClone === 'function'
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value)) as T
 }
 
 /** Build default paramValues from tool definition. */
@@ -176,7 +186,11 @@ function migrateFileNodeData(data: FileNodeData): FileNodeData {
     ...data,
     origin: data.origin ?? (data.source === 'local' ? 'local' : 'ssh'),
   }
-  if (!withOrigin.split) return withOrigin
+  const withArtifact: FileNodeData = {
+    ...withOrigin,
+    artifactRef: data.artifactRef ?? artifactRefForFileNode(withOrigin),
+  }
+  if (!withArtifact.split) return withArtifact
   const rawItems = (data.split as { items?: unknown }).items
   const items = Array.isArray(rawItems)
     ? rawItems.map((item, index) => {
@@ -188,12 +202,12 @@ function migrateFileNodeData(data: FileNodeData): FileNodeData {
     })
     : []
   return {
-    ...withOrigin,
+    ...withArtifact,
     split: {
-      ...withOrigin.split,
-      axis: withOrigin.split.axis || 'item',
+      ...withArtifact.split,
+      axis: withArtifact.split.axis || 'item',
       items,
-      pattern: withOrigin.split.pattern ?? (withOrigin.split.glob ? { kind: 'brace', template: withOrigin.split.glob } : { kind: 'manual' }),
+      pattern: withArtifact.split.pattern ?? (withArtifact.split.glob ? { kind: 'brace', template: withArtifact.split.glob } : { kind: 'manual' }),
     },
   }
 }
@@ -207,14 +221,18 @@ function migrateMergeNodeData(data: MergeNodeData): MergeNodeData {
 }
 
 function migrateTransferNodeData(data: TransferNodeData): TransferNodeData {
+  const from = data.from === 'local' || data.from === 'dnx' || data.from === 'ssh' ? data.from : 'ssh'
+  const to = data.to === 'local' || data.to === 'dnx' || data.to === 'ssh' ? data.to : 'ssh'
   return {
     label: data.label || 'Transfer',
-    from: data.from === 'dnx' ? 'dnx' : 'ssh',
-    to: data.to === 'dnx' ? 'dnx' : 'ssh',
+    from,
+    to,
     dnxProjectId: data.dnxProjectId,
     dnxFolder: data.dnxFolder,
     sshFolder: data.sshFolder,
+    localFolder: data.localFolder,
     outputName: data.outputName,
+    transferPlanId: data.transferPlanId,
     status: data.status ?? 'idle',
     jobId: data.jobId,
     error: data.error,
@@ -398,8 +416,18 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         path: data?.path ?? '',
         source: data?.source ?? 'remote',
         origin: data?.origin ?? (data?.source === 'local' ? 'local' : 'ssh'),
+        artifactRef: data?.artifactRef ?? {
+          origin: data?.origin ?? (data?.source === 'local' ? 'local' : 'ssh'),
+          path: data?.path ?? '',
+          fileType: data?.fileType ?? 'any',
+          genomeBuild: data?.genomeBuild,
+        },
         fileType: data?.fileType ?? 'any',
+        genomeBuild: data?.genomeBuild,
         isInput: data?.isInput ?? true,
+        outputFilename: data?.outputFilename,
+        outputDir: data?.outputDir,
+        split: data?.split,
       },
     }
     set((state) => ({
@@ -438,18 +466,22 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
 
   addTransferNode: (position, data) => {
     const id = makeId('transfer')
+    const from = data?.from === 'local' || data?.from === 'dnx' || data?.from === 'ssh' ? data.from : 'ssh'
+    const to = data?.to === 'local' || data?.to === 'dnx' || data?.to === 'ssh' ? data.to : 'ssh'
     const node: BioflowNode = {
       id,
       type: 'transfer',
       position,
       data: {
         label: data?.label ?? 'Transfer',
-        from: data?.from === 'dnx' ? 'dnx' : 'ssh',
-        to: data?.to === 'dnx' ? 'dnx' : 'ssh',
+        from,
+        to,
         dnxProjectId: data?.dnxProjectId,
         dnxFolder: data?.dnxFolder,
         sshFolder: data?.sshFolder,
+        localFolder: data?.localFolder,
         outputName: data?.outputName,
+        transferPlanId: data?.transferPlanId,
         status: data?.status ?? 'idle',
       },
     }
@@ -511,7 +543,23 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
 
   addNodesAndEdges: (newNodes, newEdges) => {
     set((state) => ({
-      nodes: [...state.nodes, ...newNodes],
+      nodes: [
+        ...state.nodes,
+        ...newNodes.map((node) => ({
+          ...node,
+          data: node.type === 'tool'
+            ? migrateToolNodeData(cloneData(node.data as ToolNodeData))
+            : node.type === 'file'
+              ? migrateFileNodeData(cloneData(node.data as FileNodeData))
+              : node.type === 'merge'
+                ? migrateMergeNodeData(cloneData(node.data as MergeNodeData))
+                : node.type === 'transfer'
+                  ? migrateTransferNodeData(cloneData(node.data as TransferNodeData))
+                  : node.type === 'transform'
+                    ? migrateTransformNodeData(cloneData(node.data as TransformNodeData))
+                    : cloneData(node.data),
+        } as BioflowNode)),
+      ],
       edges: [...state.edges, ...newEdges],
       selectedNodeId: newNodes[0]?.id ?? state.selectedNodeId,
       ...pushHistory(state),
@@ -574,6 +622,70 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     }))
 
     return transferId
+  },
+
+  insertLiftoverNodeForEdge: (edgeId, sourceBuild, targetBuild) => {
+    const state = get()
+    const edge = state.edges.find((candidate) => candidate.id === edgeId)
+    if (!edge) return null
+    const sourceNode = state.nodes.find((candidate) => candidate.id === edge.source)
+    const targetNode = state.nodes.find((candidate) => candidate.id === edge.target)
+    if (!sourceNode || !targetNode) return null
+    if (sourceNode.type === 'tool' && (sourceNode.data as ToolNodeData).toolId === 'crossmap.liftover') return null
+
+    const liftoverId = makeId('tool')
+    const from = sourceBuild?.trim()
+    const to = targetBuild?.trim()
+    const label = from && to ? `Liftover ${from} -> ${to}` : 'CrossMap Liftover'
+    const liftoverNode: BioflowNode = {
+      id: liftoverId,
+      type: 'tool',
+      position: {
+        x: (sourceNode.position.x + targetNode.position.x) / 2,
+        y: (sourceNode.position.y + targetNode.position.y) / 2,
+      },
+      data: {
+        toolId: 'crossmap.liftover',
+        label,
+        paramValues: {
+          format: 'auto',
+          'source-build': from || 'GRCh37',
+          'target-build': to || 'GRCh38',
+          chromid: 'a',
+          compress: true,
+        },
+        genomeBuild: to || undefined,
+        status: 'idle',
+      },
+    }
+
+    set((current) => ({
+      nodes: [...current.nodes, liftoverNode],
+      edges: current.edges.flatMap((candidate) => {
+        if (candidate.id !== edgeId) return [candidate]
+        return [
+          {
+            id: makeId('edge'),
+            source: candidate.source,
+            sourceHandle: candidate.sourceHandle,
+            target: liftoverId,
+            targetHandle: 'input',
+          },
+          {
+            id: makeId('edge'),
+            source: liftoverId,
+            sourceHandle: 'output',
+            target: candidate.target,
+            targetHandle: candidate.targetHandle,
+          },
+        ]
+      }),
+      selectedNodeId: liftoverId,
+      ...pushHistory(current),
+      dirty: true,
+    }))
+
+    return liftoverId
   },
 
   wireFileNodeToCompatibleInputs: (nodeId) => {
@@ -642,12 +754,34 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   },
 
   updateNodeData: (nodeId, patch) => {
-    set((state) => ({
-      nodes: state.nodes.map((n) =>
-        n.id === nodeId ? { ...n, data: { ...n.data, ...patch } as BioflowNode['data'] } : n,
-      ),
-      dirty: true,
-    }))
+    set((state) => {
+      let changed = false
+      const nodes = state.nodes.map((n) => {
+        if (n.id !== nodeId) return n
+        changed = true
+        const nextData = { ...n.data, ...cloneData(patch) } as BioflowNode['data']
+        if (n.type === 'file') {
+          const fileData = nextData as FileNodeData
+          return {
+            ...n,
+            data: {
+              ...fileData,
+              artifactRef: artifactRefForFileNode({
+                ...fileData,
+                origin: fileData.origin ?? (fileData.source === 'local' ? 'local' : 'ssh'),
+              }),
+            } satisfies FileNodeData,
+          }
+        }
+        return { ...n, data: nextData }
+      })
+      if (!changed) return state
+      return {
+        nodes,
+        ...pushHistory(state),
+        dirty: true,
+      }
+    })
   },
 
   deleteNode: (nodeId) => {
@@ -679,11 +813,55 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         ...node,
         id: makeId('node'),
         position: { x: node.position.x + 40, y: node.position.y + 40 },
-        selected: false,
-        data: { ...node.data } as BioflowNode['data'],
+        selected: true,
+        data: cloneData(node.data) as BioflowNode['data'],
       }
       return {
-        nodes: [...state.nodes, newNode],
+        nodes: [...state.nodes.map((candidate) => ({ ...candidate, selected: false })), newNode],
+        selectedNodeId: newNode.id,
+        ...pushHistory(state),
+        dirty: true,
+      }
+    })
+  },
+
+  duplicateSelection: () => {
+    set((state) => {
+      const selectedNodes = state.nodes.filter((node) => node.selected || node.id === state.selectedNodeId)
+      if (selectedNodes.length === 0) return state
+      const selectedIds = new Set(selectedNodes.map((node) => node.id))
+      const idMap = new Map<string, string>()
+      const nodes = selectedNodes.map((node) => {
+        const id = makeId(node.type ?? 'node')
+        idMap.set(node.id, id)
+        return {
+          ...node,
+          id,
+          selected: true,
+          position: { x: node.position.x + 48, y: node.position.y + 48 },
+          data: cloneData(node.data) as BioflowNode['data'],
+        } as BioflowNode
+      })
+      const edges = state.edges.flatMap((edge) => {
+        if (!selectedIds.has(edge.source) || !selectedIds.has(edge.target)) return []
+        const source = idMap.get(edge.source)
+        const target = idMap.get(edge.target)
+        if (!source || !target) return []
+        return [{
+          ...edge,
+          id: makeId('edge'),
+          source,
+          target,
+          selected: false,
+        }]
+      })
+      return {
+        nodes: [
+          ...state.nodes.map((node) => ({ ...node, selected: false })),
+          ...nodes,
+        ],
+        edges: [...state.edges, ...edges],
+        selectedNodeId: nodes[0]?.id ?? state.selectedNodeId,
         ...pushHistory(state),
         dirty: true,
       }
@@ -698,8 +876,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     if (selectedNodes.length === 0) return
     set({
       clipboard: {
-        nodes: selectedNodes,
-        edges: selectedEdges,
+        nodes: cloneData(selectedNodes),
+        edges: cloneData(selectedEdges),
         groups: [],
       },
     })
@@ -717,7 +895,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
           id,
           selected: true,
           position: { x: node.position.x + 40, y: node.position.y + 40 },
-          data: { ...node.data } as BioflowNode['data'],
+          data: cloneData(node.data) as BioflowNode['data'],
         } as BioflowNode
       })
       const edges = state.clipboard.edges.flatMap((edge) => {
@@ -776,6 +954,11 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   },
 
   setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
+
+  selectAllNodes: () => set((state) => ({
+    nodes: state.nodes.map((node) => ({ ...node, selected: true })),
+    selectedNodeId: state.nodes[0]?.id ?? null,
+  })),
 
   undo: () => {
     const state = get()

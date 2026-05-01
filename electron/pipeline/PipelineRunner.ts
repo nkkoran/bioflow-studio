@@ -8,12 +8,13 @@
  *      Nodes within a layer run in parallel; layers are serial.
  *   4. Track each job via JobTracker; emit IPC events on every transition.
  *
- * Runs live only in memory for this step — persistence across app reloads
- * lands in a later substep.
+ * Runs are persisted in the settings store and can reattach to queued/running
+ * Slurm jobs after the app restarts.
  */
 import { BrowserWindow } from 'electron'
 import { randomUUID } from 'crypto'
 import { promises as fsPromises } from 'node:fs'
+import { homedir as localHomedir } from 'node:os'
 
 import { SshManager } from '../ssh/SshManager'
 import { SftpPool } from '../ssh/SftpPool'
@@ -26,6 +27,7 @@ import { planAxes, resolveNodeOutputDir, type AxisPlan } from './axisPlanner'
 import { generateToolScript, generateMergeScript, generateTransformScript, type ConnectionDefaults } from './ScriptGenerator'
 import { getTool } from '../../src/lib/toolRegistry'
 import { buildRunManifest, extractCommands } from '../../src/lib/runManifest'
+import { planPipelineTransfers } from '../../src/lib/transferPlanner'
 import type {
   PipelineSnapshot,
   RunState,
@@ -35,17 +37,20 @@ import type {
   ToolNodeData,
   MergeNodeData,
   TransferNodeData,
+  TransferPlan,
   TransformNodeData,
   FileNodeData,
   NoteNodeData,
   NodeGroup,
 } from '../../src/types/pipeline'
+import type { RunReadinessReport } from '../../src/types/workspace'
 
 export interface StartOptions {
   connectionId: string
   snapshot: PipelineSnapshot
   workDir?: string
   workspace?: RunState['workspace']
+  runReadiness?: RunReadinessReport | null
 }
 
 /**
@@ -184,6 +189,7 @@ export class PipelineRunner {
 
     // Plan axes (throws on cycles, unknown tools, ambiguous axes).
     topoSort(snapshot)
+    const transferPlans = planPipelineTransfers(snapshot)
     const plans = planAxes(snapshot, {
       outputRoot,
       outputRootForNode: (node) => {
@@ -197,6 +203,10 @@ export class PipelineRunner {
       nodeSlug: (id) => nodeSlugs.get(id) ?? id,
       homeDir: home || undefined,
     })
+
+    if (needsSsh) {
+      await this.verifyPlinkSidecars(connectionId, snapshot, home)
+    }
 
     const now = Date.now()
     const nodes: Record<string, NodeRunState> = {}
@@ -227,6 +237,8 @@ export class PipelineRunner {
       updatedAt: now,
       status: 'running',
       nodes,
+      transferPlans,
+      runReadiness: opts.runReadiness ?? null,
     }
     this.runs.set(runId, runState)
     this.persistRuns()
@@ -265,7 +277,11 @@ export class PipelineRunner {
       }
       try {
         const scripts = await this.generateScriptsDry({ connectionId, snapshot, workDir, workspace: opts.workspace })
-        const manifest = buildRunManifest(runState, snapshot, opts.workspace ?? null, { scripts })
+        const manifest = buildRunManifest(runState, snapshot, opts.workspace ?? null, {
+          scripts,
+          transferPlans,
+          runReadiness: opts.runReadiness ?? null,
+        })
         await this.sftp.write(connectionId, `${workDir}/run.manifest.json`, JSON.stringify(manifest, null, 2))
       } catch (err) {
         console.error('[PipelineRunner] failed to write run.manifest.json:', err)
@@ -433,6 +449,59 @@ export class PipelineRunner {
     const home = stdout.trim().replace(/\/+$/, '')
     this.homeCache.set(connectionId, home)
     return home
+  }
+
+  private async verifyPlinkSidecars(connectionId: string, snapshot: PipelineSnapshot, home: string): Promise<void> {
+    const missing: string[] = []
+    const plinkInputFileNodeIds = new Set<string>()
+    for (const edge of snapshot.edges) {
+      const target = snapshot.nodes.find((node) => node.id === edge.target)
+      const source = snapshot.nodes.find((node) => node.id === edge.source)
+      if (source?.type !== 'file' || target?.type !== 'tool') continue
+      const tool = getTool((target.data as ToolNodeData).toolId)
+      if ((tool?.command === 'plink2' || tool?.command === 'plink') && (edge.targetHandle ?? 'input') === 'input') {
+        plinkInputFileNodeIds.add(source.id)
+      }
+    }
+    const checkOne = async (path: string) => {
+      const resolved = expandHome(path, home)
+      const lower = resolved.toLowerCase()
+      const expected = lower.endsWith('.pgen')
+        ? [`${stripKnownExt(resolved)}.pvar`, `${stripKnownExt(resolved)}.psam`]
+        : lower.endsWith('.bed')
+          ? [`${stripKnownExt(resolved)}.bim`, `${stripKnownExt(resolved)}.fam`]
+          : []
+      for (const sidecar of expected) {
+        try {
+          const stat = await this.sftp.stat(connectionId, sidecar)
+          if (stat.isDirectory) missing.push(sidecar)
+        } catch {
+          missing.push(sidecar)
+        }
+      }
+    }
+
+    for (const node of snapshot.nodes) {
+      if (node.type !== 'file') continue
+      const data = node.data as FileNodeData
+      if (!plinkInputFileNodeIds.has(node.id)) continue
+      if (!data.isInput || data.origin === 'dnx' || data.origin === 'local' || data.source === 'local') continue
+      if (data.fileType !== 'plink' && data.fileType !== 'pgen' && data.fileType !== 'bed') continue
+      const splitItems = (data.split as { items?: Array<{ path?: unknown }> } | undefined)?.items
+      if (Array.isArray(splitItems) && splitItems.length > 0) {
+        for (const item of splitItems) {
+          if (typeof item.path === 'string') await checkOne(item.path)
+        }
+      } else if (data.path) {
+        await checkOne(data.path)
+      }
+    }
+
+    if (missing.length > 0) {
+      const shown = [...new Set(missing)].slice(0, 12)
+      const suffix = missing.length > shown.length ? `\n...and ${missing.length - shown.length} more.` : ''
+      throw new Error(`PLINK fileset sidecar check failed. Missing:\n${shown.join('\n')}${suffix}`)
+    }
   }
 
   /**
@@ -884,11 +953,9 @@ export class PipelineRunner {
     }
     const jobId = match[1]
     const stdoutPath = firstPlan.mode === 'array'
-      ? `${logDir}/${groupSlug}-${jobId}_%a.out`
-      : `${logDir}/${groupSlug}-${jobId}.out`
-    const stderrPath = firstPlan.mode === 'array'
-      ? `${logDir}/${groupSlug}-${jobId}_%a.err`
-      : `${logDir}/${groupSlug}-${jobId}.err`
+      ? `${logDir}/${groupSlug}-${jobId}_%a.slurm.log`
+      : `${logDir}/${groupSlug}-${jobId}.slurm.log`
+    const stderrPath = stdoutPath
     for (const entry of built) {
       const ns = run.nodes[entry.node.id]
       ns.jobId = jobId
@@ -900,7 +967,6 @@ export class PipelineRunner {
 
     await new Promise<void>((resolve) => {
       let cancelTailOut: (() => void) | null = null
-      let cancelTailErr: (() => void) | null = null
 
       this.tracker.watch({
         connectionId: run.connectionId,
@@ -917,24 +983,16 @@ export class PipelineRunner {
           if (firstPlan.mode !== 'array') {
             const firstNodeId = built[0]?.node.id ?? group.nodeIds[0]
             const demuxOut = makeGroupLogDemuxer((nodeId, chunk) => this.emitJobLog(run.runId, nodeId, chunk, 'stdout'), firstNodeId)
-            const demuxErr = makeGroupLogDemuxer((nodeId, chunk) => this.emitJobLog(run.runId, nodeId, chunk, 'stderr'), firstNodeId)
             const { cancel: co } = this.ssh.execStream(
               run.connectionId,
               `tail -F -n +1 ${shellQuote(stdoutPath)} 2>/dev/null`,
               (chunk) => demuxOut(chunk),
             )
-            const { cancel: ce } = this.ssh.execStream(
-              run.connectionId,
-              `tail -F -n +1 ${shellQuote(stderrPath)} 2>/dev/null`,
-              (chunk) => demuxErr(chunk),
-            )
             cancelTailOut = co
-            cancelTailErr = ce
           }
         },
         onFinish: (outcome) => {
           cancelTailOut?.()
-          cancelTailErr?.()
           for (const entry of built) {
             const ns = run.nodes[entry.node.id]
             ns.finishedAt = Date.now()
@@ -1059,7 +1117,7 @@ export class PipelineRunner {
     ns.outputDir = outputDir
     ns.outputPaths = collectOutputPaths(plan.outputs)
     ns.submittedAt = Date.now()
-    ns.isArray = plan.mode === 'array'
+    ns.isArray = Boolean(arraySize) || plan.mode === 'array'
     ns.arraySize = arraySize
 
     if (node.type === 'tool' && (node.data as ToolNodeData).executionMode === 'login') {
@@ -1084,12 +1142,10 @@ export class PipelineRunner {
     const jobId = m[1]
     ns.jobId = jobId
     ns.status = 'queued'
-    ns.stdoutPath = plan.mode === 'array'
-      ? `${logDir}/${slug}-${jobId}_%a.out`
-      : `${logDir}/${slug}-${jobId}.out`
-    ns.stderrPath = plan.mode === 'array'
-      ? `${logDir}/${slug}-${jobId}_%a.err`
-      : `${logDir}/${slug}-${jobId}.err`
+    ns.stdoutPath = ns.isArray
+      ? `${logDir}/${slug}-${jobId}_%a.slurm.log`
+      : `${logDir}/${slug}-${jobId}.slurm.log`
+    ns.stderrPath = ns.stdoutPath
     console.debug('[PipelineRunner] submitted node', {
       runId: run.runId,
       nodeId: node.id,
@@ -1104,12 +1160,11 @@ export class PipelineRunner {
     const outcome = await new Promise<any>((resolve) => {
       // Cancellers for the log tails — populated in onStart, called in onFinish.
       let cancelTailOut: (() => void) | null = null
-      let cancelTailErr: (() => void) | null = null
 
       this.tracker.watch({
         connectionId: run.connectionId,
         jobId,
-        isArray: plan.mode === 'array',
+        isArray: Boolean(ns.isArray),
         onStart: () => {
           ns.status = 'running'
           ns.startedAt = Date.now()
@@ -1117,7 +1172,7 @@ export class PipelineRunner {
 
           // Stream logs for single + fanIn jobs. Array jobs have per-task log
           // files (22+ for per-chrom pipelines) so we leave them on SFTP polling.
-          if (plan.mode !== 'array' && ns.stdoutPath && ns.stderrPath) {
+          if (!ns.isArray && ns.stdoutPath) {
             const { cancel: co } = this.ssh.execStream(
               run.connectionId,
               // -n +1 reads the file from the start; -F follows new lines and
@@ -1125,18 +1180,11 @@ export class PipelineRunner {
               `tail -F -n +1 ${shellQuote(ns.stdoutPath)} 2>/dev/null`,
               (chunk) => this.emitJobLog(run.runId, node.id, chunk, 'stdout'),
             )
-            const { cancel: ce } = this.ssh.execStream(
-              run.connectionId,
-              `tail -F -n +1 ${shellQuote(ns.stderrPath)} 2>/dev/null`,
-              (chunk) => this.emitJobLog(run.runId, node.id, chunk, 'stderr'),
-            )
             cancelTailOut = co
-            cancelTailErr = ce
           }
         },
         onFinish: (outcome) => {
           cancelTailOut?.()
-          cancelTailErr?.()
           resolve(outcome)
         },
       })
@@ -1279,6 +1327,10 @@ export class PipelineRunner {
     ns.jobId = `transfer-${randomUUID().slice(0, 8)}`
     ns.status = 'running'
     ns.startedAt = Date.now()
+    this.updateTransferProgress(run, node.id, {
+      status: 'running',
+      bytesTransferred: 0,
+    })
     this.emitNodeStatus(run.runId, node.id, 'running', ns.jobId)
 
     try {
@@ -1294,40 +1346,86 @@ export class PipelineRunner {
         for (const [index, path] of paths.entries()) {
           await this.dnx.transferDnxToSsh(run.connectionId, projectId, path, outputs[index] ?? path)
         }
+      } else if (input && data.from === 'local' && data.to === 'ssh') {
+        const paths = await collectValuePaths(input)
+        for (const [index, path] of paths.entries()) {
+          const target = outputs[index] ?? `${ns.outputDir ?? run.outputRoot ?? run.workDir}/${pathBasename(path)}`
+          await this.sftp.mkdir(run.connectionId, pathDirname(target)).catch(() => undefined)
+          await this.sftp.upload(run.connectionId, expandLocalHome(path), target, (bytesTransferred, totalBytes) => {
+            this.updateTransferProgress(run, node.id, { status: 'running', bytesTransferred, totalBytes })
+          })
+        }
+      } else if (input && data.from === 'ssh' && data.to === 'local') {
+        const paths = await collectValuePaths(input)
+        for (const [index, path] of paths.entries()) {
+          const target = expandLocalHome(outputs[index] ?? `${data.localFolder || '~/BioFlow/transfers'}/${pathBasename(path)}`)
+          const parent = pathDirname(target)
+          if (parent) await fsPromises.mkdir(parent, { recursive: true }).catch(() => undefined)
+          await this.sftp.download(run.connectionId, path, target, (bytesTransferred, totalBytes) => {
+            this.updateTransferProgress(run, node.id, { status: 'running', bytesTransferred, totalBytes })
+          })
+          if (outputs[index]) outputs[index] = target
+        }
       } else if (input && data.from === 'local' && data.to === 'dnx' && projectId) {
         const folder = outputs[0]?.startsWith('/') ? pathDirname(outputs[0]) : '/BioFlow/transfers'
         const paths = await collectValuePaths(input)
         for (const [index, path] of paths.entries()) {
           const name = pathBasename(outputs[index] ?? path) || pathBasename(path)
-          await this.dnx.uploadLocalPath(projectId, path, folder, name)
+          await this.dnx.uploadLocalPath(projectId, expandLocalHome(path), folder, name)
         }
       } else if (input && data.from === 'dnx' && data.to === 'local' && projectId) {
         const paths = await collectValuePaths(input)
         for (const [index, path] of paths.entries()) {
-          const target = outputs[index] ?? path
+          const target = expandLocalHome(outputs[index] ?? path)
           // mkdir-p the parent directory locally so the bridge download lands.
           const parent = pathDirname(target)
           if (parent) await fsPromises.mkdir(parent, { recursive: true }).catch(() => undefined)
           await this.dnx.downloadDnxToLocal(projectId, path, target)
+          if (outputs[index]) outputs[index] = target
         }
       } else if (input && data.from === data.to) {
         // Same-backend transfer is handled by the validator (warning) and is
         // a no-op at runtime — flag it so the user notices.
         throw new Error(`Transfer node has from=${data.from}, to=${data.to}; configure a cross-backend route.`)
       } else if (input) {
-        // Currently unsupported (local↔ssh would just be sftp upload/download
-        // — a separate Transfer-node enhancement). Surface a clear message.
         throw new Error(`Transfer ${data.from} -> ${data.to} is not yet implemented.`)
       }
+      ns.outputPaths = outputs
+      ns.outputDir = outputs[0] ? pathDirname(outputs[0]) : ns.outputDir
       ns.status = 'done'
       ns.finishedAt = Date.now()
+      this.updateTransferProgress(run, node.id, { status: 'done' })
       this.emitNodeStatus(run.runId, node.id, 'done', ns.jobId)
     } catch (error) {
       ns.status = 'failed'
       ns.finishedAt = Date.now()
       ns.error = error instanceof Error ? error.message : String(error)
+      this.updateTransferProgress(run, node.id, { status: 'failed' })
       this.emitNodeStatus(run.runId, node.id, 'failed', ns.jobId, ns.error)
     }
+  }
+
+  private updateTransferProgress(
+    run: RunState,
+    nodeId: string,
+    progress: { status: TransferPlan['status']; bytesTransferred?: number; totalBytes?: number },
+  ): void {
+    const ns = run.nodes[nodeId]
+    if (!ns) return
+    const plan = run.transferPlans?.find((candidate) => candidate.nodeId === nodeId)
+    if (plan) {
+      plan.status = progress.status
+      if (progress.bytesTransferred !== undefined) plan.bytesTransferred = progress.bytesTransferred
+      if (progress.totalBytes !== undefined) plan.totalBytes = progress.totalBytes
+    }
+    ns.transferProgress = {
+      route: plan?.route,
+      status: progress.status,
+      bytesTransferred: progress.bytesTransferred ?? plan?.bytesTransferred ?? ns.transferProgress?.bytesTransferred,
+      totalBytes: progress.totalBytes ?? plan?.totalBytes ?? ns.transferProgress?.totalBytes,
+      warnings: plan?.warnings,
+    }
+    this.emitNodeStatus(run.runId, nodeId, ns.status ?? 'idle', ns.jobId, ns.error)
   }
 
   private async runDnxNode(
@@ -1483,6 +1581,19 @@ export class PipelineRunner {
     const ns = run.nodes[node.id]
     const logDir = run.logsDir ?? `${run.workDir}/logs`
     let dependencyJobId = ns.jobId
+    if (ns.jobId && !ns.childJobs?.some((job) => job.jobId === ns.jobId)) {
+      ns.childJobs = [
+        ...(ns.childJobs ?? []),
+        {
+          kind: 'primary',
+          jobId: ns.jobId,
+          label: 'Primary array job',
+          scriptPath: ns.scriptPath,
+          stdoutPath: ns.stdoutPath,
+          stderrPath: ns.stderrPath,
+        },
+      ]
+    }
 
     for (const [portId, merge] of merges) {
       const mergeSlug = `${slug}-${portId}-auto-merge`
@@ -1519,8 +1630,19 @@ export class PipelineRunner {
       dependencyJobId = mergeJobId
       ns.jobId = mergeJobId
       ns.scriptPath = scriptPath
-      ns.stdoutPath = `${logDir}/${mergeSlug}-${mergeJobId}.out`
-      ns.stderrPath = `${logDir}/${mergeSlug}-${mergeJobId}.err`
+      ns.stdoutPath = `${logDir}/${mergeSlug}-${mergeJobId}.slurm.log`
+      ns.stderrPath = ns.stdoutPath
+      ns.childJobs = [
+        ...(ns.childJobs ?? []),
+        {
+          kind: 'auto-merge',
+          jobId: mergeJobId,
+          label: `${portId} auto-merge`,
+          scriptPath,
+          stdoutPath: ns.stdoutPath,
+          stderrPath: ns.stderrPath,
+        },
+      ]
       this.emitNodeStatus(run.runId, node.id, 'running', mergeJobId)
 
       await new Promise<void>((resolve, reject) => {
@@ -1548,6 +1670,30 @@ export class PipelineRunner {
     snapshot: PipelineSnapshot,
     plans: Map<string, AxisPlan>,
   ): Promise<void> {
+    if (run.scriptsDir) {
+      try {
+        let scripts: DryRunScript[] | undefined
+        try {
+          scripts = await this.generateScriptsDry({
+            connectionId: run.connectionId,
+            snapshot,
+            workDir: run.workDir,
+            workspace: run.workspace,
+          })
+        } catch (err) {
+          console.error('[PipelineRunner] failed to refresh scripts for final run.manifest.json:', err)
+        }
+        const manifest = buildRunManifest(run, snapshot, run.workspace ?? null, {
+          scripts,
+          transferPlans: run.transferPlans,
+        })
+        await this.sftp.write(run.connectionId, `${run.workDir}/run.manifest.json`, JSON.stringify(manifest, null, 2))
+      } catch (err) {
+        console.error('[PipelineRunner] failed to write final run.manifest.json:', err)
+      }
+    }
+    if (!run.scriptsDir) return
+
     const manifest = this.collectIntermediatePaths(snapshot, plans)
     const manifestPath = `${run.workDir}/intermediates.json`
     try {
@@ -1572,6 +1718,17 @@ export class PipelineRunner {
 
   private collectIntermediatePaths(snapshot: PipelineSnapshot, plans: Map<string, AxisPlan>): string[] {
     const seen = new Set<string>()
+    const protectedInputs = new Set<string>()
+    for (const node of snapshot.nodes) {
+      if (node.type !== 'file') continue
+      const data = node.data as FileNodeData
+      if (!data.isInput) continue
+      const splitItems = (data.split as { items?: Array<{ path?: unknown }> } | undefined)?.items
+      if (Array.isArray(splitItems)) {
+        for (const item of splitItems) if (typeof item.path === 'string') protectedInputs.add(item.path)
+      }
+      if (data.path) protectedInputs.add(data.path)
+    }
     const addValuePaths = (value: AxisPlan['outputs'][string] | undefined) => {
       if (!value) return
       if (value.kind === 'single') seen.add(value.path)
@@ -1616,7 +1773,7 @@ export class PipelineRunner {
       }
     }
 
-    return [...seen]
+    return [...seen].filter((path) => !protectedInputs.has(path))
   }
 
   private async runLoginNode(
@@ -1917,8 +2074,8 @@ function mergeScriptsForGroup(
   const maxResources = maxScriptResources(scripts.map((entry) => entry.script))
   const header = firstHeader.map((line) => {
     if (line.startsWith('#SBATCH --job-name=')) return `#SBATCH --job-name=bioflow-${groupSlug}`
-    if (line.startsWith('#SBATCH --output=')) return isArray ? `#SBATCH --output=${logDir}/${groupSlug}-%A_%a.out` : `#SBATCH --output=${logDir}/${groupSlug}-%j.out`
-    if (line.startsWith('#SBATCH --error=')) return isArray ? `#SBATCH --error=${logDir}/${groupSlug}-%A_%a.err` : `#SBATCH --error=${logDir}/${groupSlug}-%j.err`
+    if (line.startsWith('#SBATCH --output=')) return isArray ? `#SBATCH --output=${logDir}/${groupSlug}-%A_%a.slurm.log` : `#SBATCH --output=${logDir}/${groupSlug}-%j.slurm.log`
+    if (line.startsWith('#SBATCH --error=')) return isArray ? `#SBATCH --error=${logDir}/${groupSlug}-%A_%a.slurm.log` : `#SBATCH --error=${logDir}/${groupSlug}-%j.slurm.log`
     if (line.startsWith('#SBATCH --cpus-per-task=')) return `#SBATCH --cpus-per-task=${group.sharedResources?.cpus ?? maxResources.cpus}`
     if (line.startsWith('#SBATCH --mem=')) return `#SBATCH --mem=${group.sharedResources?.memoryGB ?? maxResources.memoryGB}G`
     if (line.startsWith('#SBATCH --time=')) return `#SBATCH --time=${formatTime(group.sharedResources?.timeHours ?? maxResources.timeHours)}`
@@ -1930,10 +2087,8 @@ function mergeScriptsForGroup(
     const markerId = shellQuote(nodeId)
     return [
       `echo "::bioflow-step:${nodeId}:start"`,
-      `echo "::bioflow-step:${nodeId}:start" >&2`,
       stripScriptHeader(script, seenModules),
       `echo "::bioflow-step:${nodeId}:end"`,
-      `echo "::bioflow-step:${nodeId}:end" >&2`,
       '',
       `# Finished grouped node ${markerId}`,
     ]
@@ -2130,6 +2285,16 @@ function pathDirname(path: string): string {
 function pathBasename(path: string): string {
   const idx = path.lastIndexOf('/')
   return idx === -1 ? path : path.slice(idx + 1)
+}
+
+function stripKnownExt(path: string): string {
+  return path.replace(/\.(pgen|pvar|psam|bed|bim|fam)$/i, '')
+}
+
+function expandLocalHome(path: string): string {
+  if (path === '~') return localHomedir()
+  if (path.startsWith('~/')) return `${localHomedir()}/${path.slice(2)}`
+  return path
 }
 
 function shellQuote(s: string): string {

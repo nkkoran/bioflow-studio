@@ -54,6 +54,12 @@ import {
   normalizeAnalysisOptions,
   type AnalysisOptionDef,
 } from '@/lib/analysisOptions'
+import {
+  detectSplitInFolder as detectSmartSplitInFolder,
+  type DetectedSplit,
+  rangeTextFromItems as sharedRangeTextFromItems,
+  type SplitDetectMode,
+} from '@/lib/splitDetection'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -74,19 +80,11 @@ import type { RemoteFileEntry } from '@/types/files'
 import type { AnnovarInstallProgress, AnnovarStatusResult } from '@/types/annotation'
 import type { ClusterModuleSuggestion, LearnedResourceSummary } from '@/types/ssh'
 import { classNames, pathBasename, pathDirname } from '@/lib/utils'
+import { expandHomePath } from '@/lib/remotePath'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 
-type SplitDetectMode = 'auto' | 'files' | 'folders'
-
-interface DetectedSplit {
-  pattern: SplitPattern
-  items: FileNodeSplit['items']
-  missing: string[]
-  summary: string
-  quality: number
-}
-
 const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
+const GENOME_BUILD_OPTIONS = ['', 'GRCh38', 'GRCh37', 'hg38', 'hg19'] as const
 
 function connectedInputPaths(
   snapshot: PipelineSnapshot,
@@ -921,8 +919,11 @@ function ToolOutputRow({
             })}
             className="accent-accent"
           />
-          Temporary output: delete after successful run
+          Delete this output after a successful run
         </label>
+        <span className="text-[10px] text-text-muted">
+          Off by default; only generated files from this output are eligible.
+        </span>
       </div>
     </div>
   )
@@ -2017,7 +2018,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     loading: false,
     error: null,
   })
-  const [splitFolder, setSplitFolder] = useState(() => data.path ? pathDirname(data.path) : '')
+  const [splitFolder, setSplitFolder] = useState(() => splitFolderFromData(data))
   const [splitDetectMode, setSplitDetectMode] = useState<SplitDetectMode>('auto')
   const [detectingSplit, setDetectingSplit] = useState(false)
   const [detectMessage, setDetectMessage] = useState<string | null>(null)
@@ -2031,8 +2032,10 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   )
 
   const addRow = useCallback(() => {
+    if (!split) return
     const items = split?.items ?? []
     setSplit({
+      ...split,
       axis: split?.axis ?? 'chrom',
       items: [...items, { key: String(items.length + 1), path: '' }],
       pattern: split?.pattern ?? { kind: 'manual' },
@@ -2057,22 +2060,24 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   )
 
   const pattern = split?.pattern ?? (split?.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }) as SplitPattern
+  const splitSeedPath = splitFolder.trim() || split?.folderPath || data.path
 
   const setPattern = useCallback((next: SplitPattern) => {
     if (!split) return
     setSplit({ ...split, pattern: next })
   }, [split, setSplit])
 
-  const acceptedRange = useMemo(() => split ? rangeTextFromItems(split.items) : '', [split])
+  const acceptedRange = useMemo(() => split ? sharedRangeTextFromItems(split.items) : '', [split])
 
   useEffect(() => {
     setRangeDraft(acceptedRange)
   }, [acceptedRange])
 
   useEffect(() => {
-    if (!data.path || splitFolder) return
-    setSplitFolder(pathDirname(data.path))
-  }, [data.path, splitFolder])
+    const folder = splitFolderFromData(data)
+    const staleParentForDroppedFolder = data.pathKind === 'directory' && splitFolder === pathDirname(data.path)
+    if (folder && (!splitFolder || data.split?.folderPath === folder || staleParentForDroppedFolder)) setSplitFolder(folder)
+  }, [data, splitFolder])
 
   const detectSplit = useCallback(async () => {
     if (!split) return
@@ -2087,16 +2092,19 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     setDetectingSplit(true)
     setDetectMessage(null)
     try {
-      const detected = await detectSplitInFolder({
-        connectionId: activeConnectionId,
-        folder: splitFolder.trim(),
+      const folder = await resolveRemotePathForSftp(activeConnectionId, splitFolder.trim())
+      const seedPath = await resolveRemotePathForSftp(activeConnectionId, splitSeedPath)
+      const detected = await detectSmartSplitInFolder({
+        listFolder: (folder) => window.api.sftp.ls(activeConnectionId, folder),
+        folder,
         mode: splitDetectMode,
         axis: split.axis || 'item',
         fileType: data.fileType,
-        seedPath: data.path,
+        seedPath,
       })
+      if (folder !== splitFolder.trim()) setSplitFolder(folder)
       updateNodeData(nodeId, {
-        split: { ...split, items: detected.items, pattern: detected.pattern },
+        split: { ...split, folderPath: detected.folderPath, items: detected.items, pattern: detected.pattern },
         fileType: inferSplitFileType(detected.items, data.fileType),
       })
       setPreview({
@@ -2111,7 +2119,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     } finally {
       setDetectingSplit(false)
     }
-  }, [activeConnectionId, data.fileType, data.path, nodeId, split, splitDetectMode, splitFolder, updateNodeData])
+  }, [activeConnectionId, data.fileType, nodeId, split, splitDetectMode, splitFolder, splitSeedPath, updateNodeData])
 
   useEffect(() => {
     if (!split) return
@@ -2162,7 +2170,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     const existing = new Map(split.items.map((item) => [item.key, item]))
     const nextItems = keys.map((key) => existing.get(key) ?? { key, path: pathForSplitKey(pattern, key) })
     setSplit({ ...split, items: nextItems })
-    setDetectMessage(`Using ${nextItems.length} ${split.axis || 'items'}: ${rangeTextFromItems(nextItems)}.`)
+    setDetectMessage(`Using ${nextItems.length} ${split.axis || 'items'}: ${sharedRangeTextFromItems(nextItems)}.`)
   }, [pattern, rangeDraft, setSplit, split])
 
   const uploadLocalFile = useCallback(async () => {
@@ -2363,7 +2371,9 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               checked={!!split}
               onChange={(e) => {
                 if (e.target.checked) {
-                  setSplit({ axis: 'chrom', items: [] })
+                  const folder = defaultSplitFolderForData(data)
+                  setSplitFolder(folder)
+                  setSplit({ axis: 'chrom', folderPath: folder || undefined, items: [] })
                 } else {
                   setSplit(undefined)
                 }
@@ -2446,7 +2456,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               {(['manual', 'brace', 'glob', 'crossFolder'] as SplitPattern['kind'][]).map((kind) => (
                 <button
                   key={kind}
-                  onClick={() => setPattern(defaultPattern(kind, pattern, data.path))}
+                  onClick={() => setPattern(defaultPattern(kind, pattern, splitSeedPath))}
                   className={classNames(
                     'rounded px-1.5 py-1 text-[10px]',
                     pattern.kind === kind ? 'bg-accent/15 text-text-primary' : 'text-text-muted hover:text-text-primary',
@@ -2671,6 +2681,29 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
           </div>
         )}
       </div>
+      {data.isInput && settings.showInputGenomeBuild && (
+        <details className="border-t border-border pt-3">
+          <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-text-muted hover:text-text-secondary">
+            Advanced
+          </summary>
+          <div className="mt-2 flex flex-col gap-1">
+            <label className="text-text-secondary text-xs font-medium">Genome build</label>
+            <select
+              value={String(data.genomeBuild ?? '')}
+              onChange={(e) => updateNodeData(nodeId, { genomeBuild: e.target.value || undefined })}
+              className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+            >
+              <option value="">Unknown / not genomic</option>
+              {GENOME_BUILD_OPTIONS.filter(Boolean).map((build) => (
+                <option key={build} value={build}>{build}</option>
+              ))}
+            </select>
+            <p className="text-[10px] text-text-muted">
+              Used to catch mixed GRCh37/GRCh38 inputs before a run.
+            </p>
+          </div>
+        </details>
+      )}
     </div>
   )
 }
@@ -2691,6 +2724,13 @@ async function uploadLocalFileForPath(
   await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
   updateNodeData(nodeId, { path: remotePath, source: 'remote', origin: 'ssh' })
   setUploadMessage(`Uploaded to ${remotePath}`)
+}
+
+async function resolveRemotePathForSftp(connectionId: string, path: string): Promise<string> {
+  const trimmed = path.trim()
+  if (trimmed !== '~' && !trimmed.startsWith('~/')) return trimmed
+  const home = (await window.api.ssh.exec(connectionId, 'printf %s "$HOME"')).stdout.trim() || null
+  return expandHomePath(trimmed, home)
 }
 
 function splitOutputPath(data: FileNodeData): { folder: string; filename: string } {
@@ -2865,6 +2905,24 @@ function joinOutputPath(folder: string, filename: string): string {
   return `${folder.replace(/\/+$/, '')}/${filename.trim()}`
 }
 
+function splitFolderFromData(data: FileNodeData): string {
+  if (data.split?.folderPath?.trim()) return data.split.folderPath
+  const pattern = data.split?.pattern
+  if (pattern?.kind === 'crossFolder') return pattern.parentDir
+  if (pattern?.kind === 'glob' || pattern?.kind === 'brace') {
+    const template = pattern.template
+    const beforeVariable = template.includes('*') ? template.slice(0, template.indexOf('*')) : template
+    return pathDirname(beforeVariable || template)
+  }
+  return defaultSplitFolderForData(data)
+}
+
+function defaultSplitFolderForData(data: FileNodeData): string {
+  if (!data.path) return ''
+  if (data.pathKind === 'directory') return data.path
+  return pathDirname(data.path)
+}
+
 function defaultPattern(kind: SplitPattern['kind'], current: SplitPattern, seedPath = ''): SplitPattern {
   if (kind === current.kind) return current
   if (kind === 'manual') return { kind: 'manual' }
@@ -2902,112 +2960,15 @@ async function detectSplitInFolder({
   fileType: FileNodeData['fileType']
   seedPath: string
 }): Promise<DetectedSplit> {
-  const entries = asRemoteFileEntries(await window.api.sftp.ls(connectionId, folder))
-  const candidates: DetectedSplit[] = []
-  if (mode === 'auto' || mode === 'files') {
-    const files = detectFilesInFolder(folder, entries, fileType, axis)
-    if (files) candidates.push(files)
-  }
-  if (mode === 'auto' || mode === 'folders') {
-    const folders = await detectFoldersInFolder(connectionId, folder, entries, fileType, seedPath, axis)
-    if (folders) candidates.push(folders)
-  }
-  if (candidates.length === 0) {
-    throw new Error('Could not infer a split pattern in that folder. Use the manual recipe below.')
-  }
-  return candidates.sort((a, b) => b.quality - a.quality || b.items.length - a.items.length)[0]
+  return detectSmartSplitInFolder({
+    listFolder: (path) => window.api.sftp.ls(connectionId, path),
+    folder,
+    mode,
+    axis,
+    fileType,
+    seedPath,
+  })
 }
-
-function detectFilesInFolder(
-  folder: string,
-  entries: RemoteFileEntry[],
-  fileType: FileNodeData['fileType'],
-  axis = 'item',
-): DetectedSplit | null {
-  const files = preferredFiles(entries.filter((entry) => !entry.isDirectory), fileType)
-  const group = bestVariableGroup(files.map((entry) => ({ name: entry.name, path: entry.path })))
-  if (!group || group.items.length < 2) return null
-  const range = rangeTextFromItems(group.items)
-  return {
-    pattern: { kind: 'glob', template: `${folder.replace(/\/+$/, '')}/${group.prefix}*${group.suffix}`, capture: 'key' },
-    items: group.items,
-    missing: [],
-    summary: `Detected ${group.items.length} split files (${axis} ${range}).`,
-    quality: 60 + group.items.length + averageFileScore(group.items.map((item) => item.path), fileType),
-  }
-}
-
-async function detectFoldersInFolder(
-  connectionId: string,
-  folder: string,
-  entries: RemoteFileEntry[],
-  fileType: FileNodeData['fileType'],
-  seedPath: string,
-  axis = 'item',
-): Promise<DetectedSplit | null> {
-  const folders = entries.filter((entry) => entry.isDirectory)
-  const group = bestVariableGroup(folders.map((entry) => ({ name: entry.name, path: entry.path })))
-  if (!group || group.items.length < 2) return null
-
-  const folderEntries = folders
-    .filter((entry) => group.items.some((item) => item.path === entry.path))
-    .slice(0, 100)
-  const listings = await Promise.all(folderEntries.map(async (entry) => {
-    try {
-      return { folder: entry, entries: asRemoteFileEntries(await window.api.sftp.ls(connectionId, entry.path)) }
-    } catch {
-      return { folder: entry, entries: [] as RemoteFileEntry[] }
-    }
-  }))
-  const fileName = chooseCommonNestedFile(listings.map((listing) => listing.entries), fileType, pathBasename(seedPath))
-  if (!fileName) {
-    const fallbackItems = detectOneNestedFilePerFolder(listings, fileType)
-    if (fallbackItems.length < 2) return null
-    return {
-      pattern: { kind: 'manual' },
-      items: fallbackItems,
-      missing: [],
-      summary: `Detected ${fallbackItems.length} item folders (${axis} ${rangeTextFromItems(fallbackItems)}). The accepted rows are editable below.`,
-      quality: 45 + fallbackItems.length + averageFileScore(fallbackItems.map((item) => item.path), fileType),
-    }
-  }
-
-  const items = folderEntries.map((entry) => ({
-    key: captureKeyFromName(entry.name),
-    path: `${entry.path.replace(/\/+$/, '')}/${fileName}`,
-  }))
-  return {
-    pattern: {
-      kind: 'crossFolder',
-      parentDir: folder,
-      childGlob: `${group.prefix}*${group.suffix}`,
-      file: fileName,
-    },
-    items: sortSplitRows(items),
-    missing: [],
-    summary: `Detected ${items.length} item folders (${axis} ${rangeTextFromItems(items)}); each contains ${fileName}.`,
-    quality: 80 + items.length + dataFileScore(fileName, fileType, pathBasename(seedPath)),
-  }
-}
-
-function detectOneNestedFilePerFolder(
-  listings: Array<{ folder: RemoteFileEntry; entries: RemoteFileEntry[] }>,
-  fileType: FileNodeData['fileType'],
-): FileNodeSplit['items'] {
-  const items: FileNodeSplit['items'] = []
-  for (const listing of listings) {
-    const key = captureKeyFromName(listing.folder.name)
-    const files = preferredFiles(asRemoteFileEntries(listing.entries).filter((entry) => !entry.isDirectory), fileType)
-    if (files.length === 0) continue
-    const picked =
-      files.find((file) => file.name.includes(key)) ??
-      files.find((file) => captureKeyFromName(file.name) === key) ??
-      files[0]
-    items.push({ key, path: picked.path })
-  }
-  return sortSplitRows(items)
-}
-
 function safeSplitItems(split: FileNodeSplit | undefined): FileNodeSplit['items'] {
   const rawItems = (split as { items?: unknown } | undefined)?.items
   if (!Array.isArray(rawItems)) return []
@@ -3028,168 +2989,6 @@ function normalizeSplitForInspector(split: FileNodeSplit | undefined): FileNodeS
     items: safeSplitItems(split),
     pattern: split.pattern ?? (split.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }),
   }
-}
-
-function asRemoteFileEntries(value: unknown): RemoteFileEntry[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((entry): entry is RemoteFileEntry => {
-    if (!entry || typeof entry !== 'object') return false
-    const candidate = entry as Partial<RemoteFileEntry>
-    return typeof candidate.name === 'string'
-      && typeof candidate.path === 'string'
-      && typeof candidate.isDirectory === 'boolean'
-  })
-}
-
-function preferredFiles(files: RemoteFileEntry[], fileType: FileNodeData['fileType']): RemoteFileEntry[] {
-  const ranked = files
-    .map((file) => ({ file, score: dataFileScore(file.name, fileType) }))
-    .sort((a, b) => b.score - a.score || a.file.name.localeCompare(b.file.name))
-  const nonLog = ranked.filter((entry) => !isLogLikeFile(entry.file.name))
-  const matching = nonLog.filter((entry) => fileMatchesType(entry.file.name, fileType))
-  if (matching.length > 0) return matching.map((entry) => entry.file)
-  if (nonLog.length > 0) return nonLog.map((entry) => entry.file)
-  return ranked.map((entry) => entry.file)
-}
-
-function fileMatchesType(name: string, fileType: FileNodeData['fileType']): boolean {
-  if (fileType === 'any') return true
-  const lower = name.toLowerCase()
-  const extensions: Partial<Record<FileNodeData['fileType'], string[]>> = {
-    vcf: ['.vcf', '.vcf.gz'],
-    bcf: ['.bcf'],
-    fastq: ['.fastq', '.fastq.gz', '.fq', '.fq.gz'],
-    fasta: ['.fasta', '.fa', '.fna'],
-    bam: ['.bam'],
-    sam: ['.sam'],
-    cram: ['.cram'],
-    bed: ['.bed'],
-    gff: ['.gff', '.gff3'],
-    gtf: ['.gtf'],
-    plink: ['.bed', '.pgen'],
-    pgen: ['.pgen'],
-    bgen: ['.bgen'],
-    tsv: ['.tsv', '.tsv.gz', '.pheno', '.phen', '.covar', '.sample', '.psam', '.eigenvec', '.profile'],
-    csv: ['.csv'],
-    txt: ['.txt'],
-    json: ['.json'],
-    yaml: ['.yaml', '.yml'],
-  }
-  return (extensions[fileType] ?? []).some((ext) => lower.endsWith(ext))
-}
-
-function isLogLikeFile(name: string): boolean {
-  return /\.(log|out|err|stderr|stdout)$/i.test(name)
-}
-
-function dataFileScore(name: string, fileType: FileNodeData['fileType'], seedName = ''): number {
-  const lower = name.toLowerCase()
-  let score = seedName && name === seedName ? 30 : 0
-  if (isLogLikeFile(name)) score -= 500
-
-  if (lower.endsWith('.pgen')) score += fileType === 'pgen' || fileType === 'plink' || fileType === 'any' ? 120 : 60
-  else if (lower.endsWith('.bed')) score += fileType === 'bed' || fileType === 'plink' || fileType === 'any' ? 105 : 45
-  else if (lower.endsWith('.bgen')) score += fileType === 'bgen' || fileType === 'any' ? 100 : 45
-  else if (/\.(pvar|psam|bim|fam)$/i.test(lower)) score += fileType === 'plink' || fileType === 'pgen' || fileType === 'any' ? 55 : 20
-  else if (/\.(vcf\.gz|vcf|bcf)$/i.test(lower)) score += fileType === 'vcf' || fileType === 'bcf' || fileType === 'any' ? 95 : 35
-  else if (/\.(tsv|txt|csv|phen|pheno|covar|sample)$/i.test(lower)) score += fileType === 'tsv' || fileType === 'csv' || fileType === 'txt' || fileType === 'any' ? 75 : 25
-  else score += 10
-
-  if (fileMatchesType(name, fileType)) score += 30
-  return score
-}
-
-function averageFileScore(paths: string[], fileType: FileNodeData['fileType']): number {
-  if (paths.length === 0) return 0
-  return paths.reduce((sum, path) => sum + dataFileScore(pathBasename(path), fileType), 0) / paths.length
-}
-
-function bestVariableGroup(values: Array<{ name: string; path: string }>): { prefix: string; suffix: string; items: FileNodeSplit['items'] } | null {
-  const groups = new Map<string, { prefix: string; suffix: string; items: FileNodeSplit['items'] }>()
-  for (const value of values) {
-    const match = value.name.match(/^(.*?)(\d+)(.*)$/)
-    if (!match) continue
-    const [, prefix, key, suffix] = match
-    const id = `${prefix}\u0000${suffix}`
-    const group = groups.get(id) ?? { prefix, suffix, items: [] }
-    group.items.push({ key: normalizeSplitKey(key), path: value.path })
-    groups.set(id, group)
-  }
-  if (groups.size === 0) return null
-  const best = [...groups.values()].sort((a, b) => b.items.length - a.items.length)[0]
-  return { ...best, items: sortSplitRows(best.items) }
-}
-
-function chooseCommonNestedFile(
-  listings: RemoteFileEntry[][],
-  fileType: FileNodeData['fileType'],
-  seedName: string,
-): string | null {
-  const counts = new Map<string, number>()
-  for (const entries of listings) {
-    const names = new Set(entries.filter((entry) => !entry.isDirectory).map((entry) => entry.name))
-    for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
-  }
-  if (counts.size === 0) return null
-  const minCount = Math.min(2, listings.length)
-  const candidates = [...counts.entries()].filter(([, count]) => count >= minCount)
-  const nonLogCandidates = candidates.filter(([name]) => !isLogLikeFile(name))
-  const pool = nonLogCandidates.length > 0 ? nonLogCandidates : candidates
-  const matching = pool.filter(([name]) => fileMatchesType(name, fileType))
-  const ranked = (matching.length > 0 ? matching : pool)
-    .sort(([nameA, countA], [nameB, countB]) => {
-      const scoreA = dataFileScore(nameA, fileType, seedName)
-      const scoreB = dataFileScore(nameB, fileType, seedName)
-      return scoreB - scoreA || countB - countA || nameA.localeCompare(nameB)
-    })
-  if (ranked[0]) return ranked[0][0]
-  return candidates.sort(([nameA, countA], [nameB, countB]) =>
-    dataFileScore(nameB, fileType, seedName) - dataFileScore(nameA, fileType, seedName) ||
-    countB - countA ||
-    nameA.localeCompare(nameB),
-  )[0]?.[0] ?? null
-}
-
-function captureKeyFromName(name: string): string {
-  const numeric = name.match(/(\d+)/)
-  return numeric ? normalizeSplitKey(numeric[1]) : name
-}
-
-function normalizeSplitKey(key: string): string {
-  const numeric = Number(key)
-  return Number.isFinite(numeric) ? String(numeric) : key
-}
-
-function sortSplitRows(items: FileNodeSplit['items']): FileNodeSplit['items'] {
-  return [...items].sort((a, b) => {
-    const na = Number(a.key)
-    const nb = Number(b.key)
-    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
-    return a.key.localeCompare(b.key)
-  })
-}
-
-function rangeTextFromItems(items: FileNodeSplit['items']): string {
-  return rangeTextFromKeys(items.map((item) => item.key))
-}
-
-function rangeTextFromKeys(keys: string[]): string {
-  const numeric = keys
-    .filter((key) => /^\d+$/.test(key))
-    .map(Number)
-    .sort((a, b) => a - b)
-  const other = keys.filter((key) => !/^\d+$/.test(key)).sort((a, b) => a.localeCompare(b))
-  const parts: string[] = []
-  for (let i = 0; i < numeric.length; i++) {
-    const start = numeric[i]
-    let end = start
-    while (i + 1 < numeric.length && numeric[i + 1] === end + 1) {
-      end = numeric[i + 1]
-      i++
-    }
-    parts.push(start === end ? String(start) : `${start}-${end}`)
-  }
-  return [...parts, ...other].join(', ')
 }
 
 function parseRangeKeys(text: string): string[] {
@@ -3536,17 +3335,19 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
         <div className="grid grid-cols-2 gap-2">
           <select
             value={data.from}
-            onChange={(e) => updateNodeData(nodeId, { from: devMode && e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            onChange={(e) => updateNodeData(nodeId, { from: e.target.value as TransferNodeData['from'] })}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
+            <option value="local">From Local</option>
             <option value="ssh">From Rorqual</option>
             {devMode && <option value="dnx">From DNAnexus</option>}
           </select>
           <select
             value={data.to}
-            onChange={(e) => updateNodeData(nodeId, { to: devMode && e.target.value === 'dnx' ? 'dnx' : 'ssh' })}
+            onChange={(e) => updateNodeData(nodeId, { to: e.target.value as TransferNodeData['to'] })}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
+            <option value="local">To Local</option>
             <option value="ssh">To Rorqual</option>
             {devMode && <option value="dnx">To DNAnexus</option>}
           </select>
@@ -3567,6 +3368,16 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
           placeholder="(default run output folder)"
           requesterLabel={`${data.label} SSH folder`}
           onChange={(value) => updateNodeData(nodeId, { sshFolder: value || undefined })}
+        />
+      )}
+
+      {data.to === 'local' && (
+        <LocalPathField
+          label="Local folder"
+          value={data.localFolder ?? ''}
+          placeholder="~/BioFlow/transfers"
+          onChange={(value) => updateNodeData(nodeId, { localFolder: value || undefined })}
+          mode="directory"
         />
       )}
 

@@ -12,6 +12,7 @@
  */
 import { create } from 'zustand'
 import type { PipelineSnapshot, RunState, RunStatus, ToolNodeData } from '@/types/pipeline'
+import type { RunReadinessReport } from '@/types/workspace'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -39,7 +40,7 @@ interface RunStoreState {
   logs: Record<string, NodeLogBuffer>
   diagnostics: Record<string, FailureDiagnostic>
 
-  startRun: (connectionId: string, snapshot: PipelineSnapshot) => Promise<string>
+  startRun: (connectionId: string, snapshot: PipelineSnapshot, runReadiness?: RunReadinessReport | null) => Promise<string>
   cancelRun: (runId: string) => Promise<void>
   cancelNode: (runId: string, nodeId: string) => Promise<void>
   rerunNode: (runId: string, nodeId: string, snapshot: PipelineSnapshot) => Promise<void>
@@ -67,7 +68,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   logs: {},
   diagnostics: {},
 
-  startRun: async (connectionId, snapshot) => {
+  startRun: async (connectionId, snapshot, runReadiness) => {
     const workspaceStore = useWorkspaceStore.getState()
     const activeWorkspace = workspaceStore.activeWorkspaceId
       ? workspaceStore.workspaces.find((workspace) => workspace.id === workspaceStore.activeWorkspaceId) ?? null
@@ -86,7 +87,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
       vepCachePath: activeWorkspace.vepCachePath,
       recommendedTemplateId: activeWorkspace.recommendedTemplateId,
       notes: activeWorkspace.notes,
-    } : null)
+    } : null, runReadiness ?? null)
     // Clear old logs before a new run so stale output doesn't bleed through.
     get().clearLogs()
     set({ activeRunId: runId, selectedNodeId: null })
@@ -261,7 +262,7 @@ function applyCanvasStatuses(run: RunState): void {
   const pipelineStore = usePipelineStore.getState()
   if (run.pipelineId !== pipelineStore.pipelineId) return
   for (const node of pipelineStore.nodes) {
-    if (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform') continue
+    if (node.type !== 'tool' && node.type !== 'merge' && node.type !== 'transform' && node.type !== 'transfer') continue
     const ns = run.nodes[node.id]
     pipelineStore.setNodeStatus(
       node.id,
@@ -337,6 +338,21 @@ function diagnoseTail(tail: string[], toolId?: string): FailureDiagnostic {
   }
   if (/TIMEOUT|time limit|CANCELLED.*time/i.test(text)) {
     return { tail, cause: 'Likely hit the Slurm time limit', suggestion: 'Increase wall time and rerun this step.', fix: { kind: 'time', multiplier: 1.5 } }
+  }
+  if (/invalid account|invalid qos|association.*does not exist|account.*not.*valid|Job violates accounting/i.test(text)) {
+    return { tail, cause: 'Slurm account or QOS was rejected', suggestion: 'Open Settings and choose an account/partition that is valid for this cluster allocation.' }
+  }
+  if (/invalid partition|requested partition configuration not available|partition.*not.*available|QOSMaxWallDurationPerJobLimit/i.test(text)) {
+    return { tail, cause: 'Partition or walltime policy rejected the job', suggestion: 'Use a compatible partition or reduce the requested wall time before rerunning.' }
+  }
+  if (/DependencyNeverSatisfied|dependency.*failed|afterok.*failed/i.test(text)) {
+    return { tail, cause: 'An upstream dependency failed', suggestion: 'Fix and rerun the failed upstream step, then retry downstream from that point.' }
+  }
+  if (/cannot stat|No such file or directory|No input file|failed to open|Could not open/i.test(text)) {
+    return { tail, cause: 'A required input file was not found', suggestion: 'Run Check, preview the input paths, and insert an explicit Transfer node if the file is on another backend.' }
+  }
+  if (/module: command not found|Unable to locate a modulefile|unknown module|module.*not found/i.test(text)) {
+    return { tail, cause: 'Environment module was not available', suggestion: 'Check the module name in the node or workspace settings, then rerun this step.' }
   }
   if (/command not found|No such file or directory: .*plink|No such file or directory: .*regenie|No such file or directory: .*bcftools/i.test(text)) {
     return { tail, cause: 'Tool or module was not found', suggestion: 'Check the module name or tool path in the node/settings.' }

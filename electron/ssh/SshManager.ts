@@ -1,7 +1,7 @@
 import { Client } from 'ssh2'
 import type { ClientChannel, ConnectConfig, Prompt } from 'ssh2'
 import { readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync } from 'fs'
-import { createHash, randomUUID } from 'crypto'
+import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { resolve as resolvePath } from 'path'
 import { BrowserWindow, ipcMain } from 'electron'
@@ -41,6 +41,7 @@ function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
     host: config.host.trim(),
     username: config.username.trim(),
     privateKeyPath: config.privateKeyPath?.trim(),
+    alias: config.alias?.trim(),
     defaultDirectory: config.defaultDirectory?.trim(),
   }
 }
@@ -104,6 +105,8 @@ function buildConnectOptions(config: ConnectionConfig, onAuthDebug?: (detail: st
     username: config.username,
     readyTimeout: 90_000,
     tryKeyboard: true,
+    keepaliveInterval: Math.max(15, Math.round(config.serverAliveIntervalSeconds ?? 60)) * 1000,
+    keepaliveCountMax: 6,
     algorithms: ALGORITHMS,
     debug: (msg: string) => {
       if (/local ident|remote ident|handshake|kex|auth|offer|keyboard|ready|error|timeout|trying|connect|socket/i.test(msg)) {
@@ -339,7 +342,8 @@ function looksLikeVerificationPrompt(text: string): boolean {
 }
 
 function hostSuggestion(host: string): string | null {
-  const normalized = host.toLowerCase()
+  const normalized = host.trim().toLowerCase()
+  if (normalized === 'rorqual.mcgill.ca') return 'rorqual.alliancecan.ca'
   if (normalized === 'rorqual.digitalalliance.ca') return 'rorqual.alliancecan.ca'
   if (normalized.endsWith('.digitalalliance.ca')) {
     return host.replace(/\.digitalalliance\.ca$/i, '.alliancecan.ca')
@@ -709,6 +713,13 @@ export class SshManager {
       }
 
       this.emitDebug(id, 'connect', `Connecting to ${cleanConfig.host}:${cleanConfig.port} as ${cleanConfig.username} with ${cleanConfig.authMethod}`)
+      if (cleanConfig.alias) {
+        this.emitDebug(
+          id,
+          'connect',
+          `OpenSSH alias "${cleanConfig.alias}" is configured for Terminal use. BioFlow uses an in-app ssh2 session for exec/SFTP, so OpenSSH ControlPersist sockets are not shared with BioFlow yet; keeping this app connection open is the current in-app MFA reuse path.`,
+        )
+      }
       if (cleanConfig.authMethod === 'password') {
         this.emitDebug(id, 'auth', 'Password auth selected. BioFlow will send the account password to ssh2, then ask you for any MFA code or Duo choice requested through keyboard-interactive.')
       }
@@ -1191,13 +1202,5 @@ function connectionDedupeKey(config: ConnectionConfig): string {
     config.host,
     config.port,
     config.username,
-    authMethodId(config),
   ].join(':')
-}
-
-function authMethodId(config: ConnectionConfig): string {
-  if (config.authMethod === 'agent') return 'agent'
-  if (config.authMethod === 'password') return 'password'
-  const raw = config.privateKeyPath ? expandPath(config.privateKeyPath) : ''
-  return `key:${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
 }

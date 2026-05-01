@@ -101,10 +101,108 @@ export const TOOLS: ToolDef[] = [
       { name: 'geno', flag: '--geno', label: 'Max missing genotype rate', type: 'number', default: 0.05, min: 0, max: 1, step: 0.01 },
       { name: 'hwe', flag: '--hwe', label: 'HWE p-value', type: 'number', default: 1e-6, step: 1e-6 },
       { name: 'chr', flag: '--chr', label: 'Chromosome filter', type: 'string', placeholder: '1-22' },
-      { name: 'pheno-name', flag: '--pheno-name', label: 'Phenotype column', type: 'string', columnRef: true, columnSourcePortId: 'pheno' },
+      { name: 'pheno-name', flag: '--pheno-name', label: 'Phenotype column(s)', type: 'string', placeholder: 'bmi asthma height', columnRef: true, columnSourcePortId: 'pheno', columnMulti: true },
+      { name: 'pheno-iid-only', label: 'Phenotype file uses IID only', type: 'boolean', default: false, description: 'Use PLINK2 iid-only modifier for phenotype files without FID.' },
+      { name: 'one', flag: '--1', label: '0/1 case-control coding', type: 'boolean', default: false, description: 'Use when binary phenotypes are coded 0=control and 1=case instead of PLINK2 default 1=control and 2=case.' },
       { name: 'covar-name', flag: '--covar-name', label: 'Covariate columns', type: 'string', placeholder: 'age,sex,PC1-PC10', columnRef: true, columnSourcePortId: 'covar', columnMulti: true },
+      { name: 'covar-iid-only', label: 'Covariate file uses IID only', type: 'boolean', default: false, description: 'Use PLINK2 iid-only modifier for covariate files without FID.' },
+      { name: 'neg9-pheno-really-missing', flag: '--neg9-pheno-really-missing', label: '-9 is missing', type: 'boolean', default: false },
+      { name: 'no-input-missing-phenotype', flag: '--no-input-missing-phenotype', label: 'Treat -9 as numeric', type: 'boolean', default: false },
+      { name: 'input-missing-phenotype', flag: '--input-missing-phenotype', label: 'Custom missing phenotype code', type: 'string', placeholder: 'NA' },
     ],
-    slurm: { cpus: 8, memoryGB: 32, timeHours: 4 },
+    slurm: { cpus: 32, memoryGB: 100, timeHours: 24 },
+  },
+  {
+    id: 'plink2.phewas',
+    name: 'PLINK2 PheWAS',
+    category: 'gwas',
+    description: 'Loop PLINK2 association tests across many phenotype/outcome columns',
+    command: 'plink2',
+    module: 'plink/2.00a3',
+    inputs: [
+      { id: 'input', label: 'Genotypes', description: 'PLINK file set to association-test against every selected phenotype.', fileType: 'plink', required: true, contract: { family: 'plink-fileset' } },
+      {
+        id: 'pheno',
+        label: 'Phenotype table',
+        description: 'Phenotype file with one row per sample and one or more outcome columns.',
+        fileType: 'tsv',
+        required: true,
+        contract: {
+          family: 'tabular',
+          tabular: {
+            requiresHeader: true,
+            sampleIdRoleIds: ['sample_id', 'family_id'],
+            roles: [
+              { id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'participant_id', 'subject_id', 'ID'] },
+              { id: 'family_id', label: 'Family ID', required: false, aliases: ['FID', 'family_id'] },
+              { id: 'phenotype', label: 'Phenotype columns', required: true, aliases: ['trait', 'phenotype', 'PHENO', 'status'], binding: { kind: 'param', key: 'phenotypes', multi: true } },
+            ],
+          },
+        },
+      },
+      {
+        id: 'phenoList',
+        label: 'Phenotype list',
+        description: 'Optional one-column text file with phenotype column names to run. Use this when the list is long or shared across runs.',
+        fileType: 'txt',
+        arrayable: false,
+      },
+      {
+        id: 'covar',
+        label: 'Covariates',
+        description: 'Optional covariate table; choose columns in the parameters.',
+        fileType: 'tsv',
+        contract: {
+          family: 'tabular',
+          tabular: {
+            requiresHeader: true,
+            sampleIdRoleIds: ['sample_id', 'family_id'],
+            roles: [
+              { id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'participant_id', 'subject_id', 'ID'] },
+              { id: 'family_id', label: 'Family ID', required: false, aliases: ['FID', 'family_id'] },
+              { id: 'covariate', label: 'Covariate columns', required: false, aliases: ['age', 'sex', 'PC1'], binding: { kind: 'param', key: 'covar-name', multi: true } },
+            ],
+          },
+        },
+      },
+      { id: 'keep', label: 'Keep samples', description: 'Optional PLINK keep file with FID and IID columns for cohort restriction.', fileType: 'txt', arrayable: false },
+    ],
+    outputs: [
+      {
+        id: 'output',
+        label: 'PheWAS results',
+        description: 'One PLINK2 --glm result set per selected phenotype, plus a merged manifest table.',
+        fileType: 'tsv',
+        autoMergeDefault: 'tsv-concat-header',
+        outputSchema: {
+          columns: ['PHENO', 'ID', 'A1', 'TEST', 'OBS_CT', 'BETA', 'OR', 'P'],
+          roles: [
+            { roleId: 'variant_id', column: 'ID' },
+            { roleId: 'effect_allele', column: 'A1' },
+            { roleId: 'p_value', column: 'P' },
+            { roleId: 'weight', column: 'BETA' },
+          ],
+        },
+      },
+    ],
+    params: [
+      { name: 'phenotypes', flag: '--pheno-name', label: 'Phenotype columns', type: 'string', placeholder: 'bmi asthma height or one per line', columnRef: true, columnSourcePortId: 'pheno', columnMulti: true },
+      { name: 'glm', flag: '--glm', label: 'GLM output', type: 'select', options: ['hide-covar', 'firth-fallback', 'allow-no-covars', 'omit-ref'], default: 'hide-covar', required: true },
+      { name: 'allow-no-covars', label: 'Allow no covariates', type: 'boolean', default: false },
+      { name: 'pheno-iid-only', label: 'Phenotype file uses IID only', type: 'boolean', default: false, description: 'Use PLINK2 iid-only modifier for phenotype files without FID.' },
+      { name: 'one', flag: '--1', label: '0/1 case-control coding', type: 'boolean', default: false, description: 'Use when binary phenotypes are coded 0=control and 1=case instead of PLINK2 default 1=control and 2=case.' },
+      { name: 'covar-iid-only', label: 'Covariate file uses IID only', type: 'boolean', default: false, description: 'Use PLINK2 iid-only modifier for covariate files without FID.' },
+      { name: 'covar-name', flag: '--covar-name', label: 'Covariate columns', type: 'string', placeholder: 'age sex PC1-PC10', columnRef: true, columnSourcePortId: 'covar', columnMulti: true },
+      { name: 'neg9-pheno-really-missing', flag: '--neg9-pheno-really-missing', label: '-9 is missing', type: 'boolean', default: false },
+      { name: 'no-input-missing-phenotype', flag: '--no-input-missing-phenotype', label: 'Treat -9 as numeric', type: 'boolean', default: false },
+      { name: 'input-missing-phenotype', flag: '--input-missing-phenotype', label: 'Custom missing phenotype code', type: 'string', placeholder: 'NA' },
+      { name: 'maf', flag: '--maf', label: 'Min MAF', type: 'number', default: 0.01, min: 0, max: 0.5, step: 0.001 },
+      { name: 'geno', flag: '--geno', label: 'Max missing genotype rate', type: 'number', default: 0.05, min: 0, max: 1, step: 0.01 },
+      { name: 'hwe', flag: '--hwe', label: 'HWE p-value', type: 'number', default: 1e-6, step: 1e-6 },
+      { name: 'chr', flag: '--chr', label: 'Chromosome filter', type: 'string', placeholder: '1-22' },
+      { name: 'array-mode', label: 'Phenotype execution', type: 'select', options: ['array-if-list-is-typed', 'single-job-loop'], default: 'array-if-list-is-typed' },
+    ],
+    slurm: { cpus: 32, memoryGB: 100, timeHours: 24 },
   },
   {
     id: 'plink2.qc',
@@ -409,7 +507,7 @@ export const TOOLS: ToolDef[] = [
     name: 'bcftools view',
     category: 'format',
     description: 'View, subset and filter VCF/BCF files',
-    command: 'bcftools',
+    command: 'bcftools view',
     module: 'bcftools/1.19',
     inputs: [{ id: 'input', label: 'VCF/BCF', description: 'Variant file to view, subset, or filter.', fileType: 'vcf', required: true, contract: { family: 'vcf-bcf', requiresIndexes: ['.tbi', '.csi'] } }],
     outputs: [{ id: 'output', label: 'Filtered VCF', description: 'Subset or filtered VCF/BCF written by bcftools view.', fileType: 'vcf' }],
@@ -445,9 +543,9 @@ export const TOOLS: ToolDef[] = [
     name: 'bcftools merge',
     category: 'format',
     description: 'Merge multiple VCF/BCF files',
-    command: 'bcftools',
+    command: 'bcftools merge',
     module: 'bcftools/1.19',
-    inputs: [{ id: 'input', label: 'VCF files', description: 'Two or more VCF/BCF files to merge into one cohort or variant set.', fileType: 'vcf', required: true, multi: true }],
+    inputs: [{ id: 'input', label: 'VCF files', description: 'Two or more indexed VCF/BCF files to merge into one cohort or variant set.', fileType: 'vcf', required: true, multi: true, contract: { family: 'vcf-bcf', requiresIndexes: ['.tbi', '.csi'] } }],
     outputs: [{ id: 'output', label: 'Merged VCF', description: 'Combined VCF/BCF containing records from the connected inputs.', fileType: 'vcf' }],
     params: [
       { name: 'merge', flag: '-m', label: 'Merge mode', type: 'select', options: ['none', 'snps', 'indels', 'both', 'all', 'id'], default: 'both' },
@@ -552,7 +650,7 @@ export const TOOLS: ToolDef[] = [
     name: 'samtools sort',
     category: 'alignment',
     description: 'Sort BAM/SAM files by coordinate',
-    command: 'samtools',
+    command: 'samtools sort',
     module: 'samtools/1.19',
     inputs: [{ id: 'input', label: 'BAM/SAM', description: 'Alignment file to sort by coordinate or read name.', fileType: 'bam', required: true }],
     outputs: [{ id: 'output', label: 'Sorted BAM', description: 'Sorted alignment file ready for indexing or downstream analysis.', fileType: 'bam' }],
@@ -568,10 +666,10 @@ export const TOOLS: ToolDef[] = [
     name: 'samtools index',
     category: 'alignment',
     description: 'Index a coordinate-sorted BAM file',
-    command: 'samtools',
+    command: 'samtools index',
     module: 'samtools/1.19',
     inputs: [{ id: 'input', label: 'Sorted BAM', description: 'Coordinate-sorted BAM/CRAM that needs an index.', fileType: 'bam', required: true, contract: { family: 'alignment' } }],
-    outputs: [{ id: 'output', label: 'Indexed BAM', description: 'Index file created for the connected alignment.', fileType: 'bam' }],
+    outputs: [{ id: 'output', label: 'BAM index', description: 'BAI or CSI index file created for the connected alignment.', fileType: 'any' }],
     params: [
       { name: 'threads', flag: '-@', label: 'Threads', type: 'number', default: 2 },
       { name: 'csi', flag: '-c', label: 'Write CSI index', type: 'boolean', default: false },
@@ -583,7 +681,7 @@ export const TOOLS: ToolDef[] = [
     name: 'BWA-MEM',
     category: 'alignment',
     description: 'Align short reads to a reference genome',
-    command: 'bwa',
+    command: 'bwa mem',
     module: 'bwa/0.7.17',
     inputs: [
       { id: 'reference', label: 'Reference', description: 'Indexed reference genome FASTA to align reads against.', fileType: 'fasta', required: true, contract: { family: 'fasta' } },
@@ -632,6 +730,31 @@ export const TOOLS: ToolDef[] = [
       { name: 'filename', flag: '--filename', label: 'Output filename', type: 'string', placeholder: 'multiqc_report.html' },
     ],
     slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'crossmap.liftover',
+    name: 'CrossMap Liftover',
+    category: 'format',
+    description: 'Convert genomic coordinates between reference assemblies using a UCSC/Ensembl chain file',
+    docUrl: 'https://crossmap.readthedocs.io/',
+    command: 'CrossMap',
+    module: 'crossmap/0.7.4',
+    inputs: [
+      { id: 'input', label: 'Coordinates', description: 'VCF, BED, GFF/GTF, BAM/CRAM/SAM, or other CrossMap-supported coordinate file.', fileType: 'any', required: true },
+      { id: 'chain', label: 'Chain file', description: 'Pairwise assembly chain file such as hg19ToHg38.over.chain.gz.', fileType: 'any', required: true, arrayable: false },
+      { id: 'reference', label: 'Target FASTA', description: 'Target reference FASTA, required for VCF/gVCF liftover so REF alleles can be updated.', fileType: 'fasta', arrayable: false },
+    ],
+    outputs: [
+      { id: 'output', label: 'Lifted coordinates', description: 'Input coordinates rewritten on the target build.', fileType: 'any' },
+    ],
+    params: [
+      { name: 'format', label: 'Input format', type: 'select', options: ['auto', 'vcf', 'bed', 'bam', 'gff', 'gtf', 'gvcf', 'cram', 'sam'], default: 'auto', required: true },
+      { name: 'source-build', label: 'Source build', type: 'select', options: ['GRCh37', 'GRCh38', 'hg19', 'hg38'], default: 'GRCh37' },
+      { name: 'target-build', label: 'Target build', type: 'select', options: ['GRCh38', 'GRCh37', 'hg38', 'hg19'], default: 'GRCh38' },
+      { name: 'chromid', flag: '--chromid', label: 'Chromosome naming', type: 'select', options: ['a', 's', 'l'], default: 'a' },
+      { name: 'compress', flag: '--compress', label: 'Compress VCF output', type: 'boolean', default: true },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 2 },
   },
 
   // ==================== Utility ====================
@@ -688,6 +811,7 @@ export const TOOLS: ToolDef[] = [
 
 const TOOL_DOCS: Record<string, string> = {
   'plink2.assoc': 'https://www.cog-genomics.org/plink/2.0/assoc',
+  'plink2.phewas': 'https://www.cog-genomics.org/plink/2.0/assoc',
   'plink2.qc': 'https://www.cog-genomics.org/plink/2.0/filter',
   'plink2.clump': 'https://www.cog-genomics.org/plink/2.0/postproc',
   'plink2.score': 'https://www.cog-genomics.org/plink/2.0/score',
@@ -703,6 +827,7 @@ const TOOL_DOCS: Record<string, string> = {
   'bwa.mem': 'https://bio-bwa.sourceforge.net/bwa.shtml',
   fastqc: 'https://www.bioinformatics.babraham.ac.uk/projects/fastqc/',
   multiqc: 'https://docs.seqera.io/multiqc/getting_started/running_multiqc/',
+  'crossmap.liftover': 'https://crossmap.readthedocs.io/',
 }
 
 const PARAM_DESCRIPTIONS: Record<string, string> = {
@@ -713,6 +838,7 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   hwe: 'Exclude variants failing Hardy-Weinberg equilibrium at this p-value.',
   chr: 'Restrict the analysis to one chromosome or a chromosome range.',
   'pheno-name': 'Trait column in the connected phenotype file.',
+  phenotypes: 'Phenotype/outcome columns to run. PLINK2 accepts multiple column names separated by spaces or commas; BioFlow can turn a typed list into a Slurm array.',
   'covar-name': 'Covariate columns in the connected covariate file. PLINK expects these separated by spaces.',
   mind: 'Exclude samples with missing genotype rate above this threshold.',
   'make-bed': 'Write a PLINK1 BED/BIM/FAM fileset.',
@@ -813,6 +939,12 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   title: 'Title shown at the top of the MultiQC report.',
   filename: 'Output filename written by MultiQC.',
   script: 'Shell body run by bash. Use $INPUT, ${INPUTS[@]}, and $OUTPUT.',
+  format: 'Coordinate file format to pass to CrossMap. Auto chooses from the input filename extension.',
+  'source-build': 'Reference build of the incoming coordinate file.',
+  'target-build': 'Reference build to lift coordinates onto.',
+  chromid: 'Controls target chromosome naming in CrossMap output.',
+  compress: 'Compress lifted VCF/gVCF output when applicable.',
+  'array-mode': 'When phenotype names are typed directly, run them as one Slurm array; file-backed lists run as a loop inside one job.',
 }
 
 const ADVANCED_PARAMS = new Set([
@@ -874,6 +1006,7 @@ const ADVANCED_PARAMS = new Set([
   'extract',
   'title',
   'filename',
+  'array-mode',
 ])
 
 const PARAM_SECTIONS: Record<string, NonNullable<ToolDef['params'][number]['section']>> = {
@@ -884,6 +1017,7 @@ const PARAM_SECTIONS: Record<string, NonNullable<ToolDef['params'][number]['sect
   hwe: 'Filters',
   chr: 'Filters',
   'pheno-name': 'Inputs',
+  phenotypes: 'Inputs',
   'covar-name': 'Inputs',
   mind: 'Filters',
   'make-bed': 'Output',
@@ -983,6 +1117,12 @@ const PARAM_SECTIONS: Record<string, NonNullable<ToolDef['params'][number]['sect
   title: 'Output',
   filename: 'Output',
   script: 'Analysis',
+  format: 'Inputs',
+  'source-build': 'Inputs',
+  'target-build': 'Output',
+  chromid: 'Output',
+  compress: 'Output',
+  'array-mode': 'Runtime',
 }
 
 const CORE_PARAMS = new Set([
@@ -992,6 +1132,7 @@ const CORE_PARAMS = new Set([
   'geno',
   'hwe',
   'pheno-name',
+  'phenotypes',
   'covar-name',
   'clump-p1',
   'clump-r2',
@@ -1030,6 +1171,9 @@ const CORE_PARAMS = new Set([
   'title',
   'filename',
   'script',
+  'format',
+  'source-build',
+  'target-build',
 ])
 
 const DNX_READY_TOOL_IDS = new Set([
@@ -1110,5 +1254,8 @@ export function areTypesCompatible(source: string, target: string): boolean {
   if (tabular.has(source) && tabular.has(target)) return true
   // PLINK2 `.pgen` is one concrete representation of a PLINK fileset.
   if ((source === 'pgen' && target === 'plink') || (source === 'plink' && target === 'pgen')) return true
+  // PLINK binary filesets are often represented by the .bed member; sidecars
+  // are checked at run start instead of requiring users to drag all three.
+  if (source === 'bed' && target === 'plink') return true
   return false
 }

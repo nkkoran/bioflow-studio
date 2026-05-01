@@ -1,5 +1,5 @@
 import { app, safeStorage } from 'electron'
-import { copyFile, mkdtemp, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { basename, join, posix } from 'node:path'
 
 import { DnxBridgeManager } from '../dnx/DnxBridgeManager'
@@ -101,6 +101,19 @@ export class DnxBackendAdapter {
     const resolved = await this.resolveFile(projectId, dnxPath)
     await this.bridge.download({ projectId, fileId: resolved.fileId, localPath })
     return localPath
+  }
+
+  async headText(projectId: string, dnxPath: string, lines: number): Promise<string> {
+    const tmpDir = await mkdtemp(join(app.getPath('temp'), 'bioflow-dnx-head-'))
+    const localPath = join(tmpDir, basename(dnxPath))
+    try {
+      await this.downloadDnxToLocal(projectId, dnxPath, localPath)
+      const buffer = await readFile(localPath)
+      const content = buffer.subarray(0, 256 * 1024).toString('utf-8')
+      return content.split(/\r?\n/).slice(0, Math.max(1, Math.floor(lines))).join('\n')
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
   }
 
   async transferDnxToSsh(

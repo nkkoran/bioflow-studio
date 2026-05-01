@@ -8,6 +8,7 @@ import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import {
   analysisOptionsToParamValues,
+  customFileOptionPortId,
   getAnalysisOptionDefs,
   isValueSource,
   normalizeAnalysisOptions,
@@ -534,16 +535,18 @@ export function AnalysisOptionsPanel({
   }
 
   const addCustomOption = () => {
+    const optionId = `custom_${Math.random().toString(36).slice(2, 10)}`
+    const portId = customFileOptionPortId({ optionId })
     commit([
       ...options,
       {
-        optionId: `custom_${Math.random().toString(36).slice(2, 10)}`,
+        optionId,
         enabled: true,
         customFlag: customFlag.trim(),
         customLabel: customLabel.trim(),
         customInputKind: customKind,
         value: customKind === 'text' ? customValue : undefined,
-        source: customKind === 'file' ? { kind: 'path', value: customValue } : undefined,
+        source: customKind === 'file' ? { kind: 'path', value: customValue, portId } : undefined,
       },
     ])
     setCustomDialogOpen(false)
@@ -772,6 +775,17 @@ export function AnalysisOptionsPanel({
 
       {selectedCustomOptions.map((option) => {
         const isFile = option.customInputKind === 'file'
+        const customPortId = option.source?.portId || customFileOptionPortId(option)
+        const customFileDef: AnalysisOptionDef = {
+          id: option.optionId,
+          label: option.customLabel?.trim() || option.customFlag?.trim() || 'Custom file flag',
+          group: 'Advanced',
+          kind: 'file',
+          flag: option.customFlag,
+          description: 'Custom file-valued flag. Choose a path or expose it as a canvas input.',
+          filePortId: customPortId,
+          sourcePortId: customPortId,
+        }
         return (
           <div key={option.optionId} className="rounded-md border border-border bg-bg-secondary p-2">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -793,15 +807,19 @@ export function AnalysisOptionsPanel({
               ))}
             </div>
             {isFile ? (
-              <RemotePathField
-                label=""
-                value={option.source?.value ?? ''}
-                placeholder="/project/.../input.txt"
-                onChange={(value) => patchOption(option.optionId, { source: { kind: 'path', value } })}
-                mode="file"
-                title="Select custom flag file"
-                buttonLabel="Browse"
-              />
+              optionEditor({
+                nodeId,
+                snapshot,
+                def: customFileDef,
+                option: {
+                  ...option,
+                  source: sourceValue(option, 'path', customPortId),
+                },
+                schemas,
+                refreshingSchemaPath,
+                onLoadSchema,
+                onPatch: (patch) => patchOption(option.optionId, patch),
+              })
             ) : (
               <Input label="" value={option.value === undefined || option.value === null ? '' : String(option.value)} placeholder="Optional value" onChange={(event) => patchOption(option.optionId, { value: event.target.value })} />
             )}

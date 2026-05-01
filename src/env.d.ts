@@ -32,7 +32,7 @@ interface Window {
       onDebug: (callback: (data: import('./types/ssh').SshDebugEvent) => void) => () => void
     }
     sftp: {
-      ls: (id: string, remotePath: string) => Promise<import('./types/files').RemoteFileEntry[]>
+      ls: (id: string, remotePath: string, opts?: { force?: boolean }) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (id: string, remotePath: string) => Promise<import('./types/files').FileStat>
       read: (id: string, remotePath: string, offset?: number, length?: number) => Promise<string>
       readBase64: (id: string, remotePath: string, offset?: number, length?: number) => Promise<string>
@@ -42,6 +42,15 @@ interface Window {
       delete: (id: string, remotePath: string) => Promise<void>
       write: (id: string, remotePath: string, content: string) => Promise<void>
       upload: (id: string, localPath: string, remotePath: string) => Promise<void>
+      download: (id: string, remotePath: string, localPath: string) => Promise<void>
+      onTransferProgress: (callback: (data: {
+        connectionId: string
+        direction: 'upload' | 'download'
+        localPath: string
+        remotePath: string
+        bytesTransferred: number
+        totalBytes?: number
+      }) => void) => () => void
     }
     terminal: {
       create: (connectionId: string) => Promise<string>
@@ -66,6 +75,7 @@ interface Window {
       listInstanceTypes: () => Promise<import('./types/dnx').DnxInstanceSpec[]>
       listFiles: (args: { projectId: string; path: string }) => Promise<import('./types/dnx').DnxRemoteFileEntry[]>
       stat: (args: { projectId: string; path: string }) => Promise<import('./types/dnx').DnxFileStat>
+      head: (args: { projectId: string; path: string; lines: number }) => Promise<string>
       upload: (args: { projectId: string; localPath: string; folder: string }) => Promise<{ fileId: string }>
       download: (args: { projectId: string; fileId: string; localPath: string }) => Promise<{ path: string }>
       run: (args: Record<string, unknown>) => Promise<{ jobId: string }>
@@ -87,6 +97,7 @@ interface Window {
       headGzip: (filePath: string, lines: number) => Promise<string>
       mkdir: (dirPath: string) => Promise<void>
       rename: (oldPath: string, newPath: string) => Promise<void>
+      copy: (oldPath: string, newPath: string) => Promise<void>
       delete: (filePath: string) => Promise<void>
       write: (filePath: string, content: string) => Promise<void>
       homedir: () => Promise<string>
@@ -97,7 +108,7 @@ interface Window {
       openDirectory: (options?: { defaultPath?: string }) => Promise<string | null>
     }
     pipeline: {
-      run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string, workspace?: import('./types/pipeline').RunState['workspace']) => Promise<{ runId: string }>
+      run: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string, workspace?: import('./types/pipeline').RunState['workspace'], runReadiness?: import('./types/workspace').RunReadinessReport | null) => Promise<{ runId: string }>
       cancel: (runId: string) => Promise<void>
       cancelNode: (runId: string, nodeId: string) => Promise<void>
       cancelJob: (connectionId: string, jobId: string) => Promise<void>
@@ -106,6 +117,7 @@ interface Window {
       getRun: (runId: string) => Promise<import('./types/pipeline').RunState | null>
       listOutputs: (runId: string, nodeId: string) => Promise<Array<{ name: string; path: string; size: number; modified: number }>>
       generateScriptsDry: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string) => Promise<import('./types/pipeline').DryRunScript[]>
+      planTransfersDry: (snapshot: import('./types/pipeline').PipelineSnapshot) => Promise<import('./types/pipeline').TransferPlan[]>
       onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: import('./types/pipeline').RunStatus | 'idle'; jobId?: string; error?: string; node?: import('./types/pipeline').NodeRunState }) => void) => () => void
       onRunStatus: (callback: (data: { runId: string; status: import('./types/pipeline').RunStatus }) => void) => () => void
       onJobLog: (callback: (data: { runId: string; nodeId: string; chunk: string; stream: 'stdout' | 'stderr' }) => void) => () => void
@@ -125,6 +137,7 @@ interface Window {
       loginPolicy: (connectionId: string) => Promise<import('./types/ssh').LoginPolicy>
       listAccounts: (connectionId: string) => Promise<import('./types/ssh').ClusterAccountsResult>
       listModules: (connectionId: string, query?: string, options?: { force?: boolean }) => Promise<import('./types/ssh').ClusterModulesResult>
+      checkModules: (connectionId: string, modules: string[]) => Promise<import('./types/ssh').ClusterModuleCheckResult>
       getLearnedResources: (connectionId: string, toolId: string, options?: { force?: boolean }) => Promise<import('./types/ssh').LearnedResourceSummary | null>
       resetLearnedResources: (connectionId: string, toolId: string) => Promise<void>
       clearCaches: (connectionId: string) => Promise<{ ok: boolean }>

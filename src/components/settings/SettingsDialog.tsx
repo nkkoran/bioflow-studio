@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Lock } from 'lucide-react'
+import { Loader2, Lock } from 'lucide-react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
@@ -33,6 +33,7 @@ export function SettingsDialog({
   const [pinOpen, setPinOpen] = useState(false)
   const [pinDraft, setPinDraft] = useState('')
   const [pinError, setPinError] = useState<string | null>(null)
+  const [checkingUpdates, setCheckingUpdates] = useState(false)
   const settings = useSettingsStore((s) => s.settings)
   const devMode = useSettingsStore((s) => s.devMode)
   const load = useSettingsStore((s) => s.load)
@@ -84,14 +85,25 @@ export function SettingsDialog({
     })
   }
 
-  const checkForUpdates = () => {
-    void window.api.app.checkForUpdates().catch((err) => {
+  const checkForUpdates = async () => {
+    setCheckingUpdates(true)
+    showToast({ kind: 'info', message: 'Checking for updates...', durationMs: 2500 })
+    try {
+      await window.api.app.checkForUpdates()
+      showToast({
+        kind: 'success',
+        message: 'Update check started. BioFlow will notify you if an update is available.',
+        durationMs: 5000,
+      })
+    } catch (err) {
       showToast({
         kind: 'error',
         message: `Update check failed: ${err instanceof Error ? err.message : String(err)}`,
         durationMs: 6000,
       })
-    })
+    } finally {
+      setCheckingUpdates(false)
+    }
   }
 
   return (
@@ -160,6 +172,35 @@ export function SettingsDialog({
                 disabled={!settings.autosaveEnabled}
                 onChange={(e) => number('settings:autosaveIntervalSeconds', Number(e.target.value))}
               />
+              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
+                <p className="text-[11px] font-medium text-text-secondary">Interface</p>
+                <Checkbox
+                  label="Show workflow guide in the toolbar"
+                  checked={settings.workflowGuideEnabled}
+                  onChange={(value) => toggle('settings:workflowGuideEnabled', value)}
+                />
+                <Checkbox
+                  label="Use icon grid in file explorers"
+                  checked={settings.fileExplorerViewMode === 'icons'}
+                  onChange={(value) => text('settings:fileExplorerViewMode', value ? 'icons' : 'list')}
+                />
+                <Checkbox
+                  label="Show genome build metadata on input files"
+                  checked={settings.showInputGenomeBuild}
+                  onChange={(value) => toggle('settings:showInputGenomeBuild', value)}
+                />
+                <div>
+                  <label className="mb-1 block text-text-secondary text-xs font-medium">Split file explorer layout</label>
+                  <select
+                    value={settings.splitExplorerBasePane}
+                    onChange={(e) => text('settings:splitExplorerBasePane', e.target.value)}
+                    className="h-8 w-full rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    <option value="left">Base path on left, current folder on right</option>
+                    <option value="right">Current folder on left, base path on right</option>
+                  </select>
+                </div>
+              </div>
               <div>
                 <label className="mb-1 block text-text-secondary text-xs font-medium">Theme</label>
                 <select
@@ -192,8 +233,9 @@ export function SettingsDialog({
                   <Button variant="secondary" size="sm" onClick={runStartupWizard}>
                     Run startup wizard
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={checkForUpdates}>
-                    Check for updates
+                  <Button variant="secondary" size="sm" onClick={() => void checkForUpdates()} disabled={checkingUpdates}>
+                    {checkingUpdates && <Loader2 size={12} className="mr-1 animate-spin" />}
+                    {checkingUpdates ? 'Checking...' : 'Check for updates'}
                   </Button>
                 </div>
               </div>

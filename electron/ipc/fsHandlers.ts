@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import { SftpPool } from '../ssh/SftpPool'
+import { SshManager } from '../ssh/SshManager'
 import type { SplitPattern } from '../../src/types/pipeline'
 
 interface SplitItem {
@@ -11,11 +12,15 @@ const MAX_SPLIT_ITEMS = 10_000
 
 export function registerFsHandlers(): void {
   const pool = SftpPool.getInstance()
+  const ssh = SshManager.getInstance()
 
   ipcMain.handle(
     'split:resolve',
     async (_event, connectionId: string, pattern: SplitPattern, manualItems?: SplitItem[]) => {
-      const items = await resolveSplitPattern(pool, connectionId, pattern, manualItems ?? [])
+      const home = await resolveHome(ssh, connectionId).catch(() => '')
+      const resolvedPattern = expandPatternHome(pattern, home)
+      const resolvedManual = (manualItems ?? []).map((item) => ({ ...item, path: expandHome(item.path, home) }))
+      const items = await resolveSplitPattern(pool, connectionId, resolvedPattern, resolvedManual)
       const missing: string[] = []
       await Promise.all(items.map(async (item) => {
         try {
@@ -28,6 +33,30 @@ export function registerFsHandlers(): void {
       return { items, missing }
     },
   )
+}
+
+async function resolveHome(ssh: SshManager, connectionId: string): Promise<string> {
+  const result = await ssh.exec(connectionId, 'printf %s "$HOME"')
+  if (result.exitCode !== 0) return ''
+  return result.stdout.trim().replace(/\/+$/, '')
+}
+
+function expandPatternHome(pattern: SplitPattern, home: string): SplitPattern {
+  if (!home) return pattern
+  if (pattern.kind === 'manual') return pattern
+  if (pattern.kind === 'brace') return { ...pattern, template: expandHome(pattern.template, home) }
+  if (pattern.kind === 'glob') return { ...pattern, template: expandHome(pattern.template, home) }
+  return {
+    ...pattern,
+    parentDir: expandHome(pattern.parentDir, home),
+  }
+}
+
+function expandHome(path: string, home: string): string {
+  if (!home) return path
+  if (path === '~') return home
+  if (path.startsWith('~/')) return `${home}/${path.slice(2)}`
+  return path
 }
 
 async function resolveSplitPattern(

@@ -81,6 +81,8 @@ export interface FileProbeResult {
   delimiter?: TabularDelimiter
   header?: string[]
   previewRows?: string[][]
+  variantHeader?: string[]
+  variantPreviewRows?: string[][]
   sampleIds?: string[]
   recordIds?: string[]
   sidecars?: Record<string, boolean>
@@ -106,6 +108,7 @@ export type WorkflowReadinessCategory =
   | 'IDs'
   | 'Handoffs'
   | 'Parameters'
+  | 'Resources'
   | 'Outputs'
   | 'Export'
 
@@ -119,6 +122,7 @@ export interface WorkflowReadinessIssue {
   nodeId?: string
   portId?: string
   path?: string
+  details?: Record<string, string | number | boolean | null>
 }
 
 export interface WorkflowReadinessReport {

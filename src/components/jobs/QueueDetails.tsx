@@ -89,7 +89,12 @@ export function QueueDetails({ run }: Props) {
                   <td className="px-2 py-1 text-text-muted whitespace-nowrap">{entry.elapsed}</td>
                   <td className="px-2 py-1 text-text-muted whitespace-nowrap">{entry.timeLimit}</td>
                   <td className="px-2 py-1 text-text-muted truncate max-w-[120px]">{entry.partition}</td>
-                  <td className="px-2 py-1 text-text-muted truncate max-w-[220px]">{entry.reason}</td>
+                  <td className="px-2 py-1 text-text-muted truncate max-w-[260px]" title={queueReasonExplanation(entry.reason)}>
+                    {entry.reason}
+                    {entry.isOurs && entry.reason && entry.reason !== 'None' && (
+                      <span className="ml-1 text-text-secondary">· {queueReasonExplanation(entry.reason)}</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -98,6 +103,19 @@ export function QueueDetails({ run }: Props) {
       )}
     </div>
   )
+}
+
+function queueReasonExplanation(reason: string): string {
+  const normalized = reason.replace(/[()]/g, '').toLowerCase()
+  if (!reason || normalized === 'none') return 'No pending reason reported.'
+  if (normalized.includes('dependency')) return 'Waiting for an upstream Slurm dependency to finish successfully.'
+  if (normalized.includes('priority')) return 'Queued behind higher-priority jobs; no action is usually needed.'
+  if (normalized.includes('resources')) return 'Waiting for requested CPUs, memory, GPUs, or nodes to become available.'
+  if (normalized.includes('account')) return 'The selected account may be invalid, missing, or over an allocation limit.'
+  if (normalized.includes('partition') || normalized.includes('qos')) return 'The partition/QOS choice may not match this job or account.'
+  if (normalized.includes('time')) return 'The requested walltime may exceed policy or available scheduling windows.'
+  if (normalized.includes('launch')) return 'Slurm is preparing to launch the job.'
+  return 'Slurm is holding the job for this scheduler reason.'
 }
 
 function isKnownJob(jobId: string, knownJobIds: Set<string>): boolean {

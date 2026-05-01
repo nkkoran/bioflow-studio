@@ -1,13 +1,15 @@
 import { ipcMain } from 'electron'
 import { PipelineRunner } from '../pipeline/PipelineRunner'
+import { planPipelineTransfers } from '../../src/lib/transferPlanner'
 import type { PipelineSnapshot } from '../../src/types/pipeline'
+import type { RunReadinessReport } from '../../src/types/workspace'
 
 export function registerPipelineHandlers(): void {
   const runner = PipelineRunner.getInstance()
 
   ipcMain.handle('pipeline:run', async (
     _event,
-    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string; workspace?: import('../../src/types/pipeline').RunState['workspace'] },
+    args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string; workspace?: import('../../src/types/pipeline').RunState['workspace']; runReadiness?: RunReadinessReport | null },
   ) => {
     return runner.start(args)
   })
@@ -46,5 +48,9 @@ export function registerPipelineHandlers(): void {
     args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string },
   ) => {
     return runner.generateScriptsDry(args)
+  })
+
+  ipcMain.handle('pipeline:plan-transfers-dry', async (_event, snapshot: PipelineSnapshot) => {
+    return planPipelineTransfers(snapshot)
   })
 }

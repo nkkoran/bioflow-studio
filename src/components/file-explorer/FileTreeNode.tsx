@@ -8,7 +8,7 @@ import { classNames } from '@/lib/utils'
 interface FileTreeNodeProps {
   entry: RemoteFileEntry
   isSelected: boolean
-  onSelect: (path: string) => void
+  onSelect: (entry: RemoteFileEntry, event: React.MouseEvent) => void
   onNavigate: (path: string) => void
   onPreview: (entry: RemoteFileEntry) => void
   onContextMenu: (e: React.MouseEvent, entry: RemoteFileEntry) => void
@@ -25,9 +25,9 @@ export function FileTreeNode({
   const iconDef = getFileIcon(entry.extension, entry.isDirectory)
   const Icon = iconDef.icon
 
-  const handleClick = useCallback(() => {
-    onSelect(entry.path)
-  }, [onSelect, entry.path])
+  const handleClick = useCallback((event: React.MouseEvent) => {
+    onSelect(entry, event)
+  }, [onSelect, entry])
 
   const handleDoubleClick = useCallback(() => {
     if (entry.isDirectory) {
@@ -49,9 +49,14 @@ export function FileTreeNode({
     (e: React.DragEvent) => {
       e.dataTransfer.setData('text/plain', entry.path)
       e.dataTransfer.setData('application/x-bioflow-path', entry.path)
+      e.dataTransfer.setData('application/x-bioflow-file-entry', JSON.stringify({
+        path: entry.path,
+        name: entry.name,
+        isDirectory: entry.isDirectory,
+      }))
       e.dataTransfer.effectAllowed = 'copyMove'
     },
-    [entry.path],
+    [entry.isDirectory, entry.name, entry.path],
   )
 
   return (

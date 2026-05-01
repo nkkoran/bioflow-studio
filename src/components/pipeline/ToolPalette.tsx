@@ -6,8 +6,8 @@
  * The drag payload uses the dataTransfer API with a "application/bioflow-tool"
  * MIME type carrying the tool id.
  */
-import { useEffect, useState, useMemo } from 'react'
-import { ChevronRight, Plus, Search } from 'lucide-react'
+import { useCallback, useEffect, useState, useMemo } from 'react'
+import { ChevronRight, Clock3, Plus, Search, Star } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { classNames } from '@/lib/utils'
@@ -26,13 +26,17 @@ export const BUNDLE_DRAG_MIME = 'application/bioflow-bundle'
 
 interface PaletteItemProps {
   tool: ToolDef
+  favorite?: boolean
+  onToggleFavorite?: (toolId: string) => void
+  onUse?: (toolId: string) => void
 }
 
-function PaletteItem({ tool }: PaletteItemProps) {
+function PaletteItem({ tool, favorite, onToggleFavorite, onUse }: PaletteItemProps) {
   const Icon = iconForCategory(tool.category)
   const onDragStart = (event: React.DragEvent) => {
     event.dataTransfer.setData(DRAG_MIME, tool.id)
     event.dataTransfer.effectAllowed = 'copy'
+    onUse?.(tool.id)
   }
 
   return (
@@ -41,7 +45,7 @@ function PaletteItem({ tool }: PaletteItemProps) {
         draggable
         onDragStart={onDragStart}
         className={classNames(
-          'px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
+          'group px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
           'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
           'transition-colors select-none',
         )}
@@ -50,6 +54,28 @@ function PaletteItem({ tool }: PaletteItemProps) {
         <div className="flex items-center gap-1.5 font-medium text-text-primary">
           <Icon size={11} className="shrink-0 text-text-muted" />
           <span className="truncate">{tool.name}</span>
+          {onToggleFavorite && (
+            <button
+              type="button"
+              draggable={false}
+              onMouseDown={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+              }}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                onToggleFavorite(tool.id)
+              }}
+              className={classNames(
+                'ml-auto shrink-0 rounded p-0.5 transition-colors',
+                favorite ? 'text-amber-300' : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-amber-300',
+              )}
+              title={favorite ? 'Remove favorite' : 'Favorite tool'}
+            >
+              <Star size={11} className={favorite ? 'fill-current' : undefined} />
+            </button>
+          )}
         </div>
         <div className="text-[10px] text-text-muted truncate">{tool.command}</div>
       </div>
@@ -79,6 +105,7 @@ function BundleItem({ bundle }: { bundle: ToolBundle }) {
         <Icon size={11} className="shrink-0 text-text-muted" />
         <span className="truncate">{bundle.label}</span>
       </div>
+      <div className="text-[10px] text-text-muted truncate">{bundle.pack}</div>
       <div className="text-[10px] text-text-muted truncate">{bundle.description}</div>
     </div>
   )
@@ -116,6 +143,8 @@ export function ToolPalette() {
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [customBuilderOpen, setCustomBuilderOpen] = useState(false)
+  const [favoriteToolIds, setFavoriteToolIds] = useState<string[]>([])
+  const [recentToolIds, setRecentToolIds] = useState<string[]>([])
   const customNodes = useCustomNodesStore((s) => s.nodes)
   const loadCustomNodes = useCustomNodesStore((s) => s.load)
   const customLoaded = useCustomNodesStore((s) => s.loaded)
@@ -131,8 +160,58 @@ export function ToolPalette() {
     if (!customLoaded) void loadCustomNodes()
   }, [customLoaded, loadCustomNodes])
 
+  useEffect(() => {
+    let cancelled = false
+    void window.api.store.get<{ favorites?: unknown; recent?: unknown }>('toolPalette:preferences').then((stored) => {
+      if (cancelled || !stored || typeof stored !== 'object') return
+      if (Array.isArray(stored.favorites)) {
+        setFavoriteToolIds(stored.favorites.filter((id): id is string => typeof id === 'string'))
+      }
+      if (Array.isArray(stored.recent)) {
+        setRecentToolIds(stored.recent.filter((id): id is string => typeof id === 'string'))
+      }
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
+
+  const persistPalettePreferences = useCallback((favorites: string[], recent: string[]) => {
+    void window.api.store.set('toolPalette:preferences', { favorites, recent }).catch((err) => {
+      console.warn('[ToolPalette] failed to persist preferences:', err)
+    })
+  }, [])
+
+  const visibleTools = useMemo(
+    () => TOOLS.filter((tool) => devMode || (!(tool.backends?.length === 1 && tool.backends.includes('dnx')) && !tool.dnxApplet && !tool.id.includes('ukb'))),
+    [devMode],
+  )
+  const visibleToolById = useMemo(() => new Map(visibleTools.map((tool) => [tool.id, tool])), [visibleTools])
+  const favoriteToolSet = useMemo(() => new Set(favoriteToolIds), [favoriteToolIds])
+  const favoriteTools = useMemo(
+    () => favoriteToolIds.map((id) => visibleToolById.get(id)).filter((tool): tool is ToolDef => Boolean(tool)),
+    [favoriteToolIds, visibleToolById],
+  )
+  const recentTools = useMemo(
+    () => recentToolIds.map((id) => visibleToolById.get(id)).filter((tool): tool is ToolDef => Boolean(tool)),
+    [recentToolIds, visibleToolById],
+  )
+
+  const toggleFavorite = useCallback((toolId: string) => {
+    setFavoriteToolIds((current) => {
+      const next = current.includes(toolId) ? current.filter((id) => id !== toolId) : [toolId, ...current].slice(0, 24)
+      persistPalettePreferences(next, recentToolIds)
+      return next
+    })
+  }, [persistPalettePreferences, recentToolIds])
+
+  const recordRecentTool = useCallback((toolId: string) => {
+    setRecentToolIds((current) => {
+      const next = [toolId, ...current.filter((id) => id !== toolId)].slice(0, 8)
+      persistPalettePreferences(favoriteToolIds, next)
+      return next
+    })
+  }, [favoriteToolIds, persistPalettePreferences])
+
   const groups = useMemo(() => {
-    const visibleTools = TOOLS.filter((tool) => devMode || (!(tool.backends?.length === 1 && tool.backends.includes('dnx')) && !tool.dnxApplet && !tool.id.includes('ukb')))
     if (!search.trim()) {
       const groupMap = new Map<string, ToolDef[]>()
       for (const tool of visibleTools) {
@@ -155,17 +234,19 @@ export function ToolPalette() {
       groupMap.get(t.category)!.push(t)
     }
     return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
-  }, [devMode, search])
+  }, [search, visibleTools])
 
   const bundles = useMemo(() => {
+    const visibleBundles = TOOL_BUNDLES.filter((bundle) => devMode || bundle.pack !== 'UKB/RAP Extraction')
     const q = search.trim().toLowerCase()
-    if (!q) return TOOL_BUNDLES
-    return TOOL_BUNDLES.filter((bundle) =>
+    if (!q) return visibleBundles
+    return visibleBundles.filter((bundle) =>
       bundle.label.toLowerCase().includes(q) ||
       bundle.description.toLowerCase().includes(q) ||
+      bundle.pack.toLowerCase().includes(q) ||
       bundle.id.toLowerCase().includes(q),
     )
-  }, [search])
+  }, [devMode, search])
 
   const toggleGroup = (cat: string) => {
     const next = new Set(collapsed)
@@ -210,11 +291,51 @@ export function ToolPalette() {
 
       {/* Tools grouped by category */}
       <div className="flex-1 overflow-y-auto py-1">
+        {!search.trim() && favoriteTools.length > 0 && (
+          <div className="mb-1">
+            <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+              <Star size={10} className="fill-current text-amber-300" />
+              Favorites
+              <span className="ml-auto text-text-muted">{favoriteTools.length}</span>
+            </div>
+            <div className="px-2 flex flex-col gap-0.5">
+              {favoriteTools.map((tool) => (
+                <PaletteItem
+                  key={`favorite-${tool.id}`}
+                  tool={tool}
+                  favorite
+                  onToggleFavorite={toggleFavorite}
+                  onUse={recordRecentTool}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        {!search.trim() && recentTools.length > 0 && (
+          <div className="mb-1">
+            <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+              <Clock3 size={10} />
+              Recent
+              <span className="ml-auto text-text-muted">{recentTools.length}</span>
+            </div>
+            <div className="px-2 flex flex-col gap-0.5">
+              {recentTools.map((tool) => (
+                <PaletteItem
+                  key={`recent-${tool.id}`}
+                  tool={tool}
+                  favorite={favoriteToolSet.has(tool.id)}
+                  onToggleFavorite={toggleFavorite}
+                  onUse={recordRecentTool}
+                />
+              ))}
+            </div>
+          </div>
+        )}
         {bundles.length > 0 && (
           <div className="mb-1">
             <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
               <BundleIcon size={10} />
-              Bundles
+              Workflow packs
               <span className="ml-auto text-text-muted">{bundles.length}</span>
             </div>
             <div className="px-2 flex flex-col gap-0.5">
@@ -274,7 +395,13 @@ export function ToolPalette() {
               {!isCollapsed && (
                 <div className="px-2 flex flex-col gap-0.5">
                   {tools.map((tool) => (
-                    <PaletteItem key={tool.id} tool={tool} />
+                    <PaletteItem
+                      key={tool.id}
+                      tool={tool}
+                      favorite={favoriteToolSet.has(tool.id)}
+                      onToggleFavorite={toggleFavorite}
+                      onUse={recordRecentTool}
+                    />
                   ))}
                 </div>
               )}

@@ -74,12 +74,14 @@ function buildSlurmHeader(args: {
   const jobName = args.jobSuffix ? `bioflow-${args.slug}-${args.jobSuffix}` : `bioflow-${args.slug}`
   lines.push(`#SBATCH --job-name=${jobName}`)
   if (args.arraySpec) {
+    const logPath = `${args.logDir}/${args.slug}-%A_%a.slurm.log`
     lines.push(`#SBATCH --array=${args.arraySpec}`)
-    lines.push(`#SBATCH --output=${args.logDir}/${args.slug}-%A_%a.out`)
-    lines.push(`#SBATCH --error=${args.logDir}/${args.slug}-%A_%a.err`)
+    lines.push(`#SBATCH --output=${logPath}`)
+    lines.push(`#SBATCH --error=${logPath}`)
   } else {
-    lines.push(`#SBATCH --output=${args.logDir}/${args.slug}-%j.out`)
-    lines.push(`#SBATCH --error=${args.logDir}/${args.slug}-%j.err`)
+    const logPath = `${args.logDir}/${args.slug}-%j.slurm.log`
+    lines.push(`#SBATCH --output=${logPath}`)
+    lines.push(`#SBATCH --error=${logPath}`)
   }
   lines.push(`#SBATCH --cpus-per-task=${args.cpus}`)
   lines.push(`#SBATCH --mem=${args.memGB}G`)
@@ -92,9 +94,20 @@ function buildSlurmHeader(args: {
 export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   const { nodeId, tool, nodeData, axisPlan, outputDir, logDir, connectionDefaults } = opts
   const slug = opts.nodeSlug ?? nodeId
-  const isArray = axisPlan.mode === 'array'
-  const arraySize = isArray ? axisPlan.keys!.length : undefined
-  const arrayRuntime = isArray ? buildArrayRuntime(axisPlan) : null
+  const phewasArray = tool.id === 'plink2.phewas' ? typedPhenotypeList(nodeData).filter(Boolean) : []
+  const assocArray = tool.id === 'plink2.assoc' ? typedAssocPhenotypeList(nodeData).filter(Boolean) : []
+  const usePhewasArray = tool.id === 'plink2.phewas'
+    && axisPlan.mode !== 'array'
+    && stringParam(nodeData, 'array-mode') !== 'single-job-loop'
+    && phewasArray.length > 1
+    && !axisPlan.inputs.phenoList
+  const useAssocArray = tool.id === 'plink2.assoc'
+    && axisPlan.mode !== 'array'
+    && assocArray.length > 1
+    && Boolean(axisPlan.inputs.pheno)
+  const isArray = axisPlan.mode === 'array' || usePhewasArray || useAssocArray
+  const arraySize = axisPlan.mode === 'array' ? axisPlan.keys!.length : usePhewasArray ? phewasArray.length : useAssocArray ? assocArray.length : undefined
+  const arrayRuntime = axisPlan.mode === 'array' ? buildArrayRuntime(axisPlan) : null
 
   const slurm = { ...(tool.slurm ?? {}), ...(nodeData.slurmOverride ?? {}) }
   const cpus = slurm.cpus ?? 1
@@ -111,7 +124,13 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     timeH,
     account,
     partition,
-    arraySpec: isArray ? arrayRuntime!.arraySpec : undefined,
+    arraySpec: axisPlan.mode === 'array'
+      ? arrayRuntime!.arraySpec
+      : usePhewasArray
+        ? `0-${phewasArray.length - 1}`
+        : useAssocArray
+          ? `0-${assocArray.length - 1}`
+          : undefined,
   })
   lines.push('')
   lines.push('set -euo pipefail')
@@ -127,7 +146,7 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   // For array jobs, prefer using the biological key directly as the Slurm
   // task id (e.g. chromosomes 1-22) and infer path templates when possible.
   // Fall back to a lookup table only for irregular/non-numeric keys.
-  if (isArray) {
+  if (axisPlan.mode === 'array') {
     lines.push(`# --- Array fan-out over axis "${axisPlan.axis}" ---`)
     lines.push(...arrayRuntime!.setupLines)
     lines.push('')
@@ -141,6 +160,81 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
       slug,
       isArray,
     }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'plink2.assoc' && useAssocArray) {
+    lines.push(...renderPlinkAssociationBatchScript({
+      tool,
+      nodeData,
+      axisPlan,
+      outputDir,
+      slug,
+      typedPhenotypes: assocArray,
+    }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'plink2.phewas') {
+    lines.push(...renderPlinkPhewasScript({
+      tool,
+      nodeData,
+      axisPlan,
+      outputDir,
+      slug,
+      typedPhenotypes: phewasArray,
+      useSlurmArray: usePhewasArray,
+    }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'crossmap.liftover') {
+    lines.push(renderCrossMapCommand({ nodeData, axisPlan, outputDir, slug, isArray: axisPlan.mode === 'array' }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'bwa.mem') {
+    lines.push(renderBwaMemCommand({ nodeData, axisPlan, outputDir, slug, isArray: axisPlan.mode === 'array' }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'fastqc') {
+    lines.push(renderFastqcCommand({ nodeData, axisPlan, outputDir }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'multiqc') {
+    lines.push(renderMultiqcCommand({ nodeData, axisPlan, outputDir, slug }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'bcftools.view') {
+    lines.push(renderBcftoolsViewCommand({ nodeData, axisPlan, outputDir, slug, isArray: axisPlan.mode === 'array' }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'bcftools.merge') {
+    lines.push(renderBcftoolsMergeCommand({ nodeData, axisPlan, outputDir, slug }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'samtools.sort') {
+    lines.push(renderSamtoolsSortCommand({ nodeData, axisPlan, outputDir, slug, isArray: axisPlan.mode === 'array' }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'samtools.index') {
+    lines.push(renderSamtoolsIndexCommand({ nodeData, axisPlan, outputDir, slug, isArray: axisPlan.mode === 'array' }))
     lines.push('')
     return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
   }
@@ -183,14 +277,21 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   const optionFilePorts = new Set(optionDefs.filter((def) => def.flag && (def.kind === 'file' || def.kind === 'compound')).map((def) => def.filePortId).filter(Boolean))
 
   for (const port of activeInputs) {
-    if (optionFilePorts.has(port.id)) continue
+    if (optionFilePorts.has(port.id) || port.id.startsWith('custom_')) continue
     const val = axisPlan.inputs[port.id]
     if (!val) continue
     const flag = portFlag(tool, port)
-    if (isArray && port.id === axisPlan.arrayPortId) {
+    if (axisPlan.mode === 'array' && val.kind === 'array' && arrayInputAlignedWithPlan(axisPlan, val)) {
       if (isPlinkInputPort(tool, port)) {
         const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
         cmdParts.push(`${plinkInputFlag(firstPath)} ${plinkShellPrefixExpr(`i_${port.id}`, firstPath)}`)
+      } else if (tool.command.toLowerCase() === 'regenie' && port.id === 'input') {
+        const firstPath = val.kind === 'array' ? val.paths[0] ?? '' : ''
+        const regenFlag = regenieGenotypeFlag(firstPath, port.fileType)
+        const regenArg = regenFlag === '--bgen'
+          ? `"$i_${port.id}"`
+          : regenieShellPrefixExpr(`i_${port.id}`, firstPath)
+        cmdParts.push(`${regenFlag} ${regenArg}`)
       } else {
         cmdParts.push(flag ? `${flag} "$i_${port.id}"` : `"$i_${port.id}"`)
       }
@@ -198,13 +299,13 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     }
     renderPortArgs(tool, port, val, cmdParts)
   }
-  cmdParts.push(...emitAnalysisOptions(tool, commandNodeData, axisPlan, isArray))
+  cmdParts.push(...emitAnalysisOptions(tool, commandNodeData, axisPlan, axisPlan.mode === 'array'))
 
   // Output paths — one output flag if present.
   // Convention: many tools use --out <prefix>; we fall back to `-o` then plain.
   // For V1, only emit an --out prefix for tools that declare a specific output
   // flag via a param named 'out'/'output'/'o'. Otherwise we rely on tool default.
-  const outputSpec = buildOutputSpec(tool, axisPlan, slug, outputDir, isArray)
+  const outputSpec = buildOutputSpec(tool, axisPlan, slug, outputDir, axisPlan.mode === 'array')
   if (outputSpec) cmdParts.push(...outputSpec)
 
   lines.push(formatCommand(cmdParts))
@@ -278,6 +379,351 @@ function renderCustomShellScript(opts: {
     lines.push(script || ':')
   }
   return lines
+}
+
+function typedPhenotypeList(nodeData: ToolNodeData): string[] {
+  return splitPlinkListValue(nodeData.paramValues?.phenotypes)
+}
+
+function typedAssocPhenotypeList(nodeData: ToolNodeData): string[] {
+  return splitPlinkListValue(nodeData.paramValues?.['pheno-name'])
+}
+
+function renderPlinkAssociationBatchScript(opts: {
+  tool: ToolDef
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  typedPhenotypes: string[]
+}): string[] {
+  const { tool, nodeData, axisPlan, outputDir, slug, typedPhenotypes } = opts
+  const genoPath = resolveSingleInput(axisPlan, 'input', false)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'tsv', false)
+  const genoFlag = plinkInputFlag(genoPath)
+  const genoPrefix = plinkPrefixPath(genoPath)
+  const commandNodeData: ToolNodeData = {
+    ...nodeData,
+    analysisOptions: normalizeAnalysisOptions(tool, nodeData, { connectedPortIds: Object.keys(axisPlan.inputs) }),
+  }
+  const commonArgs = [
+    genoFlag,
+    shellQuote(genoPrefix),
+    ...emitAnalysisOptions(tool, commandNodeData, axisPlan, false)
+      .filter((arg) => !arg.startsWith('--pheno-name')),
+  ]
+
+  const lines: string[] = []
+  lines.push('# --- PLINK2 association phenotype array ---')
+  lines.push(`SUMMARY=${shellQuote(output)}`)
+  lines.push(`SUMMARY_LOCK=${shellQuote(`${output}.lock`)}`)
+  lines.push(`mkdir -p ${shellQuote(outputDir)}`)
+  lines.push(`PHENOS=(${typedPhenotypes.map(shellArg).join(' ')})`)
+  lines.push('if [ "${#PHENOS[@]}" -eq 0 ]; then echo "No phenotypes selected" >&2; exit 1; fi')
+  lines.push('')
+  lines.push('run_one_pheno() {')
+  lines.push('  local pheno="$1"')
+  lines.push(`  local safe="$(printf '%s' "$pheno" | tr -c 'A-Za-z0-9_.-' '_')"`)
+  lines.push(`  local prefix=${shellQuote(`${outputDir}/${slug}`)}."$safe"`)
+  lines.push(`  ${tool.command} ${commonArgs.join(' ')} --pheno-name "$pheno" --out "$prefix"`)
+  lines.push('  for result in "$prefix".*.glm.*; do')
+  lines.push('    [ -s "$result" ] || continue')
+  lines.push('    {')
+  lines.push('      flock 9')
+  lines.push('      if [ ! -s "$SUMMARY" ]; then')
+  lines.push(`        awk -v pheno="$pheno" 'BEGIN{OFS="\\t"} NR==1{print "PHENO",$0; next} {print pheno,$0}' "$result" > "$SUMMARY"`)
+  lines.push('      else')
+  lines.push(`        awk -v pheno="$pheno" 'BEGIN{OFS="\\t"} NR>1{print pheno,$0}' "$result" >> "$SUMMARY"`)
+  lines.push('      fi')
+  lines.push('    } 9>"$SUMMARY_LOCK"')
+  lines.push('  done')
+  lines.push('}')
+  lines.push('')
+  lines.push('PHENO="${PHENOS[$SLURM_ARRAY_TASK_ID]}"')
+  lines.push('run_one_pheno "$PHENO"')
+  return lines
+}
+
+function renderPlinkPhewasScript(opts: {
+  tool: ToolDef
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  typedPhenotypes: string[]
+  useSlurmArray: boolean
+}): string[] {
+  const { tool, nodeData, axisPlan, outputDir, slug, typedPhenotypes, useSlurmArray } = opts
+  const genoPath = resolveSingleInput(axisPlan, 'input', false)
+  const phenoPath = resolveSingleInput(axisPlan, 'pheno', false)
+  const covarPath = resolveSingleInput(axisPlan, 'covar', false)
+  const keepPath = resolveSingleInput(axisPlan, 'keep', false)
+  const phenoListPath = resolveSingleInput(axisPlan, 'phenoList', false)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'tsv', false)
+  const genoFlag = plinkInputFlag(genoPath)
+  const genoPrefix = plinkPrefixPath(genoPath)
+  const commonArgs: string[] = [
+    genoFlag, shellQuote(genoPrefix),
+    '--pheno',
+  ]
+  if (booleanParam(nodeData, 'pheno-iid-only', false)) commonArgs.push('iid-only')
+  commonArgs.push(shellQuote(phenoPath))
+  if (covarPath) {
+    commonArgs.push('--covar')
+    if (booleanParam(nodeData, 'covar-iid-only', false)) commonArgs.push('iid-only')
+    commonArgs.push(shellQuote(covarPath))
+  }
+  if (keepPath) commonArgs.push('--keep', shellQuote(keepPath))
+  for (const paramName of ['one', 'glm', 'maf', 'geno', 'hwe', 'chr', 'covar-name']) {
+    const param = tool.params.find((candidate) => candidate.name === paramName)
+    if (!param) continue
+    if (param.name === 'glm') {
+      const values = plinkGlmValuesFromParams(nodeData)
+      commonArgs.push(values.length > 0 ? `--glm ${values.map(shellQuote).join(' ')}` : '--glm')
+      continue
+    }
+    appendParamArgs(tool, param, nodeData.paramValues?.[paramName], commonArgs)
+  }
+  for (const paramName of ['neg9-pheno-really-missing', 'no-input-missing-phenotype', 'input-missing-phenotype']) {
+    const param = tool.params.find((candidate) => candidate.name === paramName)
+    if (param) appendParamArgs(tool, param, nodeData.paramValues?.[paramName], commonArgs)
+  }
+
+  const lines: string[] = []
+  lines.push('# --- PLINK2 PheWAS phenotype loop ---')
+  lines.push(`SUMMARY=${shellQuote(output)}`)
+  lines.push(`SUMMARY_LOCK=${shellQuote(`${output}.lock`)}`)
+  lines.push(`mkdir -p ${shellQuote(outputDir)}`)
+  if (phenoListPath) {
+    lines.push(`mapfile -t PHENOS < ${shellQuote(phenoListPath)}`)
+    lines.push('PHENOS=("${PHENOS[@]/%$\'\\r\'/}")')
+    lines.push('PHENOS=("${PHENOS[@]//#*/}")')
+    lines.push('FILTERED_PHENOS=()')
+    lines.push('for pheno in "${PHENOS[@]}"; do')
+    lines.push('  pheno="${pheno//,/ }"')
+    lines.push('  for token in $pheno; do [ -n "$token" ] && FILTERED_PHENOS+=("$token"); done')
+    lines.push('done')
+    lines.push('PHENOS=("${FILTERED_PHENOS[@]}")')
+  } else {
+    lines.push(`PHENOS=(${typedPhenotypes.map(shellArg).join(' ')})`)
+  }
+  lines.push('if [ "${#PHENOS[@]}" -eq 0 ]; then echo "No phenotypes selected" >&2; exit 1; fi')
+  lines.push('')
+  lines.push('run_one_pheno() {')
+  lines.push('  local pheno="$1"')
+  lines.push(`  local safe="$(printf '%s' "$pheno" | tr -c 'A-Za-z0-9_.-' '_')"`)
+  lines.push(`  local prefix=${shellQuote(`${outputDir}/${slug}`)}."$safe"`)
+  lines.push(`  ${tool.command} ${commonArgs.join(' ')} --pheno-name "$pheno" --out "$prefix"`)
+  lines.push('  for result in "$prefix".*.glm.*; do')
+  lines.push('    [ -s "$result" ] || continue')
+  lines.push('    {')
+  lines.push('      flock 9')
+  lines.push('      if [ ! -s "$SUMMARY" ]; then')
+  lines.push(`        awk -v pheno="$pheno" 'BEGIN{OFS="\\t"} NR==1{print "PHENO",$0; next} {print pheno,$0}' "$result" > "$SUMMARY"`)
+  lines.push('      else')
+  lines.push(`        awk -v pheno="$pheno" 'BEGIN{OFS="\\t"} NR>1{print pheno,$0}' "$result" >> "$SUMMARY"`)
+  lines.push('      fi')
+  lines.push('    } 9>"$SUMMARY_LOCK"')
+  lines.push('  done')
+  lines.push('}')
+  lines.push('')
+  if (useSlurmArray) {
+    lines.push('PHENO="${PHENOS[$SLURM_ARRAY_TASK_ID]}"')
+    lines.push('run_one_pheno "$PHENO"')
+  } else {
+    lines.push('for PHENO in "${PHENOS[@]}"; do')
+    lines.push('  run_one_pheno "$PHENO"')
+    lines.push('done')
+  }
+  return lines
+}
+
+function renderCrossMapCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray } = opts
+  const input = resolveSingleInput(axisPlan, 'input', isArray)
+  const chain = resolveSingleInput(axisPlan, 'chain', false)
+  const reference = resolveSingleInput(axisPlan, 'reference', false)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'any', isArray)
+  const format = normalizeCrossMapFormat(stringParam(nodeData, 'format'), input)
+  const parts = ['CrossMap', format]
+  const chromid = stringParam(nodeData, 'chromid')
+  if (chromid && ['bam', 'cram', 'sam'].includes(format)) parts.push('--chromid', shellQuote(chromid))
+  parts.push(shellExpr(chain), shellExpr(input))
+  if (format === 'vcf' || format === 'gvcf') {
+    if (reference) parts.push(shellExpr(reference))
+    parts.push(shellExpr(output))
+  } else {
+    parts.push(shellExpr(output))
+  }
+  if ((format === 'vcf' || format === 'gvcf') && nodeData.paramValues?.compress === true && output.endsWith('.gz')) {
+    return `${parts.join(' \\\n  ')}\nif command -v tabix >/dev/null 2>&1; then tabix -f -p vcf ${shellExpr(output)}; fi`
+  }
+  return parts.join(' \\\n  ')
+}
+
+function normalizeCrossMapFormat(rawFormat: string, inputPath: string): string {
+  if (rawFormat && rawFormat !== 'auto') return rawFormat.toLowerCase()
+  const lower = inputPath.toLowerCase()
+  if (lower.endsWith('.vcf') || lower.endsWith('.vcf.gz')) return 'vcf'
+  if (lower.endsWith('.gvcf') || lower.endsWith('.gvcf.gz')) return 'gvcf'
+  if (lower.endsWith('.bed') || lower.endsWith('.bed.gz')) return 'bed'
+  if (lower.endsWith('.bam')) return 'bam'
+  if (lower.endsWith('.cram')) return 'cram'
+  if (lower.endsWith('.sam')) return 'sam'
+  if (lower.endsWith('.gff') || lower.endsWith('.gff.gz')) return 'gff'
+  if (lower.endsWith('.gtf') || lower.endsWith('.gtf.gz')) return 'gtf'
+  return 'bed'
+}
+
+function renderBwaMemCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray } = opts
+  const reference = resolveSingleInput(axisPlan, 'reference', false)
+  const reads1 = resolveSingleInput(axisPlan, 'reads1', isArray)
+  const reads2 = resolveSingleInput(axisPlan, 'reads2', isArray)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'sam', isArray)
+  const parts = ['bwa mem']
+  const threads = stringParam(nodeData, 'threads')
+  if (threads) parts.push('-t', shellQuote(threads))
+  const readGroup = stringParam(nodeData, 'read-group')
+  if (readGroup) parts.push('-R', shellQuote(readGroup))
+  if (booleanParam(nodeData, 'mark-short', true)) parts.push('-M')
+  const minSeed = stringParam(nodeData, 'min-seed-length')
+  if (minSeed) parts.push('-k', shellQuote(minSeed))
+  parts.push(shellExpr(reference), shellExpr(reads1))
+  if (reads2) parts.push(shellExpr(reads2))
+  return `${parts.join(' \\\n  ')} \\\n  > ${shellExpr(output)}`
+}
+
+function renderFastqcCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+}): string {
+  const { nodeData, axisPlan, outputDir } = opts
+  const input = axisPlan.inputs.input
+  const paths = input?.kind === 'multi' || input?.kind === 'array' ? input.paths : input ? [input.path] : []
+  const parts = ['fastqc']
+  const threads = stringParam(nodeData, 'threads')
+  if (threads) parts.push('-t', shellQuote(threads))
+  if (booleanParam(nodeData, 'nogroup', false)) parts.push('--nogroup')
+  if (booleanParam(nodeData, 'extract', false)) parts.push('--extract')
+  parts.push('-o', shellQuote(outputDir), ...paths.map(shellExpr))
+  return parts.join(' \\\n  ')
+}
+
+function renderMultiqcCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+}): string {
+  const { nodeData, axisPlan, outputDir, slug } = opts
+  const input = axisPlan.inputs.input
+  const paths = input?.kind === 'multi' || input?.kind === 'array' ? input.paths : input ? [input.path] : []
+  const parts = ['multiqc']
+  if (booleanParam(nodeData, 'force', true)) parts.push('-f')
+  const title = stringParam(nodeData, 'title')
+  if (title) parts.push('--title', shellQuote(title))
+  const filename = stringParam(nodeData, 'filename') || `${slug}.multiqc_report.html`
+  parts.push('--filename', shellQuote(filename), '-o', shellQuote(outputDir), ...(paths.length ? paths.map(shellExpr) : ['.']))
+  return parts.join(' \\\n  ')
+}
+
+function renderBcftoolsViewCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray } = opts
+  const input = resolveSingleInput(axisPlan, 'input', isArray)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'vcf', isArray)
+  const parts = ['bcftools view']
+  const outputType = stringParam(nodeData, 'output-type') || 'z'
+  parts.push('-O', shellQuote(outputType), '-o', shellExpr(output))
+  for (const [name, flag] of [
+    ['regions', '-r'],
+    ['targets', '-t'],
+    ['samples', '-s'],
+    ['types', '--types'],
+    ['exclude', '-e'],
+    ['include', '-i'],
+  ] as const) {
+    const value = stringParam(nodeData, name)
+    if (value) parts.push(flag, shellQuote(value))
+  }
+  parts.push(shellExpr(input))
+  return parts.join(' \\\n  ')
+}
+
+function renderBcftoolsMergeCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+}): string {
+  const { nodeData, axisPlan, outputDir, slug } = opts
+  const input = axisPlan.inputs.input
+  const paths = input?.kind === 'multi' || input?.kind === 'array' ? input.paths : input ? [input.path] : []
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'vcf', false)
+  const parts = ['bcftools merge']
+  const outputType = stringParam(nodeData, 'output-type') || 'z'
+  const merge = stringParam(nodeData, 'merge') || 'both'
+  parts.push('-O', shellQuote(outputType), '-o', shellExpr(output), '-m', shellQuote(merge))
+  if (booleanParam(nodeData, 'force-samples', false)) parts.push('--force-samples')
+  if (booleanParam(nodeData, 'missing-to-ref', false)) parts.push('--missing-to-ref')
+  parts.push(...paths.map(shellExpr))
+  return parts.join(' \\\n  ')
+}
+
+function renderSamtoolsSortCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray } = opts
+  const input = resolveSingleInput(axisPlan, 'input', isArray)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'bam', isArray)
+  const parts = ['samtools sort']
+  const threads = stringParam(nodeData, 'threads') || '4'
+  const memory = stringParam(nodeData, 'memory') || '2G'
+  parts.push(`-@ ${shellQuote(threads)}`, `-m ${shellQuote(memory)}`)
+  if (booleanParam(nodeData, 'by-name', false)) parts.push('-n')
+  parts.push(`-o ${shellExpr(output)}`, shellExpr(input))
+  return parts.join(' \\\n  ')
+}
+
+function renderSamtoolsIndexCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  isArray: boolean
+}): string {
+  const { nodeData, axisPlan, outputDir, slug, isArray } = opts
+  const input = resolveSingleInput(axisPlan, 'input', isArray)
+  const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'any', isArray) || `${input}.${booleanParam(nodeData, 'csi', false) ? 'csi' : 'bai'}`
+  const parts = ['samtools index']
+  const threads = stringParam(nodeData, 'threads') || '2'
+  parts.push(`-@ ${shellQuote(threads)}`)
+  if (booleanParam(nodeData, 'csi', false)) parts.push('-c')
+  parts.push(shellExpr(input), shellExpr(output))
+  return parts.join(' \\\n  ')
 }
 
 function resolveShellOutputPath(
@@ -427,38 +873,57 @@ interface ArrayRuntime {
 function buildArrayRuntime(axisPlan: AxisPlan): ArrayRuntime {
   const keys = axisPlan.keys ?? []
   const axedPortId = axisPlan.arrayPortId!
-  const axedInput = axisPlan.inputs[axedPortId]
-  if (!axedInput || axedInput.kind !== 'array') {
+  const runtimeInputs = Object.entries(axisPlan.inputs)
+    .filter((entry): entry is [string, Extract<AxedValue, { kind: 'array' }>] => {
+      const value = entry[1]
+      return value.kind === 'array' && arrayInputAlignedWithPlan(axisPlan, value)
+    })
+  const axedInput = runtimeInputs.find(([portId]) => portId === axedPortId)?.[1]
+  if (!axedInput) {
     throw new Error(`axisPlan says array but input on port ${axedPortId} is not array`)
   }
 
   if (keysAreSlurmTaskIds(keys)) {
-    const template = templateMatchesPaths(axedInput.pathTemplate, axedInput.paths, keys)
-      ? axedInput.pathTemplate
-      : inferKeyedPathTemplate(axedInput.paths, keys)
     const lines = [`KEY="$SLURM_ARRAY_TASK_ID"`]
-    if (template) {
-      lines.push(`i_${axedPortId}="${template}"`)
-    } else {
-      lines.push(`declare -A INPUT_${axedPortId}=(`)
-      for (let i = 0; i < keys.length; i++) {
-        lines.push(`  [${keys[i]}]=${shellArg(axedInput.paths[i])}`)
+    for (const [portId, input] of runtimeInputs) {
+      const template = templateMatchesPaths(input.pathTemplate, input.paths, keys)
+        ? input.pathTemplate
+        : inferKeyedPathTemplate(input.paths, keys)
+      if (template) {
+        lines.push(`i_${portId}=${shellTemplateExpr(template)}`)
+      } else {
+        lines.push(`declare -A INPUT_${portId}=(`)
+        for (let i = 0; i < keys.length; i++) {
+          lines.push(`  [${keys[i]}]=${shellArg(input.paths[i])}`)
+        }
+        lines.push(')')
+        lines.push(`i_${portId}="\${INPUT_${portId}[$KEY]}"`)
       }
-      lines.push(')')
-      lines.push(`i_${axedPortId}="\${INPUT_${axedPortId}[$KEY]}"`)
     }
     return { arraySpec: compactNumericArraySpec(keys), setupLines: lines }
   }
 
+  const setupLines = [`KEYS=(${keys.map(shellArg).join(' ')})`, `KEY="\${KEYS[$SLURM_ARRAY_TASK_ID]}"`]
+  for (const [portId, input] of runtimeInputs) {
+    setupLines.push(`INPUT_${portId}=(${input.paths.map(shellArg).join(' ')})`)
+    setupLines.push(`i_${portId}="\${INPUT_${portId}[$SLURM_ARRAY_TASK_ID]}"`)
+  }
   return {
     arraySpec: `0-${keys.length - 1}`,
-    setupLines: [
-      `KEYS=(${keys.map(shellArg).join(' ')})`,
-      `INPUT_${axedPortId}=(${axedInput.paths.map(shellArg).join(' ')})`,
-      `KEY="\${KEYS[$SLURM_ARRAY_TASK_ID]}"`,
-      `i_${axedPortId}="\${INPUT_${axedPortId}[$SLURM_ARRAY_TASK_ID]}"`,
-    ],
+    setupLines,
   }
+}
+
+function arrayInputAlignedWithPlan(axisPlan: AxisPlan, value: Extract<AxedValue, { kind: 'array' }>): boolean {
+  if (axisPlan.mode !== 'array') return false
+  const keys = axisPlan.keys ?? []
+  return value.axis === axisPlan.axis
+    && value.keys.length === keys.length
+    && value.keys.every((key, index) => key === keys[index])
+}
+
+function shellTemplateExpr(template: string): string {
+  return `"${template.replace(/["\\`]/g, '\\$&')}"`
 }
 
 function templateMatchesPaths(template: string | undefined, paths: string[], keys: string[]): template is string {
@@ -594,7 +1059,7 @@ function buildOutputSpec(
     : (outVal as { path: string }).path
 
   const cmdId = tool.command.toLowerCase()
-  if (cmdId === 'plink2' || cmdId === 'plink') {
+  if (cmdId === 'plink2' || cmdId === 'plink' || cmdId === 'regenie') {
     // plink uses --out <prefix>, no extension.
     const prefix = stripExt(path)
     return [`--out ${shellExpr(prefix)}`]
@@ -612,6 +1077,12 @@ function appendParamArgs(tool: ToolDef, param: ToolDef['params'][number], raw: u
   if (raw === undefined || raw === null || raw === '') return
   if (param.type === 'boolean') {
     if (raw === true && param.flag) out.push(param.flag)
+    return
+  }
+
+  if (param.flag && isRegenieListParam(tool, param.name)) {
+    const values = splitPlinkListValue(raw)
+    if (values.length > 0) out.push(`${param.flag} ${shellQuote(values.join(','))}`)
     return
   }
 
@@ -650,6 +1121,10 @@ function isPlinkGlmParam(tool: ToolDef, name: string): boolean {
   return (cmd === 'plink2' || cmd === 'plink') && name === 'glm'
 }
 
+function isRegenieListParam(tool: ToolDef, name: string): boolean {
+  return tool.command.toLowerCase() === 'regenie' && (name === 'phenoColList' || name === 'covarColList')
+}
+
 function normalizePlinkGlmValue(raw: unknown): string[] {
   const values = splitPlinkListValue(raw)
   const normalized = values.filter((value) => value !== 'none')
@@ -658,6 +1133,15 @@ function normalizePlinkGlmValue(raw: unknown): string[] {
     return ['hide-covar']
   }
   return normalized
+}
+
+function plinkGlmValuesFromParams(nodeData: ToolNodeData): string[] {
+  const values = normalizePlinkGlmValue(nodeData.paramValues?.glm)
+  for (const modifier of ['allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
+    if (nodeData.paramValues?.[modifier] === true && !values.includes(modifier)) values.push(modifier)
+  }
+  if (!values.includes('hide-covar')) values.push('hide-covar')
+  return values
 }
 
 function splitPlinkListValue(raw: unknown): string[] {
@@ -695,6 +1179,9 @@ function emitAnalysisOptions(
     }
     if (!def.flag) continue
 
+    if (tool.id === 'plink2.assoc' && (def.id === 'pheno-iid-only' || def.id === 'covar-iid-only')) {
+      continue
+    }
     if (tool.id === 'plink2.assoc' && def.id === 'glm') {
       parts.push(emitAnalysisGlmFlag(option))
       continue
@@ -710,7 +1197,8 @@ function emitAnalysisOptions(
       continue
     }
     if (def.kind === 'file') {
-      const emitted = emitFileInputFlag(def.flag, option.source ?? option.value, def.filePortId ?? def.sourcePortId, axisPlan, isArray)
+      const flag = plinkAssocFileInputFlag(def.id, def.flag, options)
+      const emitted = emitFileInputFlag(flag, option.source ?? option.value, def.filePortId ?? def.sourcePortId, axisPlan, isArray)
       if (emitted) parts.push(emitted)
       continue
     }
@@ -726,13 +1214,23 @@ function emitAnalysisOptions(
   return parts
 }
 
+function analysisOptionEnabled(options: AnalysisOptionState[], id: string): boolean {
+  return options.some((option) => option.optionId === id || option.subOptions?.[id]?.enabled)
+}
+
+function plinkAssocFileInputFlag(id: string, flag: string, options: AnalysisOptionState[]): string {
+  if (id === 'pheno' && analysisOptionEnabled(options, 'pheno-iid-only')) return `${flag} iid-only`
+  if (id === 'covar' && analysisOptionEnabled(options, 'covar-iid-only')) return `${flag} iid-only`
+  return flag
+}
+
 function emitAnalysisGlmFlag(option: AnalysisOptionState): string {
-  const mode = typeof option.value === 'string' && option.value.trim() ? option.value.trim() : 'firth-fallback'
-  const extras = [mode]
+  const mode = typeof option.value === 'string' && option.value.trim() ? option.value.trim() : 'hide-covar'
+  const extras = mode === 'hide-covar' ? ['hide-covar'] : [mode]
   for (const id of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
     if (option.subOptions?.[id]?.enabled) extras.push(id)
   }
-  return `--glm ${extras.join(' ')}`
+  return `--glm ${[...new Set(extras)].join(' ')}`
 }
 
 function emitAnalysisScoreFlag(
@@ -746,7 +1244,7 @@ function emitAnalysisScoreFlag(
   const extras: string[] = []
   const scoreCols = emitValueFlag('', option.subOptions?.['score-col-nums']?.value, true)?.trim()
   if (scoreCols) extras.push(scoreCols)
-  for (const id of ['header', 'center', 'variance-standardize', 'no-mean-imputation']) {
+  for (const id of ['header', 'center', 'variance-standardize', 'no-mean-imputation', 'ignore-dup-ids']) {
     if (option.subOptions?.[id]?.enabled) extras.push(id)
   }
   return `${flag} ${fileArg}${extras.length ? ` ${extras.join(' ')}` : ''}`
@@ -772,7 +1270,11 @@ function emitFlagBlocks(
       continue
     }
 
-    if (tool.id === 'plink2.score' && ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation'].includes(def.id)) {
+    if (tool.id === 'plink2.assoc' && ['pheno-iid-only', 'covar-iid-only'].includes(def.id)) {
+      continue
+    }
+
+    if (tool.id === 'plink2.score' && ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation', 'ignore-dup-ids'].includes(def.id)) {
       continue
     }
 
@@ -794,7 +1296,10 @@ function emitFlagBlocks(
     }
 
     if (def.kind === 'fileInput') {
-      const emitted = emitFileInputFlag(renderedFlag, block.value, def.sourcePortId, axisPlan, isArray)
+      const flag = tool.id === 'plink2.assoc'
+        ? plinkAssocFileInputFlagFromBlocks(def.id, renderedFlag, byId)
+        : renderedFlag
+      const emitted = emitFileInputFlag(flag, block.value, def.sourcePortId, axisPlan, isArray)
       if (emitted) parts.push(emitted)
       continue
     }
@@ -815,6 +1320,12 @@ function emitFlagBlocks(
   return parts
 }
 
+function plinkAssocFileInputFlagFromBlocks(id: string, flag: string, byId: Map<string, ToolFlagBlock>): string {
+  if (id === 'pheno' && byId.get('pheno-iid-only')?.enabled) return `${flag} iid-only`
+  if (id === 'covar' && byId.get('covar-iid-only')?.enabled) return `${flag} iid-only`
+  return flag
+}
+
 function emitAssocGlmFlag(
   value: unknown,
   byId: Map<string, ToolFlagBlock>,
@@ -822,12 +1333,13 @@ function emitAssocGlmFlag(
   const extras: string[] = []
   const mode = typeof value === 'string' && value.trim()
     ? value.trim()
-    : 'firth-fallback'
-  extras.push(mode)
+    : 'hide-covar'
+  if (mode === 'hide-covar') extras.push('hide-covar')
+  else extras.push(mode)
   for (const modifier of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
     if (byId.get(modifier)?.enabled) extras.push(modifier)
   }
-  return `--glm${extras.length ? ` ${extras.join(' ')}` : ''}`
+  return `--glm${extras.length ? ` ${[...new Set(extras)].join(' ')}` : ''}`
 }
 
 function emitScoreFlag(
@@ -842,7 +1354,7 @@ function emitScoreFlag(
   const extras: string[] = []
   const scoreCols = emitValueFlag('', byId.get('score-col-nums')?.value, true)?.trim()
   if (scoreCols) extras.push(scoreCols)
-  for (const modifier of ['header', 'center', 'variance-standardize', 'no-mean-imputation']) {
+  for (const modifier of ['header', 'center', 'variance-standardize', 'no-mean-imputation', 'ignore-dup-ids']) {
     if (byId.get(modifier)?.enabled) extras.push(modifier)
   }
   return `${def.flag} ${fileArg}${extras.length ? ` ${extras.join(' ')}` : ''}`
@@ -871,7 +1383,7 @@ function resolveFileInputArg(
       const portId = sourcePortId ?? source.portId ?? 'input'
       const upstream = axisPlan.inputs[portId]
       if (!upstream) return null
-      if (isArray && portId === axisPlan.arrayPortId && upstream.kind === 'array') return `"${`$i_${portId}`}"`
+      if (isArray && upstream.kind === 'array' && arrayInputAlignedWithPlan(axisPlan, upstream)) return `"${`$i_${portId}`}"`
       if (upstream.kind === 'single') return shellQuote(upstream.path)
       return upstream.paths[0] ? shellQuote(upstream.paths[0]) : null
     }
@@ -900,6 +1412,28 @@ function emitValueFlag(flag: string, value: unknown, multiValue = false, allowBa
 }
 
 function renderPortArgs(tool: ToolDef, port: ToolPort, val: AxedValue, out: string[]): void {
+  if (tool.command.toLowerCase() === 'regenie') {
+    const paths: string[] = val.kind === 'single' ? [val.path]
+      : val.kind === 'multi' ? val.paths
+      : val.paths
+    for (const path of paths) {
+      if (port.id === 'input') {
+        const flag = regenieGenotypeFlag(path, port.fileType)
+        out.push(`${flag} ${shellQuote(regenieGenotypeArg(path, flag))}`)
+      } else if (port.id === 'pheno') {
+        out.push(`--phenoFile ${shellQuote(path)}`)
+      } else if (port.id === 'covar') {
+        out.push(`--covarFile ${shellQuote(path)}`)
+      } else if (port.id === 'pred') {
+        out.push(`--pred ${shellQuote(path)}`)
+      } else {
+        const flag = portFlag(tool, port)
+        out.push(flag ? `${flag} ${shellQuote(path)}` : shellQuote(path))
+      }
+    }
+    return
+  }
+
   if (isPlinkInputPort(tool, port)) {
     const paths: string[] = val.kind === 'single' ? [val.path]
       : val.kind === 'multi' ? val.paths
@@ -942,6 +1476,24 @@ function portFlag(tool: ToolDef, port: ToolPort): string | null {
   // need different flags can be handled via a future ToolPort.flag field.
   if (port.id === 'input') return null
   return `--${port.id}`
+}
+
+function regenieGenotypeFlag(path: string, fileType: FileType): '--bed' | '--pgen' | '--bgen' {
+  if (fileType === 'bgen' || /\.bgen$/i.test(path)) return '--bgen'
+  if (fileType === 'pgen' || /\.(pgen|pvar|psam)$/i.test(path)) return '--pgen'
+  return '--bed'
+}
+
+function regenieGenotypeArg(path: string, flag: '--bed' | '--pgen' | '--bgen'): string {
+  if (flag === '--bgen') return path
+  if (/\.(bed|bim|fam|pgen|pvar|psam)$/i.test(path)) return stripExt(path)
+  return path
+}
+
+function regenieShellPrefixExpr(variableName: string, samplePath: string): string {
+  if (/\.bed$/i.test(samplePath)) return `"${'${'}${variableName}%.bed}"`
+  if (/\.(pgen|pvar|psam)$/i.test(samplePath)) return `"${'${'}${variableName}%.*}"`
+  return `"$${variableName}"`
 }
 
 function isPlinkInputPort(tool: ToolDef, port: ToolPort): boolean {
@@ -1370,12 +1922,14 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
   lines.push('set -euo pipefail')
   lines.push('')
   if (connectionDefaults?.modulePreamble) lines.push(connectionDefaults.modulePreamble)
-  if (strategy === 'bcftools-concat') lines.push('module load bcftools/1.19')
-  if (strategy === 'plink-pmerge-list') lines.push('module load plink/2.00a3')
+  if (mergeData.moduleOverride?.trim()) lines.push(`module load ${mergeData.moduleOverride.trim()}`)
+  else if (strategy === 'bcftools-concat') lines.push('module load bcftools/1.19')
+  else if (strategy === 'plink-pmerge-list') lines.push('module load plink/2.00a3')
   lines.push('')
   lines.push(`mkdir -p ${shellQuote(outputDir)}`)
   lines.push('')
   lines.push(`INPUTS=(${inputs.map(shellArg).join(' ')})`)
+  lines.push('if [ "${#INPUTS[@]}" -eq 0 ]; then echo "No merge inputs were provided" >&2; exit 1; fi')
   lines.push('')
 
   switch (strategy) {
@@ -1389,7 +1943,13 @@ export function generateMergeScript(opts: MergeScriptOpts): MergeScriptResult {
       break
     case 'plink-pmerge-list': {
       const listFile = `${outputDir}/${slug}.pmerge-list.txt`
-      lines.push(`printf '%s\\n' "\${INPUTS[@]}" > ${shellQuote(listFile)}`)
+      lines.push(`: > ${shellQuote(listFile)}`)
+      lines.push('for input in "${INPUTS[@]}"; do')
+      lines.push(`  case "$input" in`)
+      lines.push(`    *.pgen|*.pvar|*.psam|*.bed|*.bim|*.fam) printf '%s\\n' "\${input%.*}" >> ${shellQuote(listFile)} ;;`)
+      lines.push(`    *) printf '%s\\n' "$input" >> ${shellQuote(listFile)} ;;`)
+      lines.push('  esac')
+      lines.push('done')
       lines.push(`plink2 --pmerge-list ${shellQuote(listFile)} --make-pgen --out ${shellQuote(outPath)}`)
       break
     }
@@ -1469,6 +2029,8 @@ function formatTime(hours: number): string {
 
 function shellQuote(s: string): string {
   if (s === '') return "''"
+  if (s === '~') return '"$HOME"'
+  if (s.startsWith('~/')) return `"${'${HOME}'}/${s.slice(2).replace(/["\\`$]/g, '\\$&')}"`
   if (/^[A-Za-z0-9_\-./]+$/.test(s)) return s
   return `'${s.replace(/'/g, `'"'"'`)}'`
 }

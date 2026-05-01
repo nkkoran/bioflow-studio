@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { analyzeDelimitedProbe, expandHomePath, fileProbeCacheKey, indexPathsFor, looksCompressedText, parseBimProbe, parseFamProbe, parseFastqRecordIds, plinkSidecarSuffixes, probePathKey, relatedSidecarPaths } from '@/lib/fileProbes'
 import { evaluateWorkflowReadiness } from '@/lib/workflowReadiness'
+import type { FileOrigin } from '@/constants/connections'
 import type { FileNodeData, PipelineSnapshot } from '@/types/pipeline'
 import type { FileProbeResult, WorkflowReadinessReport } from '@/types/readiness'
 
@@ -18,6 +19,13 @@ interface FileStatLike {
   modified: number
   isDirectory: boolean
   permissions: string
+}
+
+interface InputFileEntry {
+  path: string
+  fileType: string
+  origin: FileOrigin
+  projectId?: string
 }
 
 async function resolveHomeDir(connectionId: string): Promise<string> {
@@ -137,9 +145,15 @@ async function probePath(
     const variantText = await previewText(connectionId, variantPath, 20)
     if (variantText) {
       if (variantPath.endsWith('.bim')) {
-        probe.recordIds = parseBimProbe(variantText).recordIds
+        const bimProbe = parseBimProbe(variantText)
+        probe.variantHeader = ['CHROM', 'ID', 'CM', 'POS', 'A1', 'A2']
+        probe.variantPreviewRows = bimProbe.previewRows
+        probe.recordIds = bimProbe.recordIds
       } else {
-        probe.recordIds = analyzeDelimitedProbe(variantPath, variantText).recordIds
+        const variantProbe = analyzeDelimitedProbe(variantPath, variantText)
+        probe.variantHeader = variantProbe.header
+        probe.variantPreviewRows = variantProbe.previewRows
+        probe.recordIds = variantProbe.recordIds
       }
     }
   } else {
@@ -162,6 +176,80 @@ async function probePath(
       const text = await previewText(connectionId, primaryPath, 24)
       if (text) probe.recordIds = parseFastqRecordIds(text)
     }
+  }
+
+  return probe
+}
+
+async function safeDnxStat(projectId: string, path: string): Promise<FileStatLike | null> {
+  try {
+    return await window.api.dnx.stat({ projectId, path })
+  } catch {
+    return null
+  }
+}
+
+async function dnxPreviewText(projectId: string, path: string, lines: number): Promise<string | null> {
+  if (looksCompressedText(path)) return null
+  try {
+    return await window.api.dnx.head({ projectId, path, lines })
+  } catch {
+    return null
+  }
+}
+
+async function probeDnxPath(
+  projectId: string | undefined,
+  rawPath: string,
+  fileTypeHint?: string,
+  cached?: FileProbeResult,
+): Promise<FileProbeResult> {
+  if (!projectId) {
+    return {
+      key: probePathKey(rawPath),
+      path: rawPath,
+      exists: false,
+      fileTypeHint,
+      errors: ['DNAnexus project is not configured for this file'],
+    }
+  }
+  const stat = await safeDnxStat(projectId, rawPath)
+  if (!stat) {
+    return {
+      key: probePathKey(rawPath),
+      path: rawPath,
+      exists: false,
+      fileTypeHint,
+      errors: ['DNAnexus file does not exist or is not accessible'],
+    }
+  }
+  if (
+    cached
+    && cached.exists
+    && cached.modified === stat.modified
+    && cached.size === stat.size
+    && cached.isDirectory === stat.isDirectory
+  ) {
+    return cached
+  }
+
+  const probe: FileProbeResult = {
+    key: probePathKey(rawPath),
+    path: rawPath,
+    exists: true,
+    modified: stat.modified,
+    size: stat.size,
+    isDirectory: stat.isDirectory,
+    fileTypeHint: fileTypeHint ?? inferProbeFileType(rawPath),
+    compression: looksCompressedText(rawPath) ? 'gzip' : 'none',
+  }
+
+  if (isDelimitedLike(rawPath, fileTypeHint)) {
+    const text = await dnxPreviewText(projectId, rawPath, 30)
+    if (text) Object.assign(probe, analyzeDelimitedProbe(rawPath, text))
+  } else if (isFastqLike(rawPath, fileTypeHint)) {
+    const text = await dnxPreviewText(projectId, rawPath, 24)
+    if (text) probe.recordIds = parseFastqRecordIds(text)
   }
 
   return probe
@@ -215,19 +303,23 @@ function commonIndexPaths(path: string): Record<string, string> {
   return {}
 }
 
-export function inputFileNodes(snapshot: PipelineSnapshot): Array<{ path: string; fileType: string }> {
+export function inputFileNodes(snapshot: PipelineSnapshot): InputFileEntry[] {
   return snapshot.nodes
     .filter((node) => node.type === 'file' && (node.data as FileNodeData).isInput)
     .flatMap((node) => {
       const data = node.data as FileNodeData
+      const origin = data.artifactRef?.origin ?? data.origin ?? (data.source === 'local' ? 'local' : 'ssh')
+      const projectId = data.artifactRef?.projectId ?? (data as { dnxProjectId?: string }).dnxProjectId
       const rawSplitItems = (data.split as { items?: unknown } | undefined)?.items
       if (Array.isArray(rawSplitItems) && rawSplitItems.length > 0) {
         return rawSplitItems.map((item) => ({
           path: typeof (item as { path?: unknown }).path === 'string' ? (item as { path: string }).path : '',
           fileType: data.fileType,
+          origin,
+          projectId,
         }))
       }
-      return [{ path: data.path, fileType: data.fileType }]
+      return [{ path: data.artifactRef?.path || data.path, fileType: data.fileType, origin, projectId }]
     })
     .filter((entry) => Boolean(entry.path?.trim()))
 }
@@ -249,9 +341,11 @@ export const useWorkflowReadinessStore = create<WorkflowReadinessStoreState>((se
       const nextCache = { ...get().probeCache }
       const probesByPath: Record<string, FileProbeResult> = {}
 
-      await Promise.all(nodes.map(async ({ path, fileType }) => {
-        const cacheKey = fileProbeCacheKey(connectionId, path)
-        const probe = await probePath(connectionId, path, homeDir, fileType, options?.force ? undefined : nextCache[cacheKey])
+      await Promise.all(nodes.map(async ({ path, fileType, origin, projectId }) => {
+        const cacheKey = origin === 'dnx' ? fileProbeCacheKey(`dnx:${projectId ?? 'unknown'}`, path) : fileProbeCacheKey(connectionId, path)
+        const probe = origin === 'dnx'
+          ? await probeDnxPath(projectId, path, fileType, options?.force ? undefined : nextCache[cacheKey])
+          : await probePath(connectionId, path, homeDir, fileType, options?.force ? undefined : nextCache[cacheKey])
         nextCache[cacheKey] = probe
         probesByPath[probePathKey(path)] = probe
       }))

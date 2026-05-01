@@ -36,6 +36,10 @@ export interface AppSettings {
   onboardingComplete: boolean
   onboardingVersionComplete: number
   telemetryOptIn: boolean
+  workflowGuideEnabled: boolean
+  fileExplorerViewMode: 'list' | 'icons'
+  showInputGenomeBuild: boolean
+  splitExplorerBasePane: 'left' | 'right'
 }
 
 export const CURRENT_ONBOARDING_VERSION = 1
@@ -74,6 +78,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   onboardingComplete: false,
   onboardingVersionComplete: 0,
   telemetryOptIn: false,
+  workflowGuideEnabled: false,
+  fileExplorerViewMode: 'list',
+  showInputGenomeBuild: true,
+  splitExplorerBasePane: 'left',
 }
 
 interface SettingsState {
@@ -132,6 +140,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       onboardingComplete: onboardingVersionComplete >= CURRENT_ONBOARDING_VERSION,
       onboardingVersionComplete,
       telemetryOptIn: await readSetting('settings:telemetryOptIn', DEFAULT_SETTINGS.telemetryOptIn),
+      workflowGuideEnabled: await readSetting('settings:workflowGuideEnabled', DEFAULT_SETTINGS.workflowGuideEnabled),
+      fileExplorerViewMode: (await readSetting('settings:fileExplorerViewMode', DEFAULT_SETTINGS.fileExplorerViewMode)) === 'icons' ? 'icons' : 'list',
+      showInputGenomeBuild: await readSetting('settings:showInputGenomeBuild', DEFAULT_SETTINGS.showInputGenomeBuild),
+      splitExplorerBasePane: (await readSetting('settings:splitExplorerBasePane', DEFAULT_SETTINGS.splitExplorerBasePane)) === 'right' ? 'right' : 'left',
     }
     set({ settings, loaded: true })
   },
@@ -197,6 +209,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         break
       }
       case 'settings:telemetryOptIn': next.telemetryOptIn = Boolean(value); break
+      case 'settings:workflowGuideEnabled': next.workflowGuideEnabled = Boolean(value); break
+      case 'settings:fileExplorerViewMode': next.fileExplorerViewMode = value === 'icons' ? 'icons' : 'list'; break
+      case 'settings:showInputGenomeBuild': next.showInputGenomeBuild = Boolean(value); break
+      case 'settings:splitExplorerBasePane': next.splitExplorerBasePane = value === 'right' ? 'right' : 'left'; break
     }
     set({ settings: next, loaded: true })
   },
