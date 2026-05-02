@@ -198,7 +198,7 @@ export function ResultsPanel() {
 
   if (!activeRun) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-text-muted">
+      <div className="animate-fade-up flex h-full items-center justify-center text-center text-sm text-text-muted">
         Select a run to browse its results.
       </div>
     )
@@ -206,7 +206,7 @@ export function ResultsPanel() {
 
   return (
     <div className="flex h-full flex-col min-h-0">
-      <div className="flex items-center gap-2 border-b border-border-light px-3 py-2">
+      <div className="flex shrink-0 items-center gap-2 px-3 py-2 shadow-sm">
         <div>
           <div className="text-xs font-medium text-text-primary">Results Explorer</div>
           <div className="text-[10px] text-text-muted">
@@ -232,14 +232,14 @@ export function ResultsPanel() {
 
       <div className="flex-1 overflow-y-auto px-3 py-3">
         {results.length === 0 ? (
-          <div className="rounded-lg border border-border bg-bg-tertiary/30 px-4 py-6 text-center text-sm text-text-muted">
+          <div className="animate-fade-up rounded-lg bg-bg-tertiary/40 px-4 py-6 text-center text-sm text-text-muted shadow-sm">
             This run has not recorded any output files yet.
           </div>
         ) : (
           <div className="flex flex-col gap-3">
             {results.map((entry) => (
-              <div key={entry.nodeId} className="rounded-lg border border-border bg-bg-secondary/70">
-                <div className="flex items-center gap-2 border-b border-border-light px-3 py-2">
+              <div key={entry.nodeId} className="surface-card rounded-lg">
+                <div className="flex items-center gap-2 px-3 py-2">
                   <div className="text-sm font-medium text-text-primary">{entry.label}</div>
                   <span className={`rounded-full px-2 py-0.5 text-[10px] ${
                     entry.primary ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
@@ -255,9 +255,9 @@ export function ResultsPanel() {
                     {entry.status}
                   </span>
                 </div>
-                <div className="flex flex-col">
+                <div className="flex flex-col px-1 pb-1">
                   {entry.paths.map((path, pathIndex) => (
-                    <div key={path} className="flex items-center gap-2 border-t border-border-light/60 px-3 py-2 first:border-t-0">
+                    <div key={path} className="flex items-center gap-2 rounded-md px-2 py-2 transition-colors hover:bg-bg-hover">
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-xs text-text-primary">{pathBasename(path) || path}</div>
                         <div className="truncate text-[10px] text-text-muted">{path}</div>

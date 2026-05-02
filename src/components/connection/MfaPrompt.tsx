@@ -83,7 +83,6 @@ export function MfaPrompt() {
       onClose={handleCancel}
       title={request.title}
       footer={footer}
-      width="max-w-sm"
     >
       <div className="flex flex-col gap-4">
         <div className="flex items-center gap-3 text-text-secondary">

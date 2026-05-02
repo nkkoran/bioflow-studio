@@ -45,9 +45,9 @@ function PaletteItem({ tool, favorite, onToggleFavorite, onUse }: PaletteItemPro
         draggable
         onDragStart={onDragStart}
         className={classNames(
-          'group px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
-          'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
-          'transition-colors select-none',
+          'group px-3 py-1.5 rounded-md text-xs cursor-grab active:cursor-grabbing',
+          'hover:bg-bg-hover/80 hover:shadow-sm',
+          'transition-all duration-150 select-none',
         )}
         title={tool.description}
       >
@@ -95,9 +95,9 @@ function BundleItem({ bundle }: { bundle: ToolBundle }) {
       draggable
       onDragStart={onDragStart}
       className={classNames(
-        'px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
-        'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
-        'transition-colors select-none',
+        'px-3 py-1.5 rounded-md text-xs cursor-grab active:cursor-grabbing',
+        'hover:bg-bg-hover/80 hover:shadow-sm',
+        'transition-all duration-150 select-none',
       )}
       title={bundle.description}
     >
@@ -128,9 +128,9 @@ function SpecialItem({ type, label, icon }: SpecialItemProps) {
       draggable
       onDragStart={onDragStart}
       className={classNames(
-        'flex items-center gap-2 px-3 py-1.5 rounded text-xs cursor-grab active:cursor-grabbing',
-        'border border-transparent hover:border-accent/40 hover:bg-bg-tertiary',
-        'transition-colors select-none',
+        'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs cursor-grab active:cursor-grabbing',
+        'hover:bg-bg-hover/80 hover:shadow-sm',
+        'transition-all duration-150 select-none',
       )}
     >
       {icon}
@@ -256,9 +256,9 @@ export function ToolPalette() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-bg-secondary border-r border-border">
+    <div className="bioflow-tool-palette-surface surface-panel animate-fade-up">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border">
+      <div className="px-3 py-3">
         <div className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Tool Palette
         </div>
@@ -280,7 +280,7 @@ export function ToolPalette() {
       </div>
 
       {/* Special items */}
-      <div className="p-2 flex flex-col gap-0.5 border-b border-border">
+      <div className="p-2 flex flex-col gap-0.5">
         <SpecialItem type="file-input" label="Input File" icon={<FileIcon size={12} className="text-amber-400" />} />
         <SpecialItem type="file-output" label="Output File" icon={<FileIcon size={12} className="text-amber-400" />} />
         <SpecialItem type="transform" label="Transform" icon={<TransformIcon size={12} className="text-teal-400" />} />
@@ -290,7 +290,7 @@ export function ToolPalette() {
       </div>
 
       {/* Tools grouped by category */}
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="bioflow-tool-palette-scroll scroll-region py-1">
         {!search.trim() && favoriteTools.length > 0 && (
           <div className="mb-1">
             <div className="w-full flex items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
@@ -411,7 +411,7 @@ export function ToolPalette() {
       </div>
 
       {/* Footer hint */}
-      <div className="px-3 py-2 border-t border-border text-[10px] text-text-muted">
+      <div className="px-3 py-2 text-[10px] text-text-muted">
         Drag tools onto the canvas to build your pipeline.
       </div>
       <CustomNodeBuilder open={customBuilderOpen} onClose={() => setCustomBuilderOpen(false)} />

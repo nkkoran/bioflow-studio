@@ -25,10 +25,12 @@ import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStor
 import { useUIStore } from '@/stores/uiStore'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileSizeStore } from '@/stores/fileSizeStore'
+import { headPreviewFileForConnection, statFileForConnection } from '@/stores/fileStore'
 import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useClusterInfoStore } from '@/stores/clusterInfoStore'
 import { useDialogStore } from '@/stores/dialogStore'
+import type { FileOrigin } from '@/constants/connections'
 import { getTool } from '@/lib/toolRegistry'
 import { iconForTool } from '@/lib/toolIcons'
 import { estimateResources, type EstimateOutput } from '@/lib/resourceEstimator'
@@ -85,6 +87,8 @@ import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { buildAxisAlignmentReport } from '@/lib/dataArtifacts'
 import { computeToolPortOutputPreview } from '@/lib/outputPathPreview'
 import { validateCustomShellScript } from '@/lib/customShellValidation'
+import { nodeBackend } from '@/lib/transferPlanner'
+import { isLikelyLocalPath } from '@/lib/pathOrigin'
 
 const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
 const GENOME_BUILD_OPTIONS = ['', 'GRCh38', 'GRCh37', 'hg38', 'hg19'] as const
@@ -146,6 +150,27 @@ function inputConnectionDetail(node: PipelineSnapshot['nodes'][number], sourceHa
   if (node.type === 'transfer') return 'Transferred output'
   if (node.type === 'transform') return 'Transformed output'
   return 'Connected'
+}
+
+function connectedInputOrigin(
+  snapshot: PipelineSnapshot,
+  nodeId: string,
+  portId: string,
+): FileOrigin | null {
+  const edge = snapshot.edges.find((candidate) => candidate.target === nodeId && (candidate.targetHandle ?? 'input') === portId)
+  const source = edge ? snapshot.nodes.find((candidate) => candidate.id === edge.source) : undefined
+  return source ? nodeBackend(source, 'output') : null
+}
+
+function pathOriginInSnapshot(snapshot: PipelineSnapshot, path: string): FileOrigin | null {
+  for (const node of snapshot.nodes) {
+    if (node.type !== 'file') continue
+    const data = node.data as FileNodeData
+    if (data.path === path || safeSplitItems(data.split).some((item) => item.path === path)) {
+      return nodeBackend(node, 'output')
+    }
+  }
+  return null
 }
 
 function shellQuoteClient(value: string): string {
@@ -455,7 +480,7 @@ function ParamLabel({ param }: { param: ToolParam }) {
     </>
   )
   if (!param.description && !param.docUrl) {
-    return <span className="inline-flex items-center gap-1">{text}<HelpButton id="params.row" /></span>
+    return <span className="bioflow-param-label inline-flex min-w-0 items-center gap-1">{text}<HelpButton id="params.row" /></span>
   }
   return (
     <Tooltip
@@ -479,8 +504,8 @@ function ParamLabel({ param }: { param: ToolParam }) {
         </span>
       }
     >
-      <span className="inline-flex cursor-help items-center gap-1">
-        <span>{text}</span>
+      <span className="bioflow-param-label inline-flex min-w-0 cursor-help items-center gap-1">
+        <span className="text-nowrap min-w-0">{text}</span>
         <Info size={11} className="text-text-muted" />
         <HelpButton id={param.name.toLowerCase().includes('flag') ? 'params.customFlags' : 'params.row'} />
       </span>
@@ -628,14 +653,14 @@ function ShellScriptField({
         placeholder={'cat "$INPUT"'}
         onChange={(e) => onChange(e.target.value)}
         rows={7}
-        className="rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent resize-y font-mono leading-relaxed"
+        className="rounded-lg border border-border-light bg-bg-primary px-3 py-2 text-sm text-slate-100 shadow-inner outline-none focus:border-accent focus:ring-2 focus:ring-accent/25 resize-y font-mono leading-relaxed"
       />
-      <div className="rounded-md border border-accent/20 bg-accent/5 px-2 py-1.5 text-[10px] text-text-secondary leading-relaxed">
-        Connected files are available as <code className="font-mono text-text-primary">$INPUT</code>,{' '}
+      <div className="rounded-md bg-accent/10 px-2 py-1.5 text-[10px] text-text-secondary leading-relaxed">
+        Variables: <code className="font-mono text-text-primary">$INPUT</code>,{' '}
         <code className="font-mono text-text-primary">$INPUT_1</code>,{' '}
-        <code className="font-mono text-text-primary">$INPUT_2</code>, and{' '}
-        <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code> for all inputs. Use{' '}
-        <code className="font-mono text-text-primary">$OUTPUT</code> for the declared result file.
+        <code className="font-mono text-text-primary">$INPUT_2</code>,{' '}
+        <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code>, and{' '}
+        <code className="font-mono text-text-primary">$OUTPUT</code>.
       </div>
       {validationIssues.length > 0 && (
         <div className="rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] leading-relaxed">
@@ -1098,7 +1123,7 @@ function AnnotationConfigPanel({
   }
 
   const runLoginCommand = async (command: string) => {
-    if (!activeConnectionId) {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
       setMessage('Connect to Rorqual before running a login-node installer.')
       return
     }
@@ -1333,10 +1358,10 @@ function AnnotationConfigPanel({
 
         {!isAnnovar && (
           <div className="flex flex-wrap gap-1.5">
-            <Button variant="secondary" size="sm" disabled={running} onClick={() => void runLoginCommand(prepareToolCommand())}>
+            <Button variant="secondary" size="sm" disabled={running || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID} onClick={() => void runLoginCommand(prepareToolCommand())}>
               Install VEP
             </Button>
-            <Button variant="secondary" size="sm" disabled={running || featureIds.length === 0} onClick={() => void runLoginCommand(databaseCommand())}>
+            <Button variant="secondary" size="sm" disabled={running || featureIds.length === 0 || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID} onClick={() => void runLoginCommand(databaseCommand())}>
               Install selected databases
             </Button>
           </div>
@@ -1422,14 +1447,18 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     [nodeId, data.slurmOverride, updateNodeData],
   )
 
-  const loadSchemaForPath = useCallback(async (path: string, options?: { force?: boolean }) => {
+  const loadSchemaForPath = useCallback(async (path: string, options?: { force?: boolean; origin?: FileOrigin | null }) => {
     if (!activeConnectionId || !path) return
+    const origin = options?.origin ?? pathOriginInSnapshot(snapshot, path)
+    if (origin === 'dnx') return
+    if (origin === 'ssh' && activeConnectionId === LOCAL_CONNECTION_ID) return
+    const schemaConnectionId = origin === 'local' ? LOCAL_CONNECTION_ID : activeConnectionId
     if (!options?.force && schemas[path]) return
     setRefreshingSchemaPath(path)
     try {
       const [stat, text] = await Promise.all([
-        window.api.sftp.stat(activeConnectionId, path).catch(() => null),
-        window.api.sftp.head(activeConnectionId, path, 30),
+        statFileForConnection(schemaConnectionId, path).catch(() => null),
+        headPreviewFileForConnection(schemaConnectionId, path, 30),
       ])
       const current = useDataPreviewStore.getState().schemas[path]
       if (!options?.force && current && stat?.modified && current.modified === stat.modified) return
@@ -1440,7 +1469,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     } finally {
       setRefreshingSchemaPath(null)
     }
-  }, [activeConnectionId, schemas, setSchema])
+  }, [activeConnectionId, schemas, setSchema, snapshot])
 
   useEffect(() => {
     if (!activeConnectionId || !tool) return
@@ -1449,11 +1478,12 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     let cancelled = false
     async function loadSchemas() {
       for (const param of refs) {
-        const path = connectedInputPath(snapshot, nodeId, param.columnSourcePortId ?? 'input')
+        const portId = param.columnSourcePortId ?? 'input'
+        const path = connectedInputPath(snapshot, nodeId, portId)
         if (!path || schemas[path]) continue
         try {
           if (cancelled) return
-          await loadSchemaForPath(path)
+          await loadSchemaForPath(path, { origin: connectedInputOrigin(snapshot, nodeId, portId) })
         } catch {
           // Missing schema is non-blocking; users can still type values.
         }
@@ -2316,6 +2346,8 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
     }
   }, [activeConnectionId, confirmDialog, nodeId, settings.paths.uploadsSubfolder, updateNodeData])
 
+  const sourceMode: NonNullable<FileNodeData['source']> = data.origin === 'local' || isLikelyLocalPath(data.path) ? 'local' : data.source ?? 'remote'
+
   return (
     <div className="flex flex-col gap-3">
       <Input
@@ -2340,7 +2372,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 })}
                 className={classNames(
                   'h-7 flex-1 rounded text-xs transition-colors',
-                  (data.source ?? 'remote') === option.value
+                  sourceMode === option.value
                     ? 'bg-accent text-white'
                     : 'text-text-secondary hover:text-text-primary',
                 )}
@@ -2352,17 +2384,17 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
           <div
             className="flex items-end gap-1.5"
             onDragOver={(event) => {
-              if ((data.source ?? 'remote') === 'local') event.preventDefault()
+              if (sourceMode === 'local') event.preventDefault()
             }}
             onDrop={(event) => {
-              if ((data.source ?? 'remote') === 'local') void acceptDroppedLocalFile(event)
+              if (sourceMode === 'local') void acceptDroppedLocalFile(event)
             }}
           >
-            {(data.source ?? 'remote') === 'local' ? (
+            {sourceMode === 'local' ? (
               <LocalPathField
                 value={data.path}
                 placeholder="/Users/you/data/phenotype.txt"
-                onChange={(value) => updateNodeData(nodeId, { path: value, status: 'unknown' })}
+                onChange={(value) => updateNodeData(nodeId, { path: value, source: 'local', origin: 'local', status: 'unknown' })}
                 className="flex-1"
                 mode="file"
               />
@@ -2386,7 +2418,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               />
             )}
           </div>
-          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
+          {sourceMode === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
             <div className="flex items-center gap-2">
               <Button variant="secondary" size="sm" className="h-7 text-[11px]" disabled={uploading} onClick={() => void uploadLocalFile()}>
                 {uploading ? 'Uploading...' : 'Upload to cluster'}
@@ -3556,6 +3588,7 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
   const setSchema = useDataPreviewStore((s) => s.setSchema)
   const snapshot = useMemo(() => exportSnapshot(), [exportSnapshot, nodes, edges])
   const inputPath = connectedInputPath(snapshot, nodeId, 'input')
+  const inputOrigin = connectedInputOrigin(snapshot, nodeId, 'input')
   const schema = resolveUpstreamSchema(snapshot, nodeId, 'input', schemas)
   const columns = schema?.columns ?? []
   const preset = getTransformPreset(data.preset)
@@ -3621,10 +3654,13 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
 
   useEffect(() => {
     if (!activeConnectionId || !inputPath || schemas[inputPath]) return
+    if (inputOrigin === 'dnx') return
+    if (inputOrigin === 'ssh' && activeConnectionId === LOCAL_CONNECTION_ID) return
+    const schemaConnectionId = inputOrigin === 'local' ? LOCAL_CONNECTION_ID : activeConnectionId
     let cancelled = false
     async function loadSchema() {
       try {
-        const text = await window.api.sftp.head(activeConnectionId!, inputPath!, 30)
+        const text = await headPreviewFileForConnection(schemaConnectionId, inputPath!, 30)
         if (cancelled) return
         const parsed = parseHeader(text, inputPath!)
         if (parsed.columns.length > 0) setSchema(inputPath!, { columns: parsed.columns, delimiter: parsed.delimiter })
@@ -3634,7 +3670,7 @@ function TransformInspector({ nodeId, data }: { nodeId: string; data: TransformN
     }
     void loadSchema()
     return () => { cancelled = true }
-  }, [activeConnectionId, inputPath, schemas, setSchema])
+  }, [activeConnectionId, inputOrigin, inputPath, schemas, setSchema])
 
   const setSlurm = useCallback(
     (patch: Partial<NonNullable<TransformNodeData['slurmOverride']>>) => {
@@ -4061,19 +4097,13 @@ export function NodeInspector() {
   const duplicateNode = usePipelineStore((s) => s.duplicateNode)
 
   if (!node) {
-    return (
-      <div data-tour="inspector" className="w-80 h-full bg-bg-secondary border-l border-border flex items-center justify-center">
-        <p className="text-xs text-text-muted text-center px-6">
-          Select a node on the canvas to edit its properties.
-        </p>
-      </div>
-    )
+    return null
   }
 
   return (
-    <div data-tour="inspector" className="w-80 h-full bg-bg-secondary border-l border-border flex flex-col">
+    <div data-tour="inspector" className="bioflow-inspector-surface bioflow-panel-text surface-panel nowheel nopan nodrag h-full flex flex-col">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border flex items-center justify-between">
+      <div className="px-3 py-3 flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
           {node.type} inspector
         </div>
@@ -4104,7 +4134,12 @@ export function NodeInspector() {
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto p-3">
+      <div
+        className="bioflow-inspector-scroll scroll-region nowheel nopan nodrag p-3"
+        onWheelCapture={(event) => event.stopPropagation()}
+        onWheel={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
         {node.type === 'tool' && (
           <ToolInspector nodeId={node.id} data={node.data as ToolNodeData} />
         )}

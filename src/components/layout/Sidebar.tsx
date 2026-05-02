@@ -2,20 +2,15 @@ import { FileExplorer } from '@/components/file-explorer/FileExplorer'
 import { QuickExtractButton } from '@/components/sidebar/QuickExtractButton'
 import { useSettingsStore } from '@/stores/settingsStore'
 
-interface SidebarProps {
-  width: number
-}
-
-export function Sidebar({ width }: SidebarProps) {
+export function Sidebar() {
   const devMode = useSettingsStore((s) => s.devMode)
   return (
     <div
-      className="h-full bg-bg-secondary border-r border-border overflow-hidden shrink-0"
-      style={{ width }}
+      className="bioflow-sidebar-rail bioflow-panel-text surface-panel z-20 h-full shrink-0 overflow-hidden"
     >
-      <div className="flex h-full flex-col">
+      <div className="bioflow-sidebar-content flex flex-col">
         {devMode && <QuickExtractButton />}
-        <div className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-hidden">
           <FileExplorer />
         </div>
       </div>

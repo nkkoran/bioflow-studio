@@ -164,7 +164,7 @@ export function DnanexusSettingsPanel() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-secondary">
+      <div className="rounded-md bg-bg-tertiary px-3 py-2 text-xs text-text-secondary shadow-inner">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="font-medium text-text-primary">Bridge status</div>
@@ -176,13 +176,13 @@ export function DnanexusSettingsPanel() {
           </div>
         </div>
         {bridgeStatus && (
-          <div className="mt-2 rounded border border-border/70 bg-bg-secondary px-2 py-1.5 text-[11px]">
+          <div className="mt-2 rounded bg-bg-secondary px-2 py-1.5 text-[11px] shadow-sm">
             <div className="font-medium text-text-primary">{bridgeStatus.level}</div>
             <div className="mt-1">{bridgeStatus.message}</div>
           </div>
         )}
         {message && (
-          <div className="mt-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
+          <div className="mt-2 rounded bg-accent/10 px-2 py-1.5 text-[11px] text-text-primary shadow-sm">
             {message}
           </div>
         )}
@@ -222,7 +222,7 @@ export function DnanexusSettingsPanel() {
         <select
           value={defaultProjectId ?? ''}
           onChange={(event) => void setDefaultProject(event.target.value || null)}
-          className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
         >
           <option value="">Choose a project</option>
           {projectOptions.map((project) => (
@@ -233,7 +233,7 @@ export function DnanexusSettingsPanel() {
         </select>
       </div>
 
-      <div className="rounded-md border border-border bg-bg-tertiary px-3 py-3">
+      <div className="rounded-md bg-bg-tertiary px-3 py-3 shadow-inner">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-text-primary">UKB extraction applet</div>
@@ -246,17 +246,17 @@ export function DnanexusSettingsPanel() {
           </Button>
         </div>
         <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-text-secondary">
-          <div className="rounded border border-border/70 bg-bg-secondary px-2 py-2">
+          <div className="rounded bg-bg-secondary px-2 py-2 shadow-sm">
             <div className="font-medium text-text-primary">Applet id</div>
             <div className="mt-1 break-all">{installedAppletId || 'Not installed yet'}</div>
           </div>
-          <div className="rounded border border-border/70 bg-bg-secondary px-2 py-2">
+          <div className="rounded bg-bg-secondary px-2 py-2 shadow-sm">
             <div className="font-medium text-text-primary">Bundled hash</div>
             <div className="mt-1 break-all">{installedAppletHash || 'Unknown'}</div>
           </div>
         </div>
         {appletInstallProgress && (
-          <div className="mt-3 rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-2 text-[11px] text-cyan-100">
+          <div className="mt-3 rounded bg-accent/10 px-2 py-2 text-[11px] text-text-primary shadow-sm">
             <div className="font-medium capitalize">{appletInstallProgress.stage.replace('-', ' ')}</div>
             {appletInstallProgress.message && <div className="mt-1">{appletInstallProgress.message}</div>}
             {typeof appletInstallProgress.percent === 'number' && (
@@ -266,7 +266,7 @@ export function DnanexusSettingsPanel() {
         )}
       </div>
 
-      <div className="rounded-md border border-border bg-bg-tertiary px-3 py-3">
+      <div className="rounded-md bg-bg-tertiary px-3 py-3 shadow-inner">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-text-primary">Instance catalog</div>
@@ -292,7 +292,7 @@ export function DnanexusSettingsPanel() {
         </div>
         <div className="mt-3 grid gap-2 md:grid-cols-2">
           {instanceSpecs.map((spec) => (
-            <div key={spec.id} className="rounded border border-border/70 bg-bg-secondary px-2 py-2 text-[11px] text-text-secondary">
+            <div key={spec.id} className="rounded bg-bg-secondary px-2 py-2 text-[11px] text-text-secondary shadow-sm">
               <div className="font-medium text-text-primary">{spec.name}</div>
               <div className="mt-1">{spec.cpu} cores · {spec.memoryGB} GB RAM · {spec.localSsdGB ?? 0} GB SSD</div>
             </div>
@@ -300,7 +300,7 @@ export function DnanexusSettingsPanel() {
         </div>
       </div>
 
-      <div className="rounded-md border border-border bg-bg-tertiary px-3 py-3">
+      <div className="rounded-md bg-bg-tertiary px-3 py-3 shadow-inner">
         <div className="text-sm font-medium text-text-primary">Field presets</div>
         <div className="mt-1 text-[11px] text-text-muted">
           Built-in presets ship with BioFlow Studio. Saved presets are editable here and are reused by the node inspector and Quick Extract launcher.
@@ -308,13 +308,13 @@ export function DnanexusSettingsPanel() {
 
         <div className="mt-3 grid gap-2 md:grid-cols-2">
           {BUILTIN_UKB_FIELD_PRESETS.map((preset) => (
-            <div key={preset.id} className="rounded border border-border/70 bg-bg-secondary px-2 py-2 text-[11px] text-text-secondary">
+            <div key={preset.id} className="rounded bg-bg-secondary px-2 py-2 text-[11px] text-text-secondary shadow-sm">
               <div className="font-medium text-text-primary">{preset.name}</div>
               <div className="mt-1">{preset.fields.length} field{preset.fields.length === 1 ? '' : 's'} · built in</div>
             </div>
           ))}
           {fieldPresets.map((preset) => (
-            <div key={preset.id} className="rounded border border-border/70 bg-bg-secondary px-2 py-2 text-[11px] text-text-secondary">
+            <div key={preset.id} className="rounded bg-bg-secondary px-2 py-2 text-[11px] text-text-secondary shadow-sm">
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <div className="font-medium text-text-primary">{preset.name}</div>
@@ -332,7 +332,7 @@ export function DnanexusSettingsPanel() {
             </div>
           ))}
           {fieldPresets.length === 0 && (
-            <div className="rounded border border-dashed border-border/70 px-2 py-2 text-[11px] text-text-muted">
+            <div className="rounded bg-bg-secondary/60 px-2 py-2 text-[11px] text-text-muted shadow-inner">
               No saved presets yet. Save one from a UKB extraction node or from Quick Extract.
             </div>
           )}

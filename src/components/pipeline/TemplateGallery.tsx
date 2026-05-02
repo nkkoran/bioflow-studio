@@ -11,7 +11,7 @@ interface Props {
 
 export function TemplateGallery({ open, templates, onClose, onSelect }: Props) {
   return (
-    <Dialog open={open} onClose={onClose} title="Start from template" width="max-w-4xl">
+    <Dialog open={open} onClose={onClose} title="Start from template">
       <div className="grid max-h-[70vh] grid-cols-1 gap-3 overflow-y-auto md:grid-cols-2">
         {templates.map((template) => (
           <button

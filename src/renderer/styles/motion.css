@@ -1,0 +1,84 @@
+@keyframes bioflow-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--space-3) / 2));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes bioflow-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes bioflow-success-pulse {
+  0% {
+    box-shadow: 0 0 0 0 oklch(from var(--color-success) l c h / 0.5);
+  }
+  60% {
+    box-shadow: 0 0 0 calc(var(--space-3) / 2) oklch(from var(--color-success) l c h / 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 oklch(from var(--color-success) l c h / 0);
+  }
+}
+
+@keyframes bioflow-edge-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@keyframes bioflow-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-fade-up {
+  animation: bioflow-fade-up 300ms ease-out both;
+}
+
+.animate-fade-in {
+  animation: bioflow-fade-in 200ms ease-out both;
+}
+
+.animate-success {
+  animation: bioflow-success-pulse 700ms ease-out forwards;
+}
+
+.animate-shimmer {
+  background:
+    linear-gradient(
+      90deg,
+      var(--color-bg-tertiary) 0%,
+      color-mix(in srgb, var(--color-text-primary) 8%, var(--color-bg-tertiary)) 50%,
+      var(--color-bg-tertiary) 100%
+    );
+  background-size: 200% 100%;
+  animation: bioflow-shimmer 1.2s linear infinite;
+}
+
+.bioflow-running-edge {
+  stroke-dasharray: 8 4;
+  animation: bioflow-edge-flow 400ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition-duration: 1ms !important;
+  }
+}

@@ -267,8 +267,8 @@ function ColumnSourceEditor({
             type="button"
             onClick={() => setSourceKind(kind)}
             className={classNames(
-              'rounded border px-2 py-1 text-[10px]',
-              current.kind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted',
+              'rounded px-2 py-1 text-[10px] transition-all duration-150',
+              current.kind === kind ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover hover:text-text-primary',
             )}
           >
             {label}
@@ -278,7 +278,7 @@ function ColumnSourceEditor({
       {def.multiValue && current.kind === 'upstream-column' && selected.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {selected.map((column) => (
-            <span key={column} className="inline-flex items-center gap-1 rounded-md border border-accent/30 bg-accent/10 px-2 py-1 text-[11px] text-text-primary">
+            <span key={column} className="inline-flex items-center gap-1 rounded-md bg-accent/10 px-2 py-1 text-[11px] text-text-primary shadow-sm">
               <span className="font-mono">{column}</span>
               <button
                 type="button"
@@ -315,7 +315,7 @@ function ColumnSourceEditor({
               key={column}
               type="button"
               onClick={() => addColumn(column)}
-              className="rounded border border-border bg-bg-tertiary px-2 py-1 text-[11px] font-mono text-text-secondary hover:text-text-primary"
+              className="rounded bg-bg-tertiary px-2 py-1 text-[11px] font-mono text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary"
             >
               {column}
             </button>
@@ -366,8 +366,8 @@ function FileSourceEditor({
             type="button"
             onClick={() => setKind(kind)}
             className={classNames(
-              'rounded border px-2 py-1 text-[10px]',
-              current.kind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted',
+              'rounded px-2 py-1 text-[10px] transition-all duration-150',
+              current.kind === kind ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover hover:text-text-primary',
             )}
           >
             {label}
@@ -375,7 +375,7 @@ function FileSourceEditor({
         ))}
       </div>
       {current.kind === 'upstream-file' ? (
-        <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary">
+        <div className="rounded bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary shadow-inner">
           {connectedPath ? (
             <>
               Connected on <span className="font-mono text-text-primary">{def.sourcePortId ?? current.portId ?? 'input'}</span>:
@@ -459,8 +459,8 @@ function CustomFlagEditor({
                   : (isValueSource(block.value) ? (block.value.value ?? '') : String(block.value ?? '')),
               })}
               className={classNames(
-                'rounded border px-2 py-1 text-[10px]',
-                inputKind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted',
+                'rounded px-2 py-1 text-[10px] transition-all duration-150',
+                inputKind === kind ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover hover:text-text-primary',
               )}
             >
               {label}
@@ -544,7 +544,7 @@ function BlockControl({
       <select
         value={block.value === undefined || block.value === null ? '' : String(block.value)}
         onChange={(event) => onChange(event.target.value)}
-        className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+        className="bioflow-field h-8 rounded-md px-2 text-sm text-text-primary outline-none"
       >
         <option value="">-- select --</option>
         {def.options?.map((option) => (
@@ -663,7 +663,7 @@ export function FlagBuilder({
 
   return (
     <div className="grid gap-3 lg:grid-cols-[280px_1fr]">
-      <div className="rounded-md border border-border bg-bg-tertiary/30 p-3">
+      <div className="rounded-md bg-bg-tertiary/30 p-3 shadow-inner">
         <div className="mb-2 flex items-center justify-between gap-2">
           <h5 className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Flag Palette</h5>
           <div className="flex items-center gap-2">
@@ -678,7 +678,7 @@ export function FlagBuilder({
                   applyBlocks(buildPresetFlagBlocks(tool.id, event.target.value as Parameters<typeof buildPresetFlagBlocks>[1]))
                   event.target.value = ''
                 }}
-                className="h-7 rounded-md border border-border bg-bg-tertiary px-2 text-[11px] text-text-primary"
+                className="bioflow-field h-7 rounded-md px-2 text-[11px] text-text-primary"
               >
                 <option value="">Apply preset…</option>
                 {presetOptions.map((preset) => (
@@ -698,7 +698,7 @@ export function FlagBuilder({
           {groupedDefs.map(({ group, defs: groupDefs }) => {
             if (group === 'Advanced') {
               return (
-                <div key={group} className="rounded-md border border-border bg-bg-secondary/60">
+                <div key={group} className="rounded-md bg-bg-secondary/60 shadow-sm">
                   <button
                     type="button"
                     className="flex w-full items-center justify-between px-2 py-1.5 text-left text-xs font-medium text-text-secondary hover:bg-bg-hover"
@@ -708,7 +708,7 @@ export function FlagBuilder({
                     <span className="text-[10px] text-text-muted">{groupDefs.length}</span>
                   </button>
                   {advancedExpanded && (
-                    <div className="border-t border-border px-2 py-2">
+                    <div className="px-2 py-2">
                       <div className="flex flex-col gap-1.5">
                         {groupDefs.map((def) => (
                           <button
@@ -718,8 +718,8 @@ export function FlagBuilder({
                             onDragStart={(event) => event.dataTransfer.setData('application/x-bioflow-flag', JSON.stringify({ type: 'palette', flagId: def.id } satisfies DragPayload))}
                             onClick={() => addFlag(def.id)}
                             className={classNames(
-                              'flex items-center justify-between rounded border px-2 py-1.5 text-left text-xs',
-                              activeFlagIds.has(def.id) ? 'border-accent/30 bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary',
+                              'flex items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-all duration-150',
+                              activeFlagIds.has(def.id) ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-secondary hover:bg-bg-hover',
                             )}
                           >
                             <span className="min-w-0 truncate">{docsChip(def)}</span>
@@ -745,8 +745,8 @@ export function FlagBuilder({
                       onDragStart={(event) => event.dataTransfer.setData('application/x-bioflow-flag', JSON.stringify({ type: 'palette', flagId: def.id } satisfies DragPayload))}
                       onClick={() => addFlag(def.id)}
                       className={classNames(
-                        'flex items-center justify-between rounded border px-2 py-1.5 text-left text-xs',
-                        activeFlagIds.has(def.id) ? 'border-accent/30 bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary',
+                        'flex items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-all duration-150',
+                        activeFlagIds.has(def.id) ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-secondary hover:bg-bg-hover',
                       )}
                     >
                       <span className="min-w-0 truncate">{docsChip(def)}</span>
@@ -760,10 +760,10 @@ export function FlagBuilder({
         </div>
       </div>
 
-      <div className="rounded-md border border-border bg-bg-tertiary/30 p-3">
+      <div className="rounded-md bg-bg-tertiary/30 p-3 shadow-inner">
         <h5 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Active Flags</h5>
         <div
-          className="mb-2 rounded border border-dashed border-border px-2 py-1.5 text-[11px] text-text-muted"
+          className="mb-2 rounded bg-bg-primary/50 px-2 py-1.5 text-[11px] text-text-muted shadow-inner"
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => handleDrop(event, 0)}
         >
@@ -788,23 +788,23 @@ export function FlagBuilder({
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => handleDrop(event, index)}
                 className={classNames(
-                  'rounded-md border p-2',
-                  isInvalid ? 'border-error/40 bg-error/5' : 'border-border bg-bg-secondary',
+                  'rounded-md p-2 shadow-sm',
+                  isInvalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary',
                 )}
               >
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <GripVertical size={14} className="shrink-0 text-text-muted" />
                       <div className="min-w-0">
-                        <div className="truncate text-xs font-medium text-text-primary">{blockLabel(tool.id, block)}</div>
-                      <div className="text-[10px] font-mono text-text-muted">{blockFlag(tool.id, block) || def.flag}</div>
+                        <div className="text-nowrap text-xs font-medium text-text-primary">{blockLabel(tool.id, block)}</div>
+                      <div className="text-nowrap text-[10px] font-mono text-text-muted">{blockFlag(tool.id, block) || def.flag}</div>
                       </div>
                     </div>
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => index > 0 && applyBlocks(moveBlock(activeBlocks, index, index - 1))}
-                      className="rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary"
+                      className="rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
                       title="Move up"
                     >
                       <ArrowUp size={12} />
@@ -812,12 +812,12 @@ export function FlagBuilder({
                     <button
                       type="button"
                       onClick={() => index < activeBlocks.length - 1 && applyBlocks(moveBlock(activeBlocks, index, index + 1))}
-                      className="rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary"
+                      className="rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
                       title="Move down"
                     >
                       <ArrowDown size={12} />
                     </button>
-                    <label className="flex items-center gap-1 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary">
+                    <label className="flex items-center gap-1 rounded bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary shadow-sm">
                       <input
                         type="checkbox"
                         checked={block.enabled}
@@ -835,7 +835,7 @@ export function FlagBuilder({
                     <button
                       type="button"
                       onClick={() => applyBlocks(activeBlocks.filter((entry) => entry.id !== block.id))}
-                      className="rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary"
+                      className="rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
                       title="Remove block"
                     >
                       <X size={12} />
@@ -885,14 +885,14 @@ export function FlagBuilder({
             )
           })}
           <div
-            className="rounded border border-dashed border-border px-2 py-1.5 text-[11px] text-text-muted"
+            className="rounded bg-bg-primary/50 px-2 py-1.5 text-[11px] text-text-muted shadow-inner"
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => handleDrop(event, activeBlocks.length)}
           >
             Drop here to append
           </div>
           {activeBlocks.length === 0 && (
-            <div className="rounded border border-border bg-bg-secondary px-3 py-2 text-xs text-text-muted">
+            <div className="rounded bg-bg-secondary px-3 py-2 text-xs text-text-muted shadow-sm">
               No flags selected yet. Add one from the palette, apply a preset, or use Custom flag for anything BioFlow does not expose yet.
             </div>
           )}
@@ -900,7 +900,7 @@ export function FlagBuilder({
 
         <div className="mt-4">
           <h5 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Command Preview</h5>
-          <pre className="overflow-x-auto rounded-md border border-border bg-[#0e1320] px-3 py-2 text-[11px] leading-relaxed text-slate-100">
+          <pre className="overflow-x-auto rounded-md bg-bg-primary px-3 py-2 text-[11px] leading-relaxed text-slate-100 shadow-inner">
             <code>{preview}</code>
           </pre>
         </div>

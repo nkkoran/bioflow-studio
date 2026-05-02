@@ -316,7 +316,13 @@ export function AppLayout() {
   )
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-bg-primary text-text-primary overflow-hidden">
+    <div
+      className="bioflow-app-shell flex h-screen w-screen flex-col overflow-hidden bg-bg-primary text-text-primary"
+      style={{
+        '--panel-sidebar-width': `${sidebarWidth / 16}rem`,
+        '--panel-bottom-height': `${bottomPanelHeight / 16}rem`,
+      } as React.CSSProperties}
+    >
       <TopBar />
       <AppDialogs />
       <Toaster />
@@ -327,33 +333,33 @@ export function AppLayout() {
       {devMode && <DnxBridgeBanner />}
       {windowDragActive && (
         <div className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-accent/10 backdrop-blur-[1px]">
-          <div className="rounded-2xl border border-accent/30 bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">
+          <div className="animate-fade-up rounded-xl bg-bg-secondary/95 px-6 py-4 text-sm text-text-primary shadow-2xl">
             Drop file or folder here to add it to the pipeline
           </div>
         </div>
       )}
 
-      <div className="flex flex-1 min-h-0">
+      <div className="bioflow-main-row flex flex-1 min-h-0">
         {/* Sidebar */}
-        <Sidebar width={sidebarWidth} />
+        <Sidebar />
 
         {/* Sidebar resize handle */}
         <div
-          className="w-1 cursor-col-resize hover:bg-accent/30 active:bg-accent/50 transition-colors shrink-0"
+          className="w-1 cursor-col-resize bg-transparent transition-colors hover:bg-accent/25 active:bg-accent/45 shrink-0"
           onMouseDown={startSidebarDrag}
         />
 
         {/* Main area: center + bottom */}
-        <div className="flex flex-col flex-1 min-w-0">
+        <div className="bioflow-main-column flex flex-1 flex-col min-w-0">
           <CenterPanel />
 
           {/* Bottom panel resize handle */}
           <div
-            className="h-1 cursor-row-resize hover:bg-accent/30 active:bg-accent/50 transition-colors shrink-0"
+            className="h-1 cursor-row-resize bg-transparent transition-colors hover:bg-accent/25 active:bg-accent/45 shrink-0"
             onMouseDown={startBottomDrag}
           />
 
-          <BottomPanel height={bottomPanelHeight} />
+          <BottomPanel />
         </div>
       </div>
     </div>

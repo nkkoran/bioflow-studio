@@ -51,7 +51,7 @@ export function TerminalTab({ terminalId, active }: TerminalTabProps) {
 
     const terminal = new Terminal({
       theme: terminalTheme,
-      fontFamily: "'JetBrains Mono', monospace",
+      fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
       fontSize: 13,
       lineHeight: 1.2,
       cursorBlink: true,
@@ -129,7 +129,7 @@ export function TerminalTab({ terminalId, active }: TerminalTabProps) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full"
+      className="bioflow-terminal-host h-full w-full"
       style={{ backgroundColor: '#0f1419' }}
     />
   )

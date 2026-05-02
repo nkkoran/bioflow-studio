@@ -1,4 +1,5 @@
 import React from 'react'
+import { X } from 'lucide-react'
 import { classNames } from '@/lib/utils'
 
 interface Tab {
@@ -19,24 +20,23 @@ interface TabsProps {
 
 export function Tabs({ tabs, activeId, onSelect, onClose, rightContent }: TabsProps) {
   return (
-    <div className="flex items-center bg-bg-secondary border-b border-border">
-      <div className="flex items-center flex-1 min-w-0">
+    <div className="flex items-center bg-bg-secondary/80 px-1 py-1 shadow-sm">
+      <div className="flex min-w-0 flex-1 items-center gap-1">
         {tabs.map((tab) => {
           const isActive = tab.id === activeId
           return (
             <button
               key={tab.id}
               className={classNames(
-                'group relative flex items-center gap-1.5 px-3 py-2 text-sm cursor-pointer transition-colors',
-                'border-b-2 -mb-px',
+                'group relative flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-all duration-150',
                 isActive
-                  ? 'text-text-primary border-accent'
-                  : 'text-text-muted hover:text-text-secondary border-transparent',
+                  ? 'bg-accent/10 text-text-primary shadow-sm'
+                  : 'text-text-muted hover:bg-bg-hover hover:text-text-secondary',
               )}
               onClick={() => onSelect(tab.id)}
             >
               {tab.icon}
-              <span className="truncate">{tab.label}</span>
+              <span className="text-nowrap min-w-0">{tab.label}</span>
               {tab.badge && (
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" title="This preview has active filters" />
               )}
@@ -53,17 +53,7 @@ export function Tabs({ tabs, activeId, onSelect, onClose, rightContent }: TabsPr
                     onClose(tab.id)
                   }}
                 >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  >
-                    <path d="M3 3l6 6M9 3l-6 6" />
-                  </svg>
+                  <X size={12} />
                 </span>
               )}
             </button>
@@ -71,7 +61,7 @@ export function Tabs({ tabs, activeId, onSelect, onClose, rightContent }: TabsPr
         })}
       </div>
       {rightContent && (
-        <div className="flex items-center px-2 ml-auto shrink-0">{rightContent}</div>
+        <div className="ml-auto flex shrink-0 items-center px-2">{rightContent}</div>
       )}
     </div>
   )

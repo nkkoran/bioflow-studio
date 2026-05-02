@@ -1,25 +1,45 @@
 @import "tailwindcss";
+@import "./renderer/styles/layout.css";
+@import "./renderer/styles/motion.css";
 
 @theme {
-  --color-bg-primary: #0f1419;
-  --color-bg-secondary: #1a1f26;
-  --color-bg-tertiary: #242a33;
-  --color-bg-hover: #2d343e;
-  --color-accent: #4c9eed;
-  --color-accent-hover: #6bb3f5;
-  --color-success: #3fb950;
-  --color-error: #f85149;
-  --color-warning: #d29922;
-  --color-text-primary: #e6edf3;
-  --color-text-secondary: #8b949e;
-  --color-text-muted: #6e7681;
-  --color-border: #30363d;
-  --color-border-light: #21262d;
+  --color-bg-primary: rgb(11 13 16);
+  --color-bg-secondary: rgb(21 24 30);
+  --color-bg-tertiary: rgb(27 32 40);
+  --color-bg-hover: rgb(36 42 51);
+  --color-accent: rgb(79 140 255);
+  --color-accent-hover: rgb(110 162 255);
+  --color-success: rgb(49 196 141);
+  --color-error: rgb(240 82 82);
+  --color-warning: rgb(246 180 75);
+  --color-text-primary: rgb(242 245 248);
+  --color-text-secondary: rgb(163 172 184);
+  --color-text-muted: rgb(111 120 133);
+  --color-border: rgba(111, 120, 133, 0.1);
+  --color-border-light: rgba(111, 120, 133, 0.06);
+  --color-panel-surface: var(--color-bg-secondary);
+  --color-raised-surface: var(--color-bg-tertiary);
+  --color-hover-surface: var(--color-bg-hover);
+  --color-text-faint: var(--color-text-muted);
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
 }
 
-/* Base styles */
+:root {
+  color-scheme: dark;
+  --color-canvas: rgb(14 17 22);
+  --surface-panel: color-mix(in srgb, var(--color-bg-secondary) 92%, transparent);
+  --surface-raised: color-mix(in srgb, var(--color-bg-tertiary) 94%, transparent);
+  --shadow-panel: 0 1rem 3rem oklch(0 0 0 / 0.34), 0 0.125rem 0.75rem oklch(0 0 0 / 0.22);
+  --shadow-popover: 0 1.125rem 3.75rem oklch(0 0 0 / 0.38), 0 0.25rem 1.125rem oklch(0 0 0 / 0.24);
+  --shadow-node: 0 0.75rem 2.125rem oklch(0 0 0 / 0.26), 0 0.125rem 0.5rem oklch(0 0 0 / 0.18);
+  --shadow-node-selected: 0 1.375rem 3.625rem oklch(0 0 0 / 0.38), 0 0 0 1px color-mix(in srgb, var(--color-accent) 42%, transparent);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.2, 1.35, 0.32, 1);
+}
+
 body {
   margin: 0;
   padding: 0;
@@ -32,50 +52,81 @@ body {
 }
 
 body[data-theme='light'] {
-  --color-bg-primary: #f7f8fb;
-  --color-bg-secondary: #ffffff;
-  --color-bg-tertiary: #eef1f6;
-  --color-bg-hover: #e2e8f0;
-  --color-accent: #2563eb;
-  --color-accent-hover: #1d4ed8;
-  --color-success: #15803d;
-  --color-error: #dc2626;
-  --color-warning: #b45309;
-  --color-text-primary: #111827;
-  --color-text-secondary: #4b5563;
-  --color-text-muted: #6b7280;
-  --color-border: #cbd5e1;
-  --color-border-light: #e5e7eb;
+  color-scheme: light;
+  --color-bg-primary: rgb(246 247 249);
+  --color-bg-secondary: rgb(255 255 255);
+  --color-bg-tertiary: rgb(240 243 247);
+  --color-bg-hover: rgb(232 237 244);
+  --color-accent: rgb(37 99 235);
+  --color-accent-hover: rgb(29 78 216);
+  --color-success: rgb(22 134 90);
+  --color-error: rgb(217 45 32);
+  --color-warning: rgb(183 121 31);
+  --color-text-primary: rgb(20 23 28);
+  --color-text-secondary: rgb(83 96 113);
+  --color-text-muted: rgb(130 144 161);
+  --color-border: rgba(130, 144, 161, 0.12);
+  --color-border-light: rgba(130, 144, 161, 0.07);
+  --color-canvas: rgb(249 250 252);
+  --surface-panel: color-mix(in srgb, var(--color-bg-secondary) 94%, transparent);
+  --surface-raised: color-mix(in srgb, var(--color-bg-tertiary) 96%, transparent);
+  --shadow-panel: 0 1.125rem 3.125rem rgb(34 42 58 / 0.12), 0 0.1875rem 0.875rem rgb(34 42 58 / 0.08);
+  --shadow-popover: 0 1.25rem 3.75rem rgb(34 42 58 / 0.16), 0 0.3125rem 1.125rem rgb(34 42 58 / 0.1);
+  --shadow-node: 0 0.875rem 2rem rgb(34 42 58 / 0.13), 0 0.125rem 0.5rem rgb(34 42 58 / 0.08);
+  --shadow-node-selected: 0 1.375rem 3.625rem rgb(34 42 58 / 0.18), 0 0 0 1px color-mix(in srgb, var(--color-accent) 36%, transparent);
 }
 
 body[data-theme='simple'] {
-  --color-bg-primary: #111318;
-  --color-bg-secondary: #1b1f27;
-  --color-bg-tertiary: #262c36;
-  --color-bg-hover: #313846;
-  --color-accent: #38bdf8;
-  --color-accent-hover: #7dd3fc;
-  --color-success: #22c55e;
-  --color-error: #ef4444;
-  --color-warning: #f59e0b;
-  --color-text-primary: #f3f4f6;
-  --color-text-secondary: #cbd5e1;
-  --color-text-muted: #94a3b8;
-  --color-border: #3f4756;
-  --color-border-light: #2f3744;
+  --color-bg-primary: rgb(13 15 18);
+  --color-bg-secondary: rgb(23 26 32);
+  --color-bg-tertiary: rgb(32 37 46);
+  --color-bg-hover: rgb(42 48 58);
+  --color-accent: rgb(56 189 248);
+  --color-accent-hover: rgb(125 211 252);
+  --color-success: rgb(34 197 94);
+  --color-error: rgb(239 68 68);
+  --color-warning: rgb(245 158 11);
+  --color-text-primary: rgb(243 244 246);
+  --color-text-secondary: rgb(203 213 225);
+  --color-text-muted: rgb(148 163 184);
+  --color-border: rgba(148, 163, 184, 0.1);
+  --color-border-light: rgba(148, 163, 184, 0.06);
+  --color-canvas: rgb(17 19 24);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: calc(var(--space-1) / 2) solid color-mix(in srgb, var(--color-accent) 72%, transparent);
+  outline-offset: calc(var(--space-1) / 2);
+}
+
+code,
+pre,
+.font-mono {
+  font-variant-ligatures: none;
 }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: var(--space-2);
+  height: var(--space-2);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--space-1);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-muted);
@@ -84,4 +135,177 @@ body[data-theme='simple'] {
 /* Selection */
 ::selection {
   background: rgba(76, 158, 237, 0.3);
+}
+
+.surface-panel {
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(0.875rem);
+}
+
+.surface-card {
+  background: var(--surface-raised);
+  box-shadow: 0 0.625rem 1.75rem oklch(0 0 0 / 0.18), 0 1px 0.375rem oklch(0 0 0 / 0.12);
+  border-top: 1px solid oklch(from var(--color-raised-surface) calc(l + 0.08) c h / 0.5);
+}
+
+.surface-popover {
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-popover);
+  backdrop-filter: blur(0.875rem);
+  border-top: 1px solid oklch(from var(--color-raised-surface) calc(l + 0.08) c h / 0.5);
+}
+
+.bioflow-field {
+  background: var(--surface-raised);
+  box-shadow:
+    inset 0 1px 2px oklch(0 0 0 / 0.3),
+    inset 0 0 0 1px color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+}
+
+.bioflow-field:focus {
+  box-shadow:
+    inset 0 1px 2px oklch(0 0 0 / 0.3),
+    inset 0 0 0 1px var(--color-accent),
+    0 0 0 calc(var(--space-1) / 2) color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+
+input:not([type='checkbox']):not([type='radio']),
+textarea,
+select,
+pre {
+  box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.3);
+}
+
+.bioflow-modal,
+.bioflow-inspector-surface {
+  border-top: 1px solid oklch(from var(--color-raised-surface) calc(l + 0.08) c h / 0.5);
+}
+
+.bioflow-canvas-node-label {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.bioflow-section-label,
+.bioflow-panel-text :where(.uppercase) {
+  color: var(--color-text-faint);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+}
+
+.bioflow-badge,
+.bioflow-status-badge {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+code,
+pre,
+.font-mono {
+  font-feature-settings: "tnum" 1, "ss01" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.interactive-row {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+
+.interactive-row:hover {
+  background: var(--color-hover-surface);
+}
+
+.interactive-row:active {
+  background: var(--color-raised-surface);
+}
+
+.interactive-button {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 120ms ease-out, color 120ms ease-out, transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.interactive-button:hover {
+  background: var(--color-hover-surface);
+}
+
+.interactive-button:active:not(:disabled) {
+  background: var(--color-raised-surface);
+  transform: scale(0.97);
+}
+
+.bioflow-toolbar svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.bioflow-panel-text svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.bioflow-status-badge svg,
+.bioflow-badge svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.bioflow-empty-state svg {
+  width: 2rem;
+  height: 2rem;
+}
+
+.border-border,
+.border-border-light,
+.border-border\/50,
+.border-border\/60,
+.border-border\/70,
+.border-border-light\/50,
+.border-border-light\/60 {
+  border-color: transparent !important;
+}
+
+.react-flow {
+  background: var(--color-canvas);
+}
+
+.react-flow__background pattern circle,
+.react-flow__background pattern path {
+  color: color-mix(in srgb, var(--color-text-muted) 20%, transparent);
+}
+
+.react-flow__controls {
+  border: 0 !important;
+  border-radius: var(--space-2) !important;
+  overflow: hidden;
+  box-shadow: var(--shadow-panel) !important;
+}
+
+.react-flow__controls-button {
+  background: var(--surface-panel) !important;
+  border: 0 !important;
+  color: var(--color-text-secondary) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-bg-hover) !important;
+  color: var(--color-text-primary) !important;
+}
+
+.react-flow__minimap {
+  border: 0 !important;
+  border-radius: var(--space-2) !important;
+  box-shadow: var(--shadow-panel) !important;
+  overflow: hidden;
+}
+
+.react-flow__node {
+  transition: transform 150ms var(--ease-out), filter 150ms var(--ease-out);
+}
+
+.react-flow__node.selected {
+  transform: translateY(calc(var(--space-1) / -2));
 }

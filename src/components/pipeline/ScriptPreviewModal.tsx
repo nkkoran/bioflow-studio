@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Copy, X } from 'lucide-react'
+import { Copy } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
+import { Dialog } from '@/components/ui/Dialog'
 import type { DryRunScript } from '@/types/pipeline'
 
 interface Props {
@@ -29,20 +30,14 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+    <Dialog
+      open
+      onClose={onClose}
+      title="Preview generated scripts"
+      subtitle="Dry-run only. No files are written and no Slurm jobs are submitted."
+      className="bioflow-workbench-dialog"
+      bodyClassName="bioflow-workbench-body"
     >
-      <div className="flex h-[760px] max-h-[92vh] w-[1120px] max-w-[96vw] flex-col overflow-hidden rounded-xl border border-border bg-bg-primary shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-border bg-bg-secondary px-4 py-3">
-          <div>
-            <div className="text-sm font-semibold text-text-primary">Preview generated scripts</div>
-            <div className="text-[11px] text-text-muted">Dry-run only. No files are written and no Slurm jobs are submitted.</div>
-          </div>
-          <div className="flex-1" />
-          <Button variant="ghost" size="sm" icon={<X size={13} />} onClick={onClose} className="h-7 px-2" />
-        </div>
-
         <div className="flex min-h-0 flex-1">
           <div className="w-72 overflow-y-auto border-r border-border bg-bg-secondary/40">
             {scripts.length === 0 ? (
@@ -94,7 +89,7 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
             {selectedScript ? (
               <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_280px]">
                 <div className="min-h-0 overflow-auto p-3">
-                  <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-[#0e1320] p-3 text-[11px] leading-relaxed text-slate-100">
+                  <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-slate-100">
                     {selectedScript.script}
                   </pre>
                 </div>
@@ -136,8 +131,7 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Dialog>
   )
 }
 

@@ -25,6 +25,7 @@ import { analysisOptionsToParamValues, getActiveToolInputs, normalizeAnalysisOpt
 import { defaultTransformPresetConfig } from '@/lib/transformPresets'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { artifactRefForFileNode } from '@/lib/transferPlanner'
+import { isLikelyLocalPath } from '@/lib/pathOrigin'
 
 export type BioflowNode = Node<ToolNodeData | FileNodeData | MergeNodeData | TransferNodeData | TransformNodeData | NoteNodeData, BioflowNodeType>
 export type BioflowEdge = Edge
@@ -183,9 +184,12 @@ function migrateToolNodeData(data: ToolNodeData, connectedPortIds: Iterable<stri
 }
 
 function migrateFileNodeData(data: FileNodeData): FileNodeData {
+  const inferredOrigin = data.origin ?? (data.source === 'local' || isLikelyLocalPath(data.path) ? 'local' : 'ssh')
+  const inferredSource = data.source ?? (inferredOrigin === 'local' ? 'local' : 'remote')
   const withOrigin: FileNodeData = {
     ...data,
-    origin: data.origin ?? (data.source === 'local' ? 'local' : 'ssh'),
+    source: inferredSource,
+    origin: inferredOrigin,
   }
   const withArtifact: FileNodeData = {
     ...withOrigin,
@@ -440,6 +444,8 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
 
   addFileNode: (position, data) => {
     const id = makeId('file')
+    const inferredOrigin = data?.origin ?? (data?.source === 'local' || isLikelyLocalPath(data?.path) ? 'local' : 'ssh')
+    const inferredSource = data?.source ?? (inferredOrigin === 'local' ? 'local' : 'remote')
     const node: BioflowNode = {
       id,
       type: 'file',
@@ -447,10 +453,10 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
       data: {
         label: data?.label ?? 'File',
         path: data?.path ?? '',
-        source: data?.source ?? 'remote',
-        origin: data?.origin ?? (data?.source === 'local' ? 'local' : 'ssh'),
+        source: inferredSource,
+        origin: inferredOrigin,
         artifactRef: data?.artifactRef ?? {
-          origin: data?.origin ?? (data?.source === 'local' ? 'local' : 'ssh'),
+          origin: inferredOrigin,
           path: data?.path ?? '',
           fileType: data?.fileType ?? 'any',
           genomeBuild: data?.genomeBuild,
@@ -797,13 +803,20 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         const nextData = { ...n.data, ...cloneData(patch) } as BioflowNode['data']
         if (n.type === 'file') {
           const fileData = nextData as FileNodeData
+          const normalizedOrigin = isLikelyLocalPath(fileData.path)
+            ? 'local'
+            : fileData.origin ?? (fileData.source === 'local' ? 'local' : 'ssh')
+          const normalizedSource = normalizedOrigin === 'local' ? 'local' : fileData.source ?? 'remote'
           return {
             ...n,
             data: {
               ...fileData,
+              source: normalizedSource,
+              origin: normalizedOrigin,
               artifactRef: artifactRefForFileNode({
                 ...fileData,
-                origin: fileData.origin ?? (fileData.source === 'local' ? 'local' : 'ssh'),
+                source: normalizedSource,
+                origin: normalizedOrigin,
               }),
             } satisfies FileNodeData,
           }

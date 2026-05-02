@@ -36,7 +36,6 @@ export function ClusterDoctorDialog({ open, onClose, connectionId, report }: Clu
       open={open}
       onClose={onClose}
       title="Cluster Readiness Doctor"
-      width="max-w-3xl"
       footer={(
         <>
           <Button variant="secondary" onClick={onClose}>

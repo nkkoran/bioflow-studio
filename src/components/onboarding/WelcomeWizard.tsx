@@ -4,7 +4,7 @@ import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { HelpButton } from '@/components/ui/HelpButton'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -48,6 +48,7 @@ export function WelcomeWizard() {
   const current = visibleSteps[Math.min(step, visibleSteps.length - 1)]
   const activeEntry = activeConnectionId ? connections[activeConnectionId] : null
   const hasActiveConnection = Boolean(activeEntry && activeEntry.status === 'connected')
+  const hasSshConnection = Boolean(hasActiveConnection && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
 
   const finish = async () => {
     if (account.trim() && activeConnectionId) {
@@ -78,7 +79,6 @@ export function WelcomeWizard() {
       open
       onClose={dismissForNow}
       title="Welcome to BioFlow Studio"
-      width="max-w-2xl"
       footer={(
         <div className="flex w-full items-center justify-between">
           <Button variant="secondary" onClick={() => void finish()}>Skip setup</Button>
@@ -137,10 +137,10 @@ export function WelcomeWizard() {
             </p>
             <Button
               className="mt-2"
-              disabled={!hasActiveConnection || testing}
+              disabled={!hasSshConnection || testing}
               onClick={async () => {
-                if (!activeConnectionId) {
-                  setMessage('No active connection. Step back and add one.')
+                if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
+                  setMessage('Connect to an SSH cluster before running the test.')
                   return
                 }
                 setTesting(true)

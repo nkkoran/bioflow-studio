@@ -71,7 +71,6 @@ function RunConfirmDialog({ result, review, snapshot, onRunAnyway, onQuickFix, o
     },
   }), [deleteIntermediates, snapshot])
 
-  const headerBg = hasErrors ? 'bg-error/10 border-error/30' : hasWarnings ? 'bg-warning/10 border-warning/30' : 'bg-success/10 border-success/30'
   const headerText = hasErrors ? 'text-error' : hasWarnings ? 'text-warning' : 'text-success'
   const HeaderIcon = hasErrors ? XCircle : hasWarnings ? AlertTriangle : CheckCircle2
   const title = hasErrors
@@ -86,20 +85,34 @@ function RunConfirmDialog({ result, review, snapshot, onRunAnyway, onQuickFix, o
   const infos = result.issues.filter((i) => i.severity === 'info')
 
   return (
-    // Backdrop
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+    <Dialog
+      open
+      onClose={onClose}
+      title={title}
+      icon={<HeaderIcon size={16} className={headerText} />}
+      footer={hasErrors ? (
+        <>
+          <span className="mr-auto text-xs text-text-muted">Fix the errors above, then try again.</span>
+          <Button variant="secondary" size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </>
+      ) : (
+        <>
+          <span className="mr-auto text-xs text-text-muted">{isClean ? 'Ready to submit.' : "Warnings won't stop the run."}</span>
+          <Button variant="secondary" size="sm" onClick={onClose}>
+            Go back
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => onRunAnyway(submitSnapshot)}>
+            <Play size={11} className="mr-1" />
+            {isClean ? 'Run' : 'Run anyway'}
+          </Button>
+        </>
+      )}
     >
-      <div className="w-[680px] max-h-[86vh] flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className={`flex items-center gap-2.5 px-4 py-3 border-b ${headerBg}`}>
-          <HeaderIcon size={16} className={headerText} />
-          <span className={`text-sm font-medium ${headerText}`}>{title}</span>
-        </div>
-
+      <div className="flex flex-col gap-3">
         {review && (
-          <div className="grid grid-cols-4 gap-2 border-b border-border bg-bg-secondary px-4 py-3">
+          <div className="grid grid-cols-2 gap-2">
             <RunReviewStat label="Nodes" value={String(review.nodeCount)} />
             <RunReviewStat label="Arrays" value={String(review.arrayNodeCount)} />
             <RunReviewStat label="Transfers" value={String(review.transferPlans.length)} />
@@ -107,16 +120,15 @@ function RunConfirmDialog({ result, review, snapshot, onRunAnyway, onQuickFix, o
           </div>
         )}
 
-        {/* Issue list */}
-        <div className="flex-1 overflow-y-auto py-1 min-h-0">
+        <div className="flex min-h-0 flex-col gap-2">
           {[
             { label: 'Errors', items: errors, color: 'text-error' },
             { label: 'Warnings', items: warnings, color: 'text-warning' },
             { label: 'Notes', items: infos, color: 'text-accent' },
           ].map(({ label, items, color }) =>
             items.length === 0 ? null : (
-              <div key={label}>
-                <div className="px-4 py-1 text-[9px] uppercase tracking-wider text-text-muted border-b border-border-light">
+              <div key={label} className="rounded-md bg-bg-secondary/70 py-1 shadow-sm">
+                <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-text-muted">
                   {label} ({items.length})
                 </div>
                 {items.map((issue, i) => (
@@ -126,41 +138,21 @@ function RunConfirmDialog({ result, review, snapshot, onRunAnyway, onQuickFix, o
             ),
           )}
           {result.issues.length === 0 && (
-            <div className="px-4 py-6 text-sm text-text-secondary">All blocking checks are clear.</div>
+            <div className="rounded-md bg-success/10 px-3 py-3 text-sm text-text-secondary shadow-sm">All blocking checks are clear.</div>
           )}
           {review && (
-            <RunReviewDetails
-              review={review}
-              deleteIntermediates={deleteIntermediates}
-              setDeleteIntermediates={setDeleteIntermediates}
-            />
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border bg-bg-secondary">
-          {hasErrors ? (
-            <>
-              <span className="text-xs text-text-muted mr-auto">Fix the errors above, then try again.</span>
-              <Button variant="secondary" size="sm" onClick={onClose}>
-                Close
-              </Button>
-            </>
-          ) : (
-            <>
-              <span className="text-xs text-text-muted mr-auto">{isClean ? 'Ready to submit.' : "Warnings won't stop the run."}</span>
-              <Button variant="secondary" size="sm" onClick={onClose}>
-                Go back
-              </Button>
-              <Button variant="primary" size="sm" onClick={() => onRunAnyway(submitSnapshot)}>
-                <Play size={11} className="mr-1" />
-                {isClean ? 'Run' : 'Run anyway'}
-              </Button>
-            </>
+            <details className="rounded-md bg-bg-secondary/70 px-3 py-2 text-xs text-text-secondary shadow-sm">
+              <summary className="cursor-pointer select-none text-text-primary">Cleanup, merge, and generated command details</summary>
+              <RunReviewDetails
+                review={review}
+                deleteIntermediates={deleteIntermediates}
+                setDeleteIntermediates={setDeleteIntermediates}
+              />
+            </details>
           )}
         </div>
       </div>
-    </div>
+    </Dialog>
   )
 }
 
@@ -242,51 +234,49 @@ function RunReviewDetails({
 }) {
   const mismatches = review.axisReports.filter((report) => report.status === 'mismatch')
   return (
-    <div className="border-t border-border-light px-4 py-3">
-      <div className="mb-2 text-[10px] uppercase tracking-wider text-text-muted">Run review</div>
+    <div className="mt-3 flex flex-col gap-2">
       {review.transferPlans.length > 0 && (
-        <div className="mb-2 rounded-md border border-border bg-bg-tertiary/50 p-2">
-          <div className="text-xs font-medium text-text-primary">Planned transfers</div>
-          <div className="mt-1 flex flex-col gap-1">
-            {review.transferPlans.slice(0, 5).map((plan) => (
+        <details className="rounded-md bg-bg-tertiary/50 px-3 py-2 shadow-sm">
+          <summary className="cursor-pointer select-none text-text-primary">Planned transfers ({review.transferPlans.length})</summary>
+          <div className="mt-2 flex flex-col gap-1">
+            {review.transferPlans.map((plan) => (
               <div key={plan.id} className="truncate text-[10px] text-text-muted">
                 {plan.route}: {plan.source.path} {'->'} {plan.target.path}
               </div>
             ))}
-            {review.transferPlans.length > 5 && <div className="text-[10px] text-text-muted">+{review.transferPlans.length - 5} more</div>}
           </div>
-        </div>
+        </details>
       )}
       {review.axisReports.length > 0 && (
-        <div className={classNames(
-          'mb-2 rounded-md border p-2',
-          mismatches.length > 0 ? 'border-warning/30 bg-warning/10' : 'border-success/30 bg-success/10',
+        <details className={classNames(
+          'rounded-md px-3 py-2 shadow-sm',
+          mismatches.length > 0 ? 'bg-warning/10' : 'bg-success/10',
         )}>
-          <div className={classNames('text-xs font-medium', mismatches.length > 0 ? 'text-warning' : 'text-success')}>
-            Split alignment
-          </div>
-          <div className="mt-1 flex flex-col gap-1">
+          <summary className={classNames('cursor-pointer select-none', mismatches.length > 0 ? 'text-warning' : 'text-success')}>
+            Split alignment ({review.axisReports.length})
+          </summary>
+          <div className="mt-2 flex flex-col gap-1">
             {review.axisReports.map((report) => (
-              <div key={report.nodeId} className="text-[10px] text-text-secondary">
+              <div key={report.nodeId} className="truncate text-[10px] text-text-secondary">
                 {report.nodeId}: {report.message}
               </div>
             ))}
           </div>
-        </div>
+        </details>
       )}
       {review.scriptSummaries.length > 0 && (
-        <div className="mb-2 rounded-md border border-border bg-bg-tertiary/50 p-2">
-          <div className="text-xs font-medium text-text-primary">Generated commands</div>
-          <div className="mt-1 grid grid-cols-2 gap-1">
-            {review.scriptSummaries.slice(0, 8).map((script) => (
+        <details className="rounded-md bg-bg-tertiary/50 px-3 py-2 shadow-sm">
+          <summary className="cursor-pointer select-none text-text-primary">Generated commands ({review.scriptSummaries.length})</summary>
+          <div className="mt-2 grid grid-cols-2 gap-1">
+            {review.scriptSummaries.map((script) => (
               <div key={script.nodeId} className="truncate rounded bg-bg-primary px-2 py-1 text-[10px] text-text-muted">
                 {script.label}: {script.mode}{script.arraySize ? ` (${script.arraySize} tasks)` : ''}
               </div>
             ))}
           </div>
-        </div>
+        </details>
       )}
-      <div className="rounded-md border border-border bg-bg-tertiary/50 p-2">
+      <div className="rounded-md bg-bg-tertiary/50 p-2 shadow-sm">
         <label className="flex items-start gap-2 text-xs text-text-primary">
           <input
             type="checkbox"
@@ -296,14 +286,20 @@ function RunReviewDetails({
           />
           <span>
             Delete generated intermediate outputs after the run succeeds
-            <span className="mt-0.5 block text-[10px] leading-snug text-text-muted">
-              Off by default. BioFlow protects all file-node inputs and PLINK sidecars; generated outputs marked as intermediate and auto-merge shard files are eligible.
-              {review.cleanupPlan.generatedIntermediatePaths.length > 0
-                ? ` ${review.cleanupPlan.generatedIntermediatePaths.length} generated path${review.cleanupPlan.generatedIntermediatePaths.length === 1 ? '' : 's'} would be removed when this is enabled.`
-                : ''}
-            </span>
           </span>
         </label>
+        <details className="mt-2 rounded bg-bg-primary/60 px-2 py-1.5 text-[10px] text-text-muted">
+          <summary className="cursor-pointer select-none text-text-secondary">
+            Cleanup details ({review.cleanupPlan.generatedIntermediatePaths.length})
+          </summary>
+          <div className="mt-2 flex flex-col gap-1">
+            {review.cleanupPlan.generatedIntermediatePaths.length > 0
+              ? review.cleanupPlan.generatedIntermediatePaths.map((path) => (
+                  <div key={path} className="truncate font-mono">{path}</div>
+                ))
+              : <div>No generated intermediate paths are marked for deletion.</div>}
+          </div>
+        </details>
         {review.cleanupPlan.warnings.map((warning) => (
           <div key={warning} className="mt-1 text-[10px] text-warning">{warning}</div>
         ))}
@@ -1319,7 +1315,7 @@ export function PipelineToolbar() {
 
   return (
     <>
-      <div data-tour="run-toolbar" className="h-10 px-3 bg-bg-secondary border-b border-border flex items-center gap-2 shrink-0">
+      <div data-tour="run-toolbar" className="bioflow-toolbar surface-panel z-20 flex h-10 shrink-0 items-center gap-2 px-3">
         {/* Pipeline name */}
         <div className="flex items-center gap-2 min-w-0">
           {editingName ? (
@@ -1361,11 +1357,11 @@ export function PipelineToolbar() {
                 <span className="truncate">Next: {workflowGuide.current.title}</span>
               </button>
               {workflowOpen && (
-                <div className="absolute left-0 top-full z-50 mt-1 w-[390px] rounded-lg border border-border bg-bg-secondary p-2 shadow-lg">
+                <div className="surface-popover animate-fade-up absolute left-0 top-full z-50 mt-1 w-[390px] rounded-lg p-2">
                   <div className="mb-1 px-1 text-[10px] uppercase tracking-wider text-text-muted">Workflow guide</div>
                   <div className="flex flex-col gap-1">
                     {workflowGuide.steps.map((step) => (
-                      <div key={step.id} className="rounded-md border border-border-light bg-bg-primary px-2 py-2">
+                      <div key={step.id} className="rounded-md bg-bg-primary/80 px-2 py-2 shadow-sm">
                         <div className="flex items-start gap-2">
                           <span className={classNames('mt-0.5 h-2 w-2 shrink-0 rounded-full', workflowStatusDot(step.status))} />
                           <div className="min-w-0 flex-1">
@@ -1428,9 +1424,9 @@ export function PipelineToolbar() {
                 : 'Check'}
             </button>
             {checkOpen && (checkReport || checkRunning) && (
-              <div className="absolute left-0 top-full z-50 mt-1 max-h-[420px] w-[420px] overflow-auto rounded-lg border border-border bg-bg-secondary py-1 shadow-lg">
+              <div className="surface-popover animate-fade-up absolute left-0 top-full z-50 mt-1 max-h-[420px] w-[420px] overflow-auto rounded-lg py-1">
                 {checkRunning && (
-                  <div className="flex items-center gap-2 border-b border-border-light px-3 py-2 text-xs text-text-secondary">
+                  <div className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary">
                     <Loader2 size={13} className="animate-spin text-accent" />
                     <span>{checkStatus ?? 'Checking...'}</span>
                   </div>
@@ -1438,7 +1434,7 @@ export function PipelineToolbar() {
                 {checkReport && (
                   <>
                 {checkReadinessReport && (
-                  <div className="border-b border-border-light px-3 py-2 text-[10px] text-text-muted">
+                  <div className="px-3 py-2 text-[10px] text-text-muted">
                     Fast check: {checkReadinessReport.errorCount} errors, {checkReadinessReport.warningCount} warnings, {checkReadinessReport.infoCount} notes. File probes, module checks, transfer planning, and cluster doctor run when you press Run.
                   </div>
                 )}
@@ -1512,7 +1508,7 @@ export function PipelineToolbar() {
             className={`ml-2 px-2 py-0.5 text-[10px] rounded max-w-[420px] truncate ${
               savedMessage.isError
                 ? 'bg-error/10 text-error'
-                : 'bg-accent/10 text-accent animate-pulse'
+                : 'bg-accent/10 text-accent animate-fade-in'
             }`}
             title={savedMessage.isError ? savedMessage.text : undefined}
           >

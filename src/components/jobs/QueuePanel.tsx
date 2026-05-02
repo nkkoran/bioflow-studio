@@ -84,7 +84,7 @@ export function QueuePanel() {
 
   if (!connectionId || connectionId === LOCAL_CONNECTION_ID) {
     return (
-      <div className="flex-1 flex items-center justify-center text-sm text-text-muted">
+      <div className="animate-fade-up flex-1 flex items-center justify-center text-center text-sm text-text-muted">
         Connect to a Slurm cluster to view the live queue.
       </div>
     )
@@ -92,7 +92,7 @@ export function QueuePanel() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="shrink-0 flex items-center gap-2 border-b border-border-light px-3 py-2">
+      <div className="shrink-0 flex items-center gap-2 px-3 py-2 shadow-sm">
         <div>
           <div className="text-xs font-medium text-text-primary">Slurm queue</div>
           <div className="text-[10px] text-text-muted">
@@ -114,14 +114,14 @@ export function QueuePanel() {
       </div>
 
       {snapshot?.error && (
-        <div className="shrink-0 border-b border-error/20 bg-error/10 px-3 py-2 text-xs text-error">
+        <div className="mx-3 mt-2 shrink-0 rounded-md bg-error/10 px-3 py-2 text-xs text-error shadow-sm">
           {snapshot.error.includes('squeue') ? 'Could not run squeue on this connection.' : snapshot.error}
         </div>
       )}
 
-      <div className="flex-1 overflow-auto">
-        <table className="w-full text-left text-xs">
-          <thead className="sticky top-0 bg-bg-tertiary">
+      <div className="flex-1 overflow-auto px-2 py-2">
+        <table className="w-full border-separate border-spacing-y-1 text-left text-xs">
+          <thead className="sticky top-0 bg-bg-secondary/95 shadow-sm">
             <tr>
               {[
                 ['jobId', 'Job ID'],
@@ -130,30 +130,30 @@ export function QueuePanel() {
                 ['elapsed', 'Elapsed'],
                 ['partition', 'Partition'],
               ].map(([key, label]) => (
-                <th key={key} className="border-b border-border px-3 py-2 text-text-secondary">
+                <th key={key} className="px-3 py-2 text-text-secondary">
                   <button onClick={() => onSort(key as typeof sortKey)} className="hover:text-text-primary">
                     {label}{sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
                   </button>
                 </th>
               ))}
-              <th className="border-b border-border px-3 py-2 text-text-secondary">Limit</th>
-              <th className="border-b border-border px-3 py-2 text-text-secondary">Reason</th>
-              <th className="border-b border-border px-3 py-2 text-text-secondary w-10"></th>
+              <th className="px-3 py-2 text-text-secondary">Limit</th>
+              <th className="px-3 py-2 text-text-secondary">Reason</th>
+              <th className="w-10 px-3 py-2 text-text-secondary"></th>
             </tr>
           </thead>
           <tbody>
             {rows.map((entry) => {
               const ours = isKnownJob(entry.jobId, ourJobIds)
               return (
-                <tr key={entry.jobId} className={ours ? 'bg-accent/5' : 'odd:bg-bg-primary even:bg-bg-secondary'}>
-                  <td className="border-b border-border/50 px-3 py-1.5 font-mono text-text-primary">{entry.jobId}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-text-primary">{entry.name}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-text-secondary">{entry.state}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-text-muted font-mono">{entry.elapsed}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-text-muted">{entry.partition}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-text-muted font-mono">{entry.timeLimit}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-text-muted">{entry.reason}</td>
-                  <td className="border-b border-border/50 px-3 py-1.5 text-right">
+                <tr key={entry.jobId} className={ours ? 'bg-accent/10 shadow-sm' : 'bg-bg-secondary/60 hover:bg-bg-hover'}>
+                  <td className="rounded-l-md px-3 py-1.5 font-mono text-text-primary">{entry.jobId}</td>
+                  <td className="px-3 py-1.5 text-text-primary">{entry.name}</td>
+                  <td className="px-3 py-1.5 text-text-secondary">{entry.state}</td>
+                  <td className="px-3 py-1.5 text-text-muted font-mono">{entry.elapsed}</td>
+                  <td className="px-3 py-1.5 text-text-muted">{entry.partition}</td>
+                  <td className="px-3 py-1.5 text-text-muted font-mono">{entry.timeLimit}</td>
+                  <td className="px-3 py-1.5 text-text-muted">{entry.reason}</td>
+                  <td className="rounded-r-md px-3 py-1.5 text-right">
                     {ours && (
                       <button
                         title="Cancel job (scancel)"
@@ -171,6 +171,17 @@ export function QueuePanel() {
               <tr>
                 <td colSpan={8} className="px-3 py-8 text-center text-text-muted">
                   No queued jobs visible for this connection.
+                </td>
+              </tr>
+            )}
+            {snapshot?.loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={8} className="px-3 py-4">
+                  <div className="grid gap-2">
+                    <div className="animate-shimmer h-7 rounded-md" />
+                    <div className="animate-shimmer h-7 rounded-md" />
+                    <div className="animate-shimmer h-7 rounded-md" />
+                  </div>
                 </td>
               </tr>
             )}

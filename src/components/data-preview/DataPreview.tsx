@@ -183,7 +183,7 @@ export function DataPreview() {
         <button
           type="button"
           onClick={() => void pasteRawText()}
-          className="inline-flex h-7 items-center gap-1 rounded border border-border bg-bg-secondary px-2 text-[11px] text-text-secondary hover:text-text-primary"
+          className="inline-flex h-7 items-center gap-1 rounded bg-bg-secondary px-2 text-[11px] text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary"
           title="Paste clipboard text into a raw preview tab"
         >
           <ClipboardPaste size={13} />
@@ -269,22 +269,22 @@ export function DataPreview() {
       />
 
       {activeTab && !activeTab.loading && activeTab.data?.rawText !== undefined && (
-        <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+        <div className="flex items-center gap-2 px-3 py-1.5 shadow-sm">
           <button
-            className={`rounded border px-2 py-0.5 text-[11px] ${
+            className={`rounded px-2 py-0.5 text-[11px] transition-all duration-150 ${
               activeTab.mode === 'text'
-                ? 'border-accent bg-accent/10 text-text-primary'
-                : 'border-border text-text-muted hover:text-text-primary'
+                ? 'bg-accent/10 text-text-primary shadow-sm'
+                : 'text-text-muted hover:bg-bg-hover hover:text-text-primary'
             }`}
             onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'text')}
           >
             Raw text
           </button>
           <button
-            className={`rounded border px-2 py-0.5 text-[11px] ${
+            className={`rounded px-2 py-0.5 text-[11px] transition-all duration-150 ${
               activeTab.mode === 'tabular'
-                ? 'border-accent bg-accent/10 text-text-primary'
-                : 'border-border text-text-muted hover:text-text-primary'
+                ? 'bg-accent/10 text-text-primary shadow-sm'
+                : 'text-text-muted hover:bg-bg-hover hover:text-text-primary'
             }`}
             onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'tabular')}
           >
@@ -297,7 +297,7 @@ export function DataPreview() {
                 <select
                   value={delimiterOverride[activeTab.filePath] ?? 'auto'}
                   onChange={(e) => setDelimiterOverride(activeTab.filePath, e.target.value as DelimiterOverride)}
-                  className="h-6 rounded border border-border bg-bg-primary px-1.5 text-[11px] text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                  className="bioflow-field h-6 rounded px-1.5 text-[11px] text-text-primary outline-none"
                   title="Override the delimiter used to parse this file"
                 >
                   <option value="auto">Auto</option>
@@ -356,12 +356,12 @@ export function DataPreview() {
             </>
           )}
           {errors[activeTab.id] && (
-            <span className="truncate text-[11px] text-warning">{errors[activeTab.id]}</span>
+            <span className="truncate rounded bg-warning/10 px-2 py-0.5 text-[11px] text-warning shadow-sm">{errors[activeTab.id]}</span>
           )}
           {activeTab.data?.rawText !== undefined && activeTab.data.rawText.length > 0 && (
             <button
               type="button"
-              className="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border bg-bg-tertiary px-2 text-[11px] text-text-muted hover:text-text-primary"
+              className="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded bg-bg-tertiary px-2 text-[11px] text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
               title="Copy the raw preview text to the clipboard"
               onClick={() => void copyRawText(activeTab.data?.rawText ?? '')}
             >
@@ -392,8 +392,14 @@ export function DataPreview() {
 
       <div className="flex-1 min-h-0">
         {activeTab?.loading && (
-          <div className="flex items-center justify-center h-full text-text-muted">
-            <Loader2 size={20} className="animate-spin" />
+          <div className="flex h-full flex-col gap-2 p-4 text-text-muted">
+            <div className="flex items-center gap-2 text-xs">
+              <Loader2 size={14} className="animate-spin" />
+              Loading preview
+            </div>
+            <div className="animate-shimmer h-8 rounded-md" />
+            <div className="animate-shimmer h-8 rounded-md" />
+            <div className="animate-shimmer h-8 rounded-md" />
           </div>
         )}
 

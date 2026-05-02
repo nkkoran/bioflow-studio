@@ -35,7 +35,6 @@ export function AppDialogs() {
       open
       onClose={close}
       title={active.title}
-      width="max-w-lg"
       footer={(
         <>
           {active.kind !== 'alert' && (
@@ -52,9 +51,10 @@ export function AppDialogs() {
       <div className="flex flex-col gap-3">
         <p className="text-sm text-text-primary leading-relaxed">{active.message}</p>
         {active.detail && (
-          <div className="rounded-md border border-border bg-bg-tertiary/60 px-3 py-2 text-xs leading-relaxed text-text-muted whitespace-pre-wrap">
-            {active.detail}
-          </div>
+          <details className="rounded-md bg-bg-tertiary/60 px-3 py-2 text-xs text-text-muted shadow-sm">
+            <summary className="cursor-pointer select-none text-text-primary">Details</summary>
+            <div className="mt-2 whitespace-pre-wrap leading-relaxed" data-wrap>{active.detail}</div>
+          </details>
         )}
         {active.kind === 'prompt' && (
           <Input

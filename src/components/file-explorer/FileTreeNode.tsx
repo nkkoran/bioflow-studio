@@ -1,9 +1,9 @@
 import React, { useCallback } from 'react'
 import type { RemoteFileEntry } from '@/types/files'
-import { getFileIcon } from './fileIconMap'
 import { formatBytes, formatDate } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { classNames } from '@/lib/utils'
+import { FileGlyph } from './FileGlyph'
 
 interface FileTreeNodeProps {
   entry: RemoteFileEntry
@@ -22,9 +22,6 @@ export function FileTreeNode({
   onPreview,
   onContextMenu,
 }: FileTreeNodeProps) {
-  const iconDef = getFileIcon(entry.extension, entry.isDirectory)
-  const Icon = iconDef.icon
-
   const handleClick = useCallback((event: React.MouseEvent) => {
     onSelect(entry, event)
   }, [onSelect, entry])
@@ -64,10 +61,10 @@ export function FileTreeNode({
       <div
         data-file-path={entry.path}
         className={classNames(
-          'flex h-8 cursor-pointer items-center gap-2 px-3 transition-colors',
+          'interactive-row flex h-8 cursor-pointer items-center gap-2 rounded-md px-3 text-text-secondary transition-colors duration-150',
           isSelected
-            ? 'border-l-2 border-accent bg-accent/10'
-            : 'border-l-2 border-transparent hover:bg-bg-hover',
+            ? 'bg-accent/10 text-text-primary shadow-sm'
+            : 'hover:text-text-primary',
         )}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
@@ -75,7 +72,7 @@ export function FileTreeNode({
         draggable
         onDragStart={handleDragStart}
       >
-        <Icon className={classNames('h-4 w-4 shrink-0', iconDef.color)} />
+        <FileGlyph entry={entry} size="row" selected={isSelected} />
 
         <span className="min-w-0 flex-1 truncate text-sm text-text-primary">
           {entry.name}

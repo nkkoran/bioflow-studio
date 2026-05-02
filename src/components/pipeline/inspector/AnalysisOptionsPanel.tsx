@@ -112,7 +112,7 @@ function compoundSubOptionEditor(
 ) {
   if (!def.subOptions?.length) return null
   return (
-    <div className="grid gap-2 rounded-md border border-border-light bg-bg-primary/50 p-2">
+    <div className="grid gap-2 rounded-md bg-bg-primary/50 p-2 shadow-inner">
       {def.subOptions.map((sub) => {
         const state = option.subOptions?.[sub.id] ?? { enabled: Boolean(sub.defaultEnabled), value: sub.defaultValue }
         if (sub.kind === 'switch') {
@@ -225,7 +225,7 @@ function ColumnOptionEditor(props: {
       {allowsMultiple && selected.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {selected.map((column) => (
-            <span key={column} className="inline-flex items-center gap-1 rounded-md border border-accent/30 bg-accent/10 px-2 py-1 text-[11px] text-text-primary">
+            <span key={column} className="inline-flex items-center gap-1 rounded-md bg-accent/10 px-2 py-1 text-[11px] text-text-primary shadow-sm">
               <span className="font-mono">{column}</span>
               <button
                 type="button"
@@ -295,10 +295,10 @@ function ColumnOptionEditor(props: {
                 return
               }
             }}
-            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
+            className="bioflow-field h-8 w-full rounded-md px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors"
           />
           {focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && (
-            <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+            <div className="surface-popover absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md py-1">
               {suggestions.map((column, index) => (
                 <button
                   key={column}
@@ -356,7 +356,7 @@ function optionEditor(props: {
       <select
         value={optionValue(option)}
         onChange={(event) => onPatch({ value: event.target.value })}
-        className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+        className="bioflow-field h-8 rounded-md px-2 text-sm text-text-primary outline-none"
       >
         <option value="">-- select --</option>
         {def.options?.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -371,7 +371,7 @@ function optionEditor(props: {
           <select
             value={optionValue(option)}
             onChange={(event) => onPatch({ value: event.target.value })}
-            className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+            className="bioflow-field h-8 rounded-md px-2 text-sm text-text-primary outline-none"
           >
             <option value="">-- select --</option>
             {def.options.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -404,8 +404,8 @@ function optionEditor(props: {
               type="button"
               onClick={() => onPatch({ source: { ...source, kind, portId: def.filePortId ?? def.sourcePortId } })}
               className={classNames(
-                'rounded border px-2 py-1 text-[10px]',
-                source.kind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary',
+                'rounded px-2 py-1 text-[10px] transition-all duration-150',
+                source.kind === kind ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover hover:text-text-primary',
               )}
             >
               {label}
@@ -413,7 +413,7 @@ function optionEditor(props: {
           ))}
         </div>
         {source.kind === 'upstream-file' ? (
-          <div className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary">
+          <div className="rounded bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary shadow-inner">
             {connectedPath ? (
               <>
                 Connected on <span className="font-mono text-text-primary">{def.filePortId}</span>
@@ -595,13 +595,13 @@ export function AnalysisOptionsPanel({
   return (
     <div className="flex flex-col gap-3">
       {disconnectNotice && (
-        <div className="flex items-center justify-between gap-3 rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-[11px] text-text-secondary">
+        <div className="flex items-center justify-between gap-3 rounded-md bg-accent/10 px-3 py-2 text-[11px] text-text-secondary shadow-sm">
           <span>
             Removed {disconnectNotice.count} connection{disconnectNotice.count === 1 ? '' : 's'} from <span className="font-mono text-text-primary">{disconnectNotice.portId}</span>.
           </span>
           <button
             type="button"
-            className="shrink-0 rounded border border-accent/40 px-2 py-1 text-text-primary hover:bg-accent/15"
+            className="shrink-0 rounded bg-accent/10 px-2 py-1 text-text-primary shadow-sm hover:bg-accent/15"
             onClick={() => {
               onUndoDisconnect()
               setDisconnectNotice(null)
@@ -623,7 +623,7 @@ export function AnalysisOptionsPanel({
         </Button>
       </div>
       {validationOpen && (
-        <div className={classNames('rounded-md border px-3 py-2 text-[11px]', errorCount > 0 ? 'border-error/35 bg-error/10' : 'border-success/30 bg-success/10')}>
+        <div className={classNames('rounded-md px-3 py-2 text-[11px] shadow-sm', errorCount > 0 ? 'bg-error/10' : 'bg-success/10')}>
           <div className="mb-1 flex items-center gap-2 font-medium text-text-primary">
             {errorCount > 0 ? <XCircle size={13} className="text-error" /> : <CheckCircle2 size={13} className="text-success" />}
             {issues.length === 0 ? 'Settings are ready' : `${errorCount} setting error${errorCount === 1 ? '' : 's'}`}
@@ -631,7 +631,7 @@ export function AnalysisOptionsPanel({
           {issues.length > 0 ? (
             <div className="flex flex-col gap-1">
               {issues.map((issue) => (
-                <div key={`${issue.optionId}-${issue.code}`} className="rounded border border-border/70 bg-bg-primary px-2 py-1">
+                <div key={`${issue.optionId}-${issue.code}`} className="rounded bg-bg-primary px-2 py-1 shadow-inner">
                   <span className="text-error">{issue.code}</span>
                   <span className="ml-2 text-text-secondary">{issue.message}</span>
                 </div>
@@ -643,7 +643,7 @@ export function AnalysisOptionsPanel({
         </div>
       )}
       {recommendedDefs.length > 0 && !term && (
-        <div className="rounded-md border border-border bg-bg-tertiary/30 p-2">
+        <div className="rounded-md bg-bg-tertiary/30 p-2 shadow-inner">
           <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Recommended</div>
           <div className="flex flex-wrap gap-1.5">
             {recommendedDefs.map((def) => (
@@ -655,7 +655,7 @@ export function AnalysisOptionsPanel({
                   toggleOption(def, option, true)
                   if (def.advanced || def.group === 'Advanced') setAdvancedOpen(true)
                 }}
-                className="rounded border border-border bg-bg-secondary px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
+                className="rounded bg-bg-secondary px-2 py-1 text-[11px] text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary"
               >
                 {def.label}
               </button>
@@ -664,7 +664,7 @@ export function AnalysisOptionsPanel({
         </div>
       )}
       {term && (
-        <div className="rounded-md border border-border bg-bg-tertiary/30 p-1.5">
+        <div className="rounded-md bg-bg-tertiary/30 p-1.5 shadow-inner">
           {searchResults.length > 0 ? (
             <div className="flex flex-col gap-1">
               {searchResults.map((def) => {
@@ -677,11 +677,11 @@ export function AnalysisOptionsPanel({
                       toggleOption(def, option, true)
                       setSearch('')
                     }}
-                    className="flex items-start justify-between gap-3 rounded border border-transparent px-2 py-1.5 text-left hover:border-border hover:bg-bg-secondary"
+                    className="flex items-start justify-between gap-3 rounded px-2 py-1.5 text-left transition-colors hover:bg-bg-secondary"
                   >
                     <span className="min-w-0">
-                      <span className="block text-xs font-medium text-text-primary">{def.label}</span>
-                      <span className="block truncate font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
+                      <span className="text-nowrap block text-xs font-medium text-text-primary">{def.label}</span>
+                      <span className="text-nowrap block font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
                     </span>
                     <span className="shrink-0 rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">
                       {isCanvasInputOption(def) ? 'input' : def.group}
@@ -701,20 +701,20 @@ export function AnalysisOptionsPanel({
           const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: true, value: def.defaultValue }
           const invalid = issueByOption.get(def.id)
           return (
-            <div key={def.id} className={classNames('rounded-md border p-2', invalid ? 'border-error/40 bg-error/5' : 'border-border bg-bg-secondary')}>
+            <div key={def.id} className={classNames('rounded-md p-2 shadow-sm', invalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary')}>
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-xs font-medium text-text-primary">{helpLabel(def)}</div>
+                  <div className="text-nowrap text-xs font-medium text-text-primary">{helpLabel(def)}</div>
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
-                    <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-muted">{def.group}</span>
+                    <span className="text-nowrap font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
+                    <span className="bioflow-badge text-nowrap rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-muted">{def.group}</span>
                   </div>
                 </div>
                 {!def.required && (
                   <button
                     type="button"
                     onClick={() => toggleOption(def, option, false)}
-                    className="shrink-0 rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary"
+                    className="shrink-0 rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
                     title={`Remove ${def.label}`}
                   >
                     <X size={12} />
@@ -736,7 +736,7 @@ export function AnalysisOptionsPanel({
           )
         })}
         {selectedDefs.length === 0 && selectedCustomOptions.length === 0 && (
-          <div className="rounded-md border border-dashed border-border bg-bg-tertiary/30 px-3 py-3 text-xs text-text-muted">
+          <div className="rounded-md bg-bg-tertiary/30 px-3 py-3 text-xs text-text-muted shadow-inner">
             Search above to add analysis options. File options are added to the Inputs section.
           </div>
         )
@@ -744,7 +744,7 @@ export function AnalysisOptionsPanel({
       </div>
 
       {(advancedSelectedDefs.length > 0 || term.length > 0) && (
-        <div className="rounded-md border border-border bg-bg-tertiary/20">
+        <div className="rounded-md bg-bg-tertiary/20 shadow-inner">
           <button
             type="button"
             onClick={() => setAdvancedOpen((value) => !value)}
@@ -754,10 +754,10 @@ export function AnalysisOptionsPanel({
             <span className="text-[11px] text-text-secondary">{advancedOpen ? 'Hide' : 'Show'}</span>
           </button>
           {advancedOpen && (
-            <div className="border-t border-border px-2 py-2">
+            <div className="px-2 py-2">
               <div className="flex flex-col gap-2">
                 {advancedSelectedDefs.length === 0 && (
-                  <div className="rounded-md border border-dashed border-border bg-bg-secondary px-3 py-3 text-xs text-text-muted">
+                  <div className="rounded-md bg-bg-secondary px-3 py-3 text-xs text-text-muted shadow-inner">
                     Search for advanced flags above to add them here.
                   </div>
                 )}
@@ -765,7 +765,7 @@ export function AnalysisOptionsPanel({
                   const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: true, value: def.defaultValue }
                   const invalid = issueByOption.get(def.id)
                   return (
-                    <div key={def.id} className={classNames('rounded-md border p-2', invalid ? 'border-error/40 bg-error/5' : 'border-border bg-bg-secondary')}>
+                    <div key={def.id} className={classNames('rounded-md p-2 shadow-sm', invalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary')}>
                       <div className="mb-2 flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="text-xs font-medium text-text-primary">{helpLabel(def)}</div>
@@ -775,7 +775,7 @@ export function AnalysisOptionsPanel({
                           </div>
                         </div>
                         {!def.required && (
-                          <button type="button" onClick={() => toggleOption(def, option, false)} className="shrink-0 rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary">
+                          <button type="button" onClick={() => toggleOption(def, option, false)} className="shrink-0 rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary">
                             <X size={12} />
                           </button>
                         )}
@@ -814,10 +814,10 @@ export function AnalysisOptionsPanel({
           sourcePortId: customPortId,
         }
         return (
-          <div key={option.optionId} className="rounded-md border border-border bg-bg-secondary p-2">
+          <div key={option.optionId} className="rounded-md bg-bg-secondary p-2 shadow-sm">
             <div className="mb-2 flex items-center justify-between gap-2">
               <Input label="Custom flag" value={option.customFlag ?? ''} placeholder="--set-all-var-ids" onChange={(event) => patchOption(option.optionId, { customFlag: event.target.value })} />
-              <button type="button" className="mt-5 rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary" onClick={() => commit(options.filter((candidate) => candidate.optionId !== option.optionId))}>
+              <button type="button" className="mt-5 rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary" onClick={() => commit(options.filter((candidate) => candidate.optionId !== option.optionId))}>
                 <X size={13} />
               </button>
             </div>
@@ -827,7 +827,7 @@ export function AnalysisOptionsPanel({
                   key={kind}
                   type="button"
                   onClick={() => patchOption(option.optionId, { customInputKind: kind })}
-                  className={classNames('rounded border px-2 py-1 text-[10px]', option.customInputKind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted')}
+                  className={classNames('rounded px-2 py-1 text-[10px] transition-all duration-150', option.customInputKind === kind ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover hover:text-text-primary')}
                 >
                   {kind === 'file' ? 'File value' : 'Text value'}
                 </button>
@@ -856,12 +856,12 @@ export function AnalysisOptionsPanel({
 
       <div>
         <h5 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Command Preview</h5>
-        <pre className="overflow-x-auto rounded-md border border-border bg-[#0e1320] px-3 py-2 text-[11px] leading-relaxed text-slate-100">
+        <pre className="overflow-x-auto rounded-md bg-bg-primary px-3 py-2 text-[11px] leading-relaxed text-slate-100 shadow-inner">
           <code>{preview}</code>
         </pre>
       </div>
 
-      <div className="rounded-md border border-border bg-bg-secondary p-2">
+      <div className="rounded-md bg-bg-secondary p-2 shadow-sm">
         <div className="mb-2 flex items-center justify-between gap-2">
           <div>
             <div className="text-[10px] uppercase tracking-wide text-text-muted">Command editing</div>
@@ -884,10 +884,10 @@ export function AnalysisOptionsPanel({
             if (nodeData.commandOverride?.trim()) onChange({ commandOverride: event.target.value })
           }}
           rows={6}
-          className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 font-mono text-[11px] text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          className="w-full rounded-md bg-bg-primary px-3 py-2 font-mono text-[11px] text-slate-100 shadow-inner outline-none focus:ring-2 focus:ring-accent/30"
         />
         {supportsCommandApply && commandDraft.trim() !== preview.trim() && (
-          <div className="mt-2 rounded-md border border-accent/30 bg-accent/10 px-3 py-2">
+          <div className="mt-2 rounded-md bg-accent/10 px-3 py-2 shadow-sm">
             <div className="text-[11px] text-text-secondary">Applying this command will update: {parseToolCommand(tool, nodeData, commandDraft).changes.join(', ') || 'No structured changes detected'}.</div>
             <div className="mt-2 flex gap-2">
               <Button variant="secondary" size="sm" className="h-7 text-[11px]" onClick={applyCommandDraft}>
@@ -911,7 +911,6 @@ export function AnalysisOptionsPanel({
             <Button variant="primary" onClick={addCustomOption} disabled={!customFlag.trim() || !customFlag.trim().startsWith('--')}>Add</Button>
           </>
         )}
-        width="max-w-lg"
       >
         <div className="flex flex-col gap-3">
           <Input label="Flag" value={customFlag} placeholder="--set-all-var-ids" onChange={(event) => setCustomFlag(event.target.value)} />
@@ -922,7 +921,7 @@ export function AnalysisOptionsPanel({
                 key={kind}
                 type="button"
                 onClick={() => setCustomKind(kind)}
-                className={classNames('rounded border px-2 py-1 text-[11px]', customKind === kind ? 'border-accent bg-accent/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-muted')}
+                className={classNames('rounded px-2 py-1 text-[11px] transition-all duration-150', customKind === kind ? 'bg-accent/10 text-text-primary shadow-sm' : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover hover:text-text-primary')}
               >
                 {kind === 'file' ? 'File parameter' : 'Text parameter'}
               </button>

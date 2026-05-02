@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Copy, X } from 'lucide-react'
+import { Copy } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Tabs } from '@/components/ui/Tabs'
+import { Dialog } from '@/components/ui/Dialog'
 import type { RunManifest } from '@/types/workspace'
 
 interface Props {
@@ -38,20 +39,15 @@ export function RunReportModal({ report, onClose }: Props) {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+    <Dialog
+      open
+      onClose={onClose}
+      title="Run report"
+      subtitle="Plain-language summary, commands, scripts, and captured validation state."
+      className="bioflow-workbench-dialog"
+      bodyClassName="bioflow-workbench-body"
     >
-      <div className="flex h-[760px] max-h-[92vh] w-[1120px] max-w-[96vw] flex-col overflow-hidden rounded-xl border border-border bg-bg-primary shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-border bg-bg-secondary px-4 py-3">
-          <div>
-            <div className="text-sm font-semibold text-text-primary">Run report</div>
-            <div className="text-[11px] text-text-muted">Plain-language summary, commands, scripts, and captured validation state.</div>
-          </div>
-          <div className="flex-1" />
-          <Button variant="ghost" size="sm" icon={<X size={13} />} onClick={onClose} className="h-7 px-2" />
-        </div>
-
+      <div className="flex min-h-0 flex-1 flex-col">
         <div className="border-b border-border px-3 py-2">
           <Tabs
             tabs={[
@@ -184,19 +180,19 @@ export function RunReportModal({ report, onClose }: Props) {
               )}
 
               {tab === 'commands' && (
-                <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-[#0e1320] p-3 text-[11px] leading-relaxed text-slate-100">
+                <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-slate-100">
                   {selectedStep?.commands.join('\n\n') || 'No extracted commands.'}
                 </pre>
               )}
 
               {tab === 'scripts' && (
-                <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-[#0e1320] p-3 text-[11px] leading-relaxed text-slate-100">
+                <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-slate-100">
                   {selectedStep?.script || 'No generated script.'}
                 </pre>
               )}
 
               {tab === 'json' && (
-                <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-[#0e1320] p-3 text-[11px] leading-relaxed text-slate-100">
+                <pre className="m-0 whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-slate-100">
                   {JSON.stringify(report, null, 2)}
                 </pre>
               )}
@@ -204,7 +200,7 @@ export function RunReportModal({ report, onClose }: Props) {
           </div>
         </div>
       </div>
-    </div>
+    </Dialog>
   )
 }
 

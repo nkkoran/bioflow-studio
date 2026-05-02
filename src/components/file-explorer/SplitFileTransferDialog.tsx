@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronUp, Copy, Download, Folder, Loader2, MoveRight, RefreshCw, Upload } from 'lucide-react'
+import { ChevronUp, Copy, Loader2, MoveRight, PanelsLeftRight, RefreshCw, Upload } from 'lucide-react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDialogStore } from '@/stores/dialogStore'
 import type { RemoteFileEntry } from '@/types/files'
 import { inferFileType } from '@/lib/fileTypeInference'
+import { FileGlyph } from './FileGlyph'
+import { classNames } from '@/lib/utils'
 
 type PaneOrigin = 'local' | 'ssh'
 
@@ -94,6 +96,10 @@ export function SplitFileTransferDialog({
 
   const loadPane = useCallback(async (index: number) => {
     const pane = panes[index]
+    if (pane.origin === 'ssh' && !canUseSsh) {
+      updatePane(index, { entries: [], loading: false, error: 'Connect to SSH before browsing remote files.' })
+      return
+    }
     updatePane(index, { loading: true, error: null })
     try {
       const entries = pane.origin === 'local'
@@ -103,7 +109,7 @@ export function SplitFileTransferDialog({
     } catch (err) {
       updatePane(index, { entries: [], loading: false, error: err instanceof Error ? err.message : String(err) })
     }
-  }, [activeConnectionId, panes, updatePane])
+  }, [activeConnectionId, canUseSsh, panes, updatePane])
 
   const refreshPane = (index: number) => updatePane(index, { nonce: panes[index].nonce + 1 })
   const other = (index: number) => index === 0 ? 1 : 0
@@ -161,13 +167,22 @@ export function SplitFileTransferDialog({
   )
 
   return (
-    <Dialog open={open} onClose={onClose} title="Split File Explorer" width="max-w-6xl" footer={footer}>
-      <div className="flex min-h-[520px] flex-col gap-3">
-        <div className="flex items-center gap-2 rounded-md border border-border bg-bg-tertiary px-3 py-2 text-[11px] text-text-muted">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Split transfer"
+      subtitle="Local and cluster panes"
+      icon={<PanelsLeftRight size={20} />}
+      className="bioflow-split-transfer-dialog"
+      bodyClassName="bioflow-split-transfer-body"
+      footer={footer}
+    >
+      <div className="bioflow-split-transfer-shell">
+        <div className="mx-4 my-3 flex items-center gap-2 rounded-md bg-bg-tertiary px-3 py-2 text-[11px] text-text-muted shadow-inner">
           <Upload size={12} />
-          <span>Drag a file from one pane to the other, or select it and use Copy/Move. Local-to-server transfers use upload; server-to-local transfers use download.</span>
+          <span className="text-wrap">Drag across panes to copy. Hold Option while dropping, or use Move, to move instead.</span>
         </div>
-        <div className="grid min-h-0 flex-1 grid-cols-2 gap-3">
+        <div className="bioflow-split-transfer-panes">
           {[0, 1].map((index) => (
             <FilePane
               key={index}
@@ -184,7 +199,7 @@ export function SplitFileTransferDialog({
             />
           ))}
         </div>
-        {message && <div className="rounded border border-border bg-bg-secondary px-3 py-2 text-xs text-text-secondary">{message}</div>}
+        {message && <div className="mx-4 mb-3 rounded-md bg-bg-secondary px-3 py-2 text-xs text-text-secondary shadow-sm">{message}</div>}
       </div>
     </Dialog>
   )
@@ -220,7 +235,7 @@ function FilePane({
   const canAct = Boolean(pane.selected) && !busy && !disabled
   return (
     <div
-      className="flex min-h-0 flex-col rounded-md border border-border bg-bg-secondary"
+      className="surface-card flex min-h-0 flex-col rounded-md bg-bg-secondary"
       onDragOver={(event) => {
         event.preventDefault()
         event.dataTransfer.dropEffect = event.altKey ? 'move' : 'copy'
@@ -234,14 +249,14 @@ function FilePane({
         onDropPayload(payload, event.altKey)
       }}
     >
-      <div className="flex items-center gap-2 border-b border-border px-2 py-2">
+      <div className="flex items-center gap-2 border-b border-border-light px-2 py-2">
         <select
           value={pane.origin}
           onChange={(event) => {
             const nextOrigin = event.target.value as PaneOrigin
             onPatch({ origin: nextOrigin, cwd: homeByOrigin[nextOrigin] || '/', entries: [], selected: null, nonce: pane.nonce + 1 })
           }}
-          className="h-7 rounded border border-border bg-bg-tertiary px-2 text-xs text-text-primary"
+          className="bioflow-field h-7 rounded-md border border-border-light bg-bg-tertiary px-2 text-xs text-text-primary"
         >
           <option value="local">Local</option>
           <option value="ssh">Server</option>
@@ -250,7 +265,7 @@ function FilePane({
           value={pane.cwd}
           disabled={disabled}
           onChange={(event) => onPatch({ cwd: event.target.value })}
-          className="h-7 min-w-0 flex-1 rounded border border-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+          className="bioflow-field h-7 min-w-0 flex-1 rounded-md border border-border-light bg-bg-primary px-2 text-xs text-text-primary outline-none"
         />
         <Button variant="ghost" size="sm" disabled={disabled || !pane.cwd} onClick={() => onPatch({ cwd: pathDir(pane.cwd) || pane.cwd })}>
           <ChevronUp size={12} />
@@ -259,7 +274,7 @@ function FilePane({
           <RefreshCw size={12} className={pane.loading ? 'animate-spin' : ''} />
         </Button>
       </div>
-      <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
+      <div className="flex items-center gap-1 border-b border-border-light px-2 py-1.5">
         <Button variant="secondary" size="sm" disabled={!canAct} icon={<Copy size={12} />} onClick={onCopy}>Copy</Button>
         <Button variant="secondary" size="sm" disabled={!canAct} icon={<MoveRight size={12} />} onClick={onMove}>Move</Button>
         <div className="ml-auto text-[10px] text-text-muted">
@@ -289,11 +304,12 @@ function FilePane({
             onDoubleClick={() => {
               if (entry.isDirectory) onPatch({ cwd: entry.path })
             }}
-            className={`flex w-full items-center gap-2 border-b border-border/50 px-3 py-2 text-left text-xs ${
-              pane.selected?.path === entry.path ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-            }`}
+            className={classNames(
+              'interactive-row flex w-full items-center gap-2 rounded-none px-3 py-2 text-left text-xs',
+              pane.selected?.path === entry.path ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:text-text-primary',
+            )}
           >
-            {entry.isDirectory ? <Folder size={14} className="text-amber-300" /> : <Download size={13} className="text-text-muted" />}
+            <FileGlyph entry={entry} size="split" selected={pane.selected?.path === entry.path} />
             <span className="min-w-0 flex-1 truncate">{entry.name}</span>
             <span className="shrink-0 text-[10px] text-text-muted">{entry.isDirectory ? 'folder' : inferFileType(entry.name)}</span>
           </button>

@@ -9,7 +9,7 @@ export function ColumnSummary({ summary, columnName }: ColumnSummaryProps) {
   return (
     <div className="space-y-1 p-1 min-w-[160px]">
       <div className="font-mono text-xs font-medium text-text-primary">{columnName}</div>
-      <div className="border-t border-border my-1" />
+      <div className="my-1 h-px bg-bg-hover" />
       <Row label="Type" value={summary.type} />
       <Row label="Non-null" value={`${summary.nonNull} / ${summary.total}`} />
       <Row label="Unique" value={String(summary.unique)} />

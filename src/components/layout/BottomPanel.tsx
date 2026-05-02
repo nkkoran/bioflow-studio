@@ -7,11 +7,7 @@ import { JobsPanel } from '@/components/jobs/JobsPanel'
 import { QueuePanel } from '@/components/jobs/QueuePanel'
 import { ResultsPanel } from '@/components/results/ResultsPanel'
 
-interface BottomPanelProps {
-  height: number
-}
-
-export function BottomPanel({ height }: BottomPanelProps) {
+export function BottomPanel() {
   const mode = useUIStore((s) => s.bottomPanelMode)
   const isOpen = useUIStore((s) => s.bottomPanelOpen)
   const setMode = useUIStore((s) => s.setBottomPanelMode)
@@ -28,11 +24,11 @@ export function BottomPanel({ height }: BottomPanelProps) {
 
   return (
     <div
-      className="bg-bg-secondary border-t border-border flex flex-col shrink-0 overflow-hidden"
-      style={{ height: isOpen ? height : 32 }}
+      className="bioflow-bottom-panel bioflow-panel-text surface-panel z-20 flex shrink-0 flex-col overflow-hidden"
+      data-panel-collapsed={!isOpen}
     >
       {/* Tab bar */}
-      <div className="flex items-center h-8 shrink-0 px-2 gap-1 border-b border-border-light">
+      <div className="flex items-center h-8 shrink-0 px-2 gap-1">
         <TabButton
           label="Terminal"
           active={mode === 'terminal'}
@@ -72,15 +68,13 @@ export function BottomPanel({ height }: BottomPanelProps) {
       </div>
 
       {/* Content */}
-      {isOpen && (
-        <>
-          {mode === 'terminal' && <TerminalPanel />}
-          {mode === 'data' && <DataPreview />}
-          {mode === 'jobs' && <JobsPanel />}
-          {mode === 'results' && <ResultsPanel />}
-          {mode === 'queue' && <QueuePanel />}
-        </>
-      )}
+      <div className="bioflow-bottom-content flex min-h-0 flex-1 flex-col">
+        {mode === 'terminal' && <TerminalPanel />}
+        {mode === 'data' && <DataPreview />}
+        {mode === 'jobs' && <JobsPanel />}
+        {mode === 'results' && <ResultsPanel />}
+        {mode === 'queue' && <QueuePanel />}
+      </div>
     </div>
   )
 }
@@ -105,9 +99,9 @@ function TabButton({
           : 'text-text-secondary hover:text-text-primary'
       }`}
     >
-      {label}
+      <span className="text-nowrap min-w-0">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-warning/20 text-warning text-[9px] font-semibold">
+        <span className="bioflow-badge inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-warning/20 px-1 text-[9px] font-semibold text-warning">
           {badge}
         </span>
       )}

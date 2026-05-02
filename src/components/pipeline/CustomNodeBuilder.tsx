@@ -67,7 +67,6 @@ export function CustomNodeBuilder({
       open={open}
       onClose={onClose}
       title={editing ? 'Edit Custom Node' : 'New Custom Node'}
-      width="max-w-4xl"
       footer={(
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>

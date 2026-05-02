@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
   ChevronUp,
-  FileText,
-  Folder,
   Home,
   Loader2,
   RefreshCw,
@@ -17,6 +15,7 @@ import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { classifyPreview } from '@/lib/filePreviewClassifier'
 import type { DnxRemoteFileEntry } from '@/types/dnx'
+import { FileGlyph } from './FileGlyph'
 
 function dnxParent(path: string): string {
   const trimmed = path.replace(/\/+$/, '')
@@ -193,13 +192,9 @@ export function DnxFilePanel() {
             key={`${entry.id ?? ''}-${entry.path}`}
             type="button"
             onClick={() => handleEntry(entry)}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+            className="interactive-row flex w-full items-center gap-2 rounded-none px-3 py-1.5 text-left text-xs text-text-secondary hover:text-text-primary"
           >
-            {entry.isDirectory ? (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-amber-300" />
-            ) : (
-              <FileText className="h-3.5 w-3.5 shrink-0 text-text-muted" />
-            )}
+            <FileGlyph entry={toGlyphEntry(entry)} size="row" />
             <span className="min-w-0 flex-1 truncate">{entry.name}</span>
             <span className="shrink-0 text-[10px] text-text-muted">
               {entry.isDirectory ? 'folder' : inferFileType(entry.name)}
@@ -209,4 +204,23 @@ export function DnxFilePanel() {
       </div>
     </div>
   )
+}
+
+function toGlyphEntry(entry: DnxRemoteFileEntry) {
+  return {
+    name: entry.name,
+    path: entry.path,
+    isDirectory: entry.isDirectory,
+    size: entry.size ?? 0,
+    modified: entry.modified ?? 0,
+    permissions: '',
+    extension: extensionFromName(entry.name),
+  }
+}
+
+function extensionFromName(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.vcf.gz')) return 'vcf.gz'
+  const dot = name.lastIndexOf('.')
+  return dot === -1 ? '' : name.slice(dot + 1)
 }

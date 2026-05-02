@@ -32,7 +32,7 @@ export function RunRecoveryCard({
   if (run.status !== 'failed' && run.status !== 'cancelled') return null
 
   return (
-    <div className="border-b border-border-light bg-warning/5 px-3 py-2">
+    <div className="bg-warning/5 px-3 py-2 shadow-sm">
       <div className="flex items-start gap-2">
         <AlertTriangle size={15} className="mt-0.5 text-warning shrink-0" />
         <div className="min-w-0 flex-1">

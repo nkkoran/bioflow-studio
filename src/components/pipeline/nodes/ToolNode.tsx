@@ -19,6 +19,7 @@ import { getActiveToolInputs } from '@/lib/analysisOptions'
 import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
+import { useSuccessAnimation } from './useSuccessAnimation'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -35,26 +36,16 @@ function StatusBadge({ status = 'idle' }: StatusBadgeProps) {
   }
   const { icon, label, cls } = map[status]
   return (
-    <span className={classNames('flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium', cls)}>
+    <span className={classNames('bioflow-status-badge flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium', cls)}>
       {icon}
       {label}
     </span>
   )
 }
 
-const CATEGORY_COLORS: Record<string, string> = {
-  'gwas': 'border-purple-500/40',
-  'qc': 'border-amber-500/40',
-  'variant-calling': 'border-rose-500/40',
-  'alignment': 'border-sky-500/40',
-  'annotation': 'border-emerald-500/40',
-  'format': 'border-teal-500/40',
-  'utility': 'border-slate-500/40',
-  'custom': 'border-fuchsia-500/40',
-}
-
 function ToolNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as ToolNodeData
+  const successAnimating = useSuccessAnimation(nodeData.status)
   const tool = getTool(nodeData.toolId)
   const ToolIcon = iconForTool(nodeData.toolId)
   const nodes = usePipelineStore((s) => s.nodes)
@@ -96,7 +87,6 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
     )
   }
 
-  const borderColor = CATEGORY_COLORS[tool.category] ?? 'border-border'
   const connectedInputs = new Set(edges.filter((edge) => edge.target === id).map((edge) => edge.targetHandle ?? 'input'))
   const activeInputs = getActiveToolInputs(tool, nodeData, { connectedPortIds: connectedInputs })
   const connectedOutputs = new Set(edges.filter((edge) => edge.source === id).map((edge) => edge.sourceHandle ?? 'output'))
@@ -132,12 +122,14 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
     <ToolHoverCard tool={tool} connectedPorts={connectedInputs.size + connectedOutputs.size}>
       <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[260px] max-w-[320px] transition-all',
-        selected ? 'border-accent ring-2 ring-accent/30' : borderColor,
+        'animate-fade-up relative min-w-[260px] max-w-[320px] rounded-lg bg-bg-secondary/95 transition-all duration-150 ease-out',
+        selected && 'translate-y-[-2px]',
+        successAnimating && 'animate-success',
       )}
+      style={{ boxShadow: selected ? 'var(--shadow-node-selected)' : 'var(--shadow-node)' }}
       >
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
+      <div className="px-3 py-2 flex items-center justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="text-[10px] uppercase tracking-wide text-text-muted flex items-center gap-1">
             <ToolIcon size={10} className="shrink-0" />
@@ -153,7 +145,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
               </span>
             )}
           </div>
-          <div className="text-xs font-semibold text-text-primary truncate">
+          <div className="bioflow-canvas-node-label truncate text-xs font-semibold text-text-primary">
             {nodeData.label}
           </div>
         </div>
@@ -161,7 +153,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       </div>
 
       {outputPreview && (
-        <div className="border-b border-border px-3 py-1 text-[10px] font-mono text-text-muted truncate">
+        <div className="px-3 pb-1 text-[10px] font-mono text-text-muted truncate">
           <MiddleEllipsis value={outputPreview} max={44} />
         </div>
       )}
@@ -169,10 +161,10 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       {/* Ports — each row is a fixed-height flex container with the Handle
           absolutely positioned relative to that row so the circle lines up
           exactly with the port label. */}
-      <div className="px-3 py-2 flex flex-col text-[11px]">
+      <div className="py-2 flex flex-col text-[11px]">
         {/* Inputs on the left */}
         {activeInputs.length > 0 && (
-          <div className="mb-1 text-[9px] uppercase tracking-wide text-text-muted">Inputs</div>
+          <div className="mb-1 px-3 text-[9px] uppercase tracking-wide text-text-muted">Inputs</div>
         )}
         {activeInputs.map((port) => {
           const connected = connectedInputs.has(port.id)
@@ -181,7 +173,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
             <div
               key={port.id}
               className={classNames(
-                'relative flex h-7 items-center gap-2 rounded-sm px-1',
+                'relative flex h-7 items-center gap-2 rounded-sm pl-4 pr-4',
                 missingRequired ? 'bg-error/5 ring-1 ring-error/25' : '',
               )}
             >
@@ -189,12 +181,19 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
                 type="target"
                 position={Position.Left}
                 id={port.id}
+                className="bioflow-port-handle"
+                data-port-node={id}
+                data-port-id={port.id}
+                data-port-type="target"
                 style={{
-                  left: -8,
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  width: 10,
-                  height: 10,
+                  position: 'absolute',
+                  left: -6,
+                  right: 'auto',
+                  top: 8,
+                  width: 12,
+                  height: 12,
+                  borderRadius: '50%',
+                  transform: 'none',
                   background: connected ? 'var(--color-accent)' : 'var(--color-bg-secondary)',
                   border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-accent)',
                 }}
@@ -223,12 +222,12 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
         })}
 
         {activeInputs.length > 0 && tool.outputs.length > 0 && (
-          <div className="h-px bg-border my-1" />
+          <div className="mx-3 my-1 h-px bg-border-light" />
         )}
 
         {/* Outputs on the right */}
         {tool.outputs.length > 0 && (
-          <div className="mb-1 text-[9px] uppercase tracking-wide text-text-muted">Outputs</div>
+          <div className="mb-1 px-3 text-[9px] uppercase tracking-wide text-text-muted">Outputs</div>
         )}
         {tool.outputs.map((port) => {
           const connected = connectedOutputs.has(port.id)
@@ -238,7 +237,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
             ? mergeConfig.mode === 'auto-merge'
             : Boolean(port.autoMergeDefault)
           return (
-            <div key={port.id} className="relative flex items-center justify-end h-7 gap-2">
+            <div key={port.id} className="relative flex h-7 items-center justify-end gap-2 pl-4 pr-4">
               {hasAxedInput && (port.autoMergeDefault || mergeConfig) && (
                 <button
                   type="button"
@@ -279,14 +278,21 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
                 type="source"
                 position={Position.Right}
                 id={port.id}
+                className="bioflow-port-handle"
+                data-port-node={id}
+                data-port-id={port.id}
+                data-port-type="source"
                 style={{
-                  right: -8,
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  width: 10,
-                  height: 10,
-                  background: connected ? 'var(--color-success, #10b981)' : 'var(--color-bg-secondary)',
-                  border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-success, #10b981)',
+                  position: 'absolute',
+                  left: 'auto',
+                  right: -6,
+                  top: 8,
+                  width: 12,
+                  height: 12,
+                  borderRadius: '50%',
+                  transform: 'none',
+                  background: connected ? 'var(--color-success)' : 'var(--color-bg-secondary)',
+                  border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-success)',
                 }}
               />
             </div>
@@ -296,14 +302,14 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
 
       {/* Error line */}
       {nodeData.error && (
-        <div className="px-3 py-1.5 border-t border-error/20 bg-error/5 text-[10px] text-error truncate">
+        <div className="px-3 py-1.5 bg-error/10 text-[10px] text-error truncate">
           {nodeData.error}
         </div>
       )}
 
       {/* Job ID */}
       {nodeData.jobId && (
-        <div className="px-3 py-1 border-t border-border text-[10px] text-text-muted font-mono">
+        <div className="px-3 py-1 text-[10px] text-text-muted font-mono">
           job: {nodeData.jobId}
         </div>
       )}

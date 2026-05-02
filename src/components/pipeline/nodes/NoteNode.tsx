@@ -14,17 +14,17 @@ function NoteNodeInner({ data, selected }: NodeProps) {
   return (
     <div
       className={classNames(
-        'rounded-md shadow-lg px-3 py-2 min-w-[160px] max-w-[320px] text-xs',
-        selected ? 'ring-2 ring-accent/60' : '',
+        'animate-fade-up rounded-lg px-3 py-2 min-w-[160px] max-w-[320px] text-xs transition-all duration-150 ease-out',
+        selected && 'translate-y-[-2px] ring-2 ring-accent/45',
       )}
       style={{
         background: (nodeData.color ?? '#fbbf24') + '33', // 20% opacity
-        border: `1px solid ${nodeData.color ?? '#fbbf24'}`,
+        boxShadow: selected ? 'var(--shadow-node-selected)' : 'var(--shadow-node)',
       }}
     >
       <div className="flex items-start gap-2">
         <StickyNote size={12} className="shrink-0 mt-0.5 text-amber-400" />
-        <div className="flex-1 whitespace-pre-wrap break-words text-text-primary">
+        <div className="text-wrap flex-1 whitespace-pre-wrap text-text-primary">
           {nodeData.text}
         </div>
       </div>

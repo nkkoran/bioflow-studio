@@ -18,6 +18,10 @@ import {
   MoveRight,
   Plus,
   Trash2,
+  MoreHorizontal,
+  Eye,
+  EyeOff,
+  X,
 } from 'lucide-react'
 import { useFileStore } from '@/stores/fileStore'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
@@ -40,8 +44,8 @@ import { FileContextMenu } from './FileContextMenu'
 import { DnxFilePanel } from './DnxFilePanel'
 import { useDnxStore } from '@/stores/dnxStore'
 import { useDialogStore } from '@/stores/dialogStore'
-import { getFileIcon } from './fileIconMap'
 import { classNames, formatBytes } from '@/lib/utils'
+import { FileGlyph } from './FileGlyph'
 
 const SORT_OPTIONS: { label: string; field: SortField; direction: SortDirection }[] = [
   { label: 'Name A-Z', field: 'name', direction: 'asc' },
@@ -128,11 +132,12 @@ export function FileExplorer() {
   const [deepSearchResults, setDeepSearchResults] = useState<RemoteFileEntry[] | null>(null)
   const [searchingDeep, setSearchingDeep] = useState(false)
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
-  const [sortDropdownOpen, setSortDropdownOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadMessage, setUploadMessage] = useState<string | null>(null)
   const [uploadPickerOpen, setUploadPickerOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
+  const [showHidden, setShowHidden] = useState(false)
+  const [moreActionsOpen, setMoreActionsOpen] = useState(false)
   const [tabs, setTabs] = useState<ExplorerTab[]>([])
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
@@ -197,7 +202,12 @@ export function FileExplorer() {
   }, [activeConnectionId, cwdConnectionId, isConnected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sort entries: directories first, then by sort field
-  const visibleEntries = deepSearchResults ?? entries
+  const visibleEntries = useMemo(() => {
+    const sourceEntries = deepSearchResults ?? entries
+    return showHidden
+      ? sourceEntries
+      : sourceEntries.filter((entry) => !entry.name.startsWith('.'))
+  }, [deepSearchResults, entries, showHidden])
   const sortedEntries = useMemo(() => {
     const filtered = searchQuery
       ? visibleEntries.filter((e) =>
@@ -208,6 +218,11 @@ export function FileExplorer() {
     return [...filtered].sort((a, b) => {
       // Directories always first
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+
+      // Hidden paths are opt-in and, when visible, never displace normal files.
+      const aHidden = a.name.startsWith('.')
+      const bHidden = b.name.startsWith('.')
+      if (aHidden !== bHidden) return aHidden ? 1 : -1
 
       const dir = sortDirection === 'asc' ? 1 : -1
       switch (sortField) {
@@ -749,6 +764,12 @@ export function FileExplorer() {
     }
   }, [activeConnectionId, clearSelection, confirmDialog, exportSnapshot, handleCloseContextMenu, origin, refresh, updateNodeData])
 
+  const deleteSelectedEntries = useCallback(async () => {
+    for (const entry of selectedEntries) {
+      await deleteEntry(entry)
+    }
+  }, [deleteEntry, selectedEntries])
+
   const createFileInFolder = useCallback(async (dirPath: string) => {
     if (!activeConnectionId || origin !== 'fs') return
     const name = await promptDialog({
@@ -814,11 +835,11 @@ export function FileExplorer() {
   }, [cwd, handleNavigate])
 
   const tabStrip = (
-    <div className="flex shrink-0 items-center gap-1 border-b border-border bg-bg-secondary px-2 py-1 text-[11px]">
+    <div className="flex shrink-0 items-center gap-1 bg-bg-secondary/60 px-2 py-1 text-[11px]">
       <select
         value={activeTabId}
         onChange={(event) => switchTab(event.target.value)}
-        className="h-6 min-w-0 flex-1 rounded border border-border bg-bg-tertiary px-1.5 text-[11px] text-text-primary"
+        className="h-6 min-w-0 flex-1 rounded bg-bg-tertiary px-1.5 text-[11px] text-text-primary shadow-sm"
       >
         {tabs.map((tab) => (
           <option key={tab.id} value={tab.id}>
@@ -884,11 +905,11 @@ export function FileExplorer() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       {tabStrip}
       {/* Pick-mode banner — file or directory. */}
       {filePickMode.active && (
-        <div className="border-b border-accent bg-accent/10 px-3 py-1.5 flex items-center gap-2">
+        <div className="animate-fade-up mx-2 mt-2 rounded-lg bg-accent/10 px-3 py-1.5 flex items-center gap-2 shadow-sm">
           <span className="text-xs text-text-primary flex-1 truncate">
             {filePickMode.target === 'directory' ? 'Navigate to a folder and click Select for ' : 'Select a file, then click Use selected for '}
             {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
@@ -922,148 +943,164 @@ export function FileExplorer() {
       )}
 
       {/* Breadcrumb */}
-      <div className="border-b border-border">
+      <div>
         <Breadcrumb path={cwd} onNavigate={handleNavigate} />
       </div>
 
       {/* Toolbar */}
-      <div className="flex items-center gap-1 border-b border-border px-2 py-1">
-        <Tooltip content="Refresh">
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-            onClick={refresh}
-            disabled={loading}
-          />
-        </Tooltip>
-
-        <Tooltip content="Go to parent folder">
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={<ArrowUp className="h-3.5 w-3.5" />}
-            onClick={navigateUp}
-            disabled={!cwd || cwd === '/' || cwd === '~'}
-          />
-        </Tooltip>
-
-        <Tooltip content={isCurrentBookmarked ? 'Remove bookmark' : 'Bookmark this folder'}>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={
-              <Bookmark
-                className={`h-3.5 w-3.5 ${isCurrentBookmarked ? 'fill-accent text-accent' : ''}`}
-              />
-            }
-            onClick={() =>
-              isCurrentBookmarked ? removeBookmark(cwd) : addBookmark(cwd)
-            }
-          />
-        </Tooltip>
-
-        {canManageCurrentFolder && (
-          <Tooltip content="Create a folder here">
-            <Button
-              variant="ghost"
-              size="sm"
+      <div className="relative flex items-center gap-2 overflow-visible px-3 py-2">
+        {selectedEntries.length > 0 ? (
+          <>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="interactive-row flex h-7 min-w-0 items-center gap-1.5 px-2 text-xs text-text-secondary"
+              aria-label="Clear file selection"
+              title="Clear selection"
+            >
+              <X className="h-3.5 w-3.5 shrink-0" />
+              <span className="text-nowrap">{selectedEntries.length} selected</span>
+            </button>
+            <ToolbarIconButton
+              label="Download selected"
+              icon={<Download className="h-3.5 w-3.5" />}
+              onClick={() => void downloadSelected()}
+              disabled={!canUploadLocal || !selectedPath}
+            />
+            <ToolbarIconButton
+              label="Delete selected"
+              icon={<Trash2 className="h-3.5 w-3.5" />}
+              onClick={() => void deleteSelectedEntries()}
+              disabled={!selectedPath}
+              danger
+            />
+          </>
+        ) : (
+          <>
+            <ToolbarIconButton
+              label="New folder"
               icon={<FolderPlus className="h-3.5 w-3.5" />}
               onClick={() => void createFolder()}
-              title="New folder"
+              disabled={!canManageCurrentFolder}
             />
-          </Tooltip>
-        )}
-
-        {canUploadLocal && (
-          <Tooltip content="Upload a file from this computer to the current folder">
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={<Upload className={`h-3.5 w-3.5 ${uploading ? 'animate-pulse' : ''}`} />}
+            <ToolbarIconButton
+              label="Upload"
+              icon={<Upload className={classNames('h-3.5 w-3.5', uploading && 'animate-fade-in')} />}
               onClick={() => void uploadLocalFile()}
-              disabled={uploading}
-              title="Upload local file"
-            >
-              <span className="text-xs">Upload</span>
-            </Button>
-          </Tooltip>
-        )}
-
-        {canUploadLocal && selectedPath && (
-          <>
-            <Tooltip content="Download selected file to this computer">
-              <Button variant="ghost" size="sm" icon={<Download className="h-3.5 w-3.5" />} onClick={() => void downloadSelected()} />
-            </Tooltip>
-            <Tooltip content="Copy selected file on this server">
-              <Button variant="ghost" size="sm" icon={<Copy className="h-3.5 w-3.5" />} onClick={() => void copySelected()} />
-            </Tooltip>
-            <Tooltip content="Move or rename selected file on this server">
-              <Button variant="ghost" size="sm" icon={<MoveRight className="h-3.5 w-3.5" />} onClick={() => void moveSelected()} />
-            </Tooltip>
-            <Tooltip content="Delete selected path">
-              <Button
-                variant="ghost"
-                size="sm"
-                icon={<Trash2 className="h-3.5 w-3.5" />}
-                onClick={() => {
-                  const entry = selectedEntries.find((candidate) => candidate.path === selectedPath)
-                  if (entry) void deleteEntry(entry)
-                }}
-              />
-            </Tooltip>
+              disabled={!canUploadLocal || uploading}
+            />
+            <ToolbarIconButton
+              label="Refresh"
+              icon={<RefreshCw className={classNames('h-3.5 w-3.5', loading && 'animate-spin')} />}
+              onClick={refresh}
+              disabled={loading}
+            />
           </>
         )}
 
-        {selectedEntries.length > 0 && (
-          <Tooltip content={selectedEntries.length === 1 ? 'Add selected path to the canvas' : 'Add selected paths as one split input node'}>
-            <Button variant="ghost" size="sm" icon={<FilePlus2 className="h-3.5 w-3.5" />} onClick={addSelectedToCanvas}>
-              <span className="text-xs">Add {selectedEntries.length}</span>
-            </Button>
-          </Tooltip>
-        )}
-
-        {selectedEntries.length > 0 && (
-          <Tooltip content="Stage selected files in the data cart before adding them to the pipeline">
-            <Button variant="ghost" size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={stageSelectedToCart}>
-              <span className="text-xs">Stage</span>
-            </Button>
-          </Tooltip>
-        )}
-
-        {/* Sort dropdown */}
         <div className="relative ml-auto">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setSortDropdownOpen(!sortDropdownOpen)}
-          >
-            <span className="text-xs text-text-secondary">Sort</span>
-            <ChevronDown className="ml-0.5 h-3 w-3 text-text-muted" />
-          </Button>
+          <ToolbarIconButton
+            label="More file actions"
+            icon={<MoreHorizontal className="h-3.5 w-3.5" />}
+            onClick={() => setMoreActionsOpen((open) => !open)}
+          />
 
-          {sortDropdownOpen && (
+          {moreActionsOpen && (
             <>
-              <div
-                className="fixed inset-0 z-40"
-                onClick={() => setSortDropdownOpen(false)}
-              />
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded-lg border border-border bg-bg-secondary py-1 shadow-xl">
+              <div className="fixed inset-0 z-40" onClick={() => setMoreActionsOpen(false)} />
+              <div className="surface-popover absolute right-0 top-full z-50 mt-1 w-48 rounded-lg py-1">
+                <MoreActionButton
+                  icon={<ArrowUp className="h-3.5 w-3.5" />}
+                  label="Parent folder"
+                  disabled={!cwd || cwd === '/' || cwd === '~'}
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    navigateUp()
+                  }}
+                />
+                <MoreActionButton
+                  icon={<Bookmark className={classNames('h-3.5 w-3.5', isCurrentBookmarked && 'fill-accent text-accent')} />}
+                  label={isCurrentBookmarked ? 'Remove bookmark' : 'Bookmark folder'}
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    isCurrentBookmarked ? removeBookmark(cwd) : addBookmark(cwd)
+                  }}
+                />
+                <MoreActionButton
+                  icon={showHidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  label={showHidden ? 'Hide dotfiles' : 'Show dotfiles'}
+                  onClick={() => setShowHidden((value) => !value)}
+                />
+                {selectedEntries.length > 0 && (
+                  <>
+                    <div className="my-1 h-px bg-border-light" />
+                    <MoreActionButton
+                      icon={<Download className="h-3.5 w-3.5" />}
+                      label="Download"
+                      disabled={!canUploadLocal || !selectedPath}
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        void downloadSelected()
+                      }}
+                    />
+                    <MoreActionButton
+                      icon={<Copy className="h-3.5 w-3.5" />}
+                      label="Copy"
+                      disabled={!canUploadLocal || !selectedPath}
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        void copySelected()
+                      }}
+                    />
+                    <MoreActionButton
+                      icon={<MoveRight className="h-3.5 w-3.5" />}
+                      label="Move"
+                      disabled={!canUploadLocal || !selectedPath}
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        void moveSelected()
+                      }}
+                    />
+                    <MoreActionButton
+                      icon={<Trash2 className="h-3.5 w-3.5" />}
+                      label="Delete"
+                      disabled={!selectedPath}
+                      danger
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        void deleteSelectedEntries()
+                      }}
+                    />
+                    <MoreActionButton
+                      icon={<FilePlus2 className="h-3.5 w-3.5" />}
+                      label={selectedEntries.length === 1 ? 'Add to canvas' : 'Add as split node'}
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        addSelectedToCanvas()
+                      }}
+                    />
+                    <MoreActionButton
+                      icon={<Plus className="h-3.5 w-3.5" />}
+                      label="Stage in cart"
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        stageSelectedToCart()
+                      }}
+                    />
+                  </>
+                )}
+                <div className="my-1 h-px bg-border-light" />
+                <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">Sort</div>
                 {SORT_OPTIONS.map((opt) => (
-                  <button
+                  <MoreActionButton
                     key={`${opt.field}-${opt.direction}`}
-                    className={`flex w-full items-center px-3 py-1.5 text-xs transition-colors hover:bg-bg-hover ${
-                      sortField === opt.field && sortDirection === opt.direction
-                        ? 'text-accent'
-                        : 'text-text-primary'
-                    }`}
+                    label={opt.label}
+                    active={sortField === opt.field && sortDirection === opt.direction}
                     onClick={() => {
                       setSort(opt.field, opt.direction)
-                      setSortDropdownOpen(false)
+                      setMoreActionsOpen(false)
                     }}
-                  >
-                    {opt.label}
-                  </button>
+                  />
                 ))}
               </div>
             </>
@@ -1072,14 +1109,14 @@ export function FileExplorer() {
       </div>
 
       {uploadMessage && (
-        <div className="border-b border-border px-3 py-1 text-[10px] text-text-muted">
+        <div className="mx-2 rounded-md bg-bg-tertiary/70 px-3 py-1 text-[10px] text-text-muted shadow-sm">
           {uploadMessage}
         </div>
       )}
 
       {/* Bookmarks section */}
       {bookmarks.length > 0 && (
-        <div className="border-b border-border">
+        <div>
           <button
             className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-hover"
             onClick={() => setBookmarksOpen(!bookmarksOpen)}
@@ -1111,7 +1148,7 @@ export function FileExplorer() {
       )}
 
       {/* Search */}
-      <div className="border-b border-border px-2 py-1.5">
+      <div className="px-2 py-1.5">
         <div className="flex items-center gap-1.5 rounded-md bg-bg-tertiary px-2 py-1">
           <Search className="h-3.5 w-3.5 text-text-muted" />
           <input
@@ -1143,7 +1180,7 @@ export function FileExplorer() {
       </div>
 
       {dataCartItems.length > 0 && (
-        <div className="border-b border-border bg-bg-secondary/60">
+        <div className="bg-bg-secondary/60">
           <button
             type="button"
             onClick={() => setDataCartOpen(!dataCartOpen)}
@@ -1180,7 +1217,7 @@ export function FileExplorer() {
 
       {/* File list */}
       <div
-        className="relative flex-1 overflow-y-auto"
+        className="scroll-region relative"
         onPointerDown={startMarquee}
         onPointerMove={updateMarquee}
         onPointerUp={finishMarquee}
@@ -1274,6 +1311,69 @@ export function FileExplorer() {
   )
 }
 
+function ToolbarIconButton({
+  label,
+  icon,
+  onClick,
+  disabled,
+  danger = false,
+}: {
+  label: string
+  icon: React.ReactNode
+  onClick: () => void
+  disabled?: boolean
+  danger?: boolean
+}) {
+  return (
+    <Tooltip content={label}>
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        onClick={onClick}
+        disabled={disabled}
+        className={classNames(
+          'interactive-button flex h-7 min-w-7 items-center justify-center rounded-md text-text-muted disabled:cursor-not-allowed disabled:opacity-40',
+          danger ? 'hover:text-error' : 'hover:text-text-primary',
+        )}
+      >
+        {icon}
+      </button>
+    </Tooltip>
+  )
+}
+
+function MoreActionButton({
+  label,
+  icon,
+  onClick,
+  disabled,
+  active,
+  danger = false,
+}: {
+  label: string
+  icon?: React.ReactNode
+  onClick: () => void
+  disabled?: boolean
+  active?: boolean
+  danger?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={classNames(
+        'interactive-row flex h-8 w-full items-center gap-2 px-3 text-left text-xs disabled:cursor-not-allowed disabled:opacity-40',
+        active ? 'text-accent' : danger ? 'text-error' : 'text-text-primary',
+      )}
+    >
+      {icon && <span className="flex h-4 w-4 shrink-0 items-center justify-center text-text-muted">{icon}</span>}
+      <span className="text-nowrap min-w-0 flex-1">{label}</span>
+    </button>
+  )
+}
+
 function FileIconNode({
   entry,
   isSelected,
@@ -1289,9 +1389,6 @@ function FileIconNode({
   onPreview: (entry: RemoteFileEntry) => void
   onContextMenu: (event: React.MouseEvent, entry: RemoteFileEntry) => void
 }) {
-  const iconDef = getFileIcon(entry.extension, entry.isDirectory)
-  const Icon = iconDef.icon
-
   return (
     <Tooltip content={entry.path} side="right" delay={500}>
       <div
@@ -1323,9 +1420,7 @@ function FileIconNode({
           event.dataTransfer.effectAllowed = 'copyMove'
         }}
       >
-        <span className={classNames('flex h-12 w-12 items-center justify-center rounded-xl', isSelected ? 'bg-accent/20' : 'bg-bg-tertiary')}>
-          <Icon className={classNames('h-7 w-7 shrink-0', iconDef.color)} />
-        </span>
+        <FileGlyph entry={entry} size="grid" selected={isSelected} />
         <span
           className="w-full overflow-hidden break-words text-[11px] leading-4 text-text-primary"
           title={entry.name}

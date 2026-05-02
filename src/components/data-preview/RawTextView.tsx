@@ -2,7 +2,7 @@ export function RawTextView({ text }: { text: string }) {
   const lines = text.length > 0 ? text.split('\n') : ['']
   return (
     <div className="grid h-full min-w-full grid-cols-[3.5rem_minmax(0,1fr)] overflow-auto bg-bg-primary text-xs font-mono">
-      <div className="select-none border-r border-border bg-bg-secondary py-2 text-right text-text-muted">
+      <div className="select-none bg-bg-secondary py-2 text-right text-text-muted shadow-sm">
         {lines.map((_, idx) => (
           <div key={idx} className="px-2 leading-5">{idx + 1}</div>
         ))}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Loader2, Lock } from 'lucide-react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
@@ -12,7 +12,20 @@ import { showToast } from '@/components/ui/Toaster'
 import { AnnovarSetupWizard } from './AnnovarSetupWizard'
 import { DnanexusSettingsPanel } from './DnanexusSettingsPanel'
 
-const SECTIONS = ['General', 'Paths', 'Tools', 'DNAnexus', 'Notifications', 'Advanced'] as const
+const SECTIONS = [
+  'General',
+  'Interface',
+  'Appearance',
+  'Privacy',
+  'Setup',
+  'Run Checks',
+  'Execution',
+  'Paths',
+  'Tools',
+  'DNAnexus',
+  'Notifications',
+  'Advanced',
+] as const
 type Section = typeof SECTIONS[number]
 
 export function SettingsDialog({
@@ -107,15 +120,23 @@ export function SettingsDialog({
   }
 
   return (
-    <Dialog open={open} onClose={onClose} title="Settings" width="max-w-3xl">
-      <div className="grid min-h-[420px] grid-cols-[150px_1fr] gap-4">
-        <div className="border-r border-border pr-2">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Settings"
+      className="bioflow-settings-dialog"
+      bodyClassName="bioflow-settings-body"
+      footer={<Button variant="primary" onClick={onClose}>Done</Button>}
+    >
+      <div className="bioflow-settings-grid">
+        <aside className="bioflow-settings-nav">
           {visibleSections.map((item) => (
             <button
               key={item}
+              type="button"
               onClick={() => setSection(item)}
               className={classNames(
-                'mb-1 w-full rounded px-2 py-1.5 text-left text-xs',
+                'bioflow-settings-nav-button',
                 section === item ? 'bg-accent/10 text-text-primary' : 'text-text-muted hover:bg-bg-hover hover:text-text-primary',
               )}
             >
@@ -123,19 +144,21 @@ export function SettingsDialog({
             </button>
           ))}
           {!devMode && (
-            <button
-              type="button"
-              onClick={() => setPinOpen(true)}
-              className="mt-3 flex w-full items-center gap-2 rounded border border-border bg-bg-tertiary px-2 py-1.5 text-left text-xs text-text-muted hover:bg-bg-hover hover:text-text-primary"
-            >
-              <Lock size={12} />
-              Developer Options
+            <div className="mt-2 flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setPinOpen(true)}
+                className="bioflow-settings-nav-button flex-1 bg-bg-tertiary text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
+              >
+                <span className="text-nowrap min-w-0 flex-1 text-left">Developer Options</span>
+                <Lock size={12} className="shrink-0" />
+              </button>
               <HelpButton id="developer.gate" />
-            </button>
+            </div>
           )}
-        </div>
+        </aside>
 
-        <div className="min-w-0">
+        <section className="bioflow-settings-page">
           {section === 'General' && (
             <div className="flex flex-col gap-3">
               <SectionHeader label="General" helpId="settings.general" />
@@ -172,35 +195,44 @@ export function SettingsDialog({
                 disabled={!settings.autosaveEnabled}
                 onChange={(e) => number('settings:autosaveIntervalSeconds', Number(e.target.value))}
               />
-              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
-                <p className="text-[11px] font-medium text-text-secondary">Interface</p>
-                <Checkbox
-                  label="Show workflow guide in the toolbar"
-                  checked={settings.workflowGuideEnabled}
-                  onChange={(value) => toggle('settings:workflowGuideEnabled', value)}
-                />
-                <Checkbox
-                  label="Use icon grid in file explorers"
-                  checked={settings.fileExplorerViewMode === 'icons'}
-                  onChange={(value) => text('settings:fileExplorerViewMode', value ? 'icons' : 'list')}
-                />
-                <Checkbox
-                  label="Show genome build metadata on input files"
-                  checked={settings.showInputGenomeBuild}
-                  onChange={(value) => toggle('settings:showInputGenomeBuild', value)}
-                />
-                <div>
-                  <label className="mb-1 block text-text-secondary text-xs font-medium">Split file explorer layout</label>
-                  <select
-                    value={settings.splitExplorerBasePane}
-                    onChange={(e) => text('settings:splitExplorerBasePane', e.target.value)}
-                    className="h-8 w-full rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
-                  >
-                    <option value="left">Base path on left, current folder on right</option>
-                    <option value="right">Current folder on left, base path on right</option>
-                  </select>
-                </div>
+            </div>
+          )}
+
+          {section === 'Interface' && (
+            <div className="flex flex-col gap-3">
+              <SectionHeader label="Interface" helpId="settings.general" />
+              <Checkbox
+                label="Show workflow guide in the toolbar"
+                checked={settings.workflowGuideEnabled}
+                onChange={(value) => toggle('settings:workflowGuideEnabled', value)}
+              />
+              <Checkbox
+                label="Use icon grid in file explorers"
+                checked={settings.fileExplorerViewMode === 'icons'}
+                onChange={(value) => text('settings:fileExplorerViewMode', value ? 'icons' : 'list')}
+              />
+              <Checkbox
+                label="Show genome build metadata on input files"
+                checked={settings.showInputGenomeBuild}
+                onChange={(value) => toggle('settings:showInputGenomeBuild', value)}
+              />
+              <div>
+                <label className="mb-1 block text-text-secondary text-xs font-medium">Split file explorer layout</label>
+                <select
+                  value={settings.splitExplorerBasePane}
+                  onChange={(e) => text('settings:splitExplorerBasePane', e.target.value)}
+                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
+                >
+                  <option value="left">Base path on left, current folder on right</option>
+                  <option value="right">Current folder on left, base path on right</option>
+                </select>
               </div>
+            </div>
+          )}
+
+          {section === 'Appearance' && (
+            <div className="flex flex-col gap-3">
+              <SectionHeader label="Appearance" helpId="settings.general" />
               <div>
                 <label className="mb-1 block text-text-secondary text-xs font-medium">Theme</label>
                 <select
@@ -210,13 +242,19 @@ export function SettingsDialog({
                     setTheme(next)
                     void window.api.store.set('settings:theme', next)
                   }}
-                  className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
                 >
                   <option value="dark">Dark</option>
                   <option value="light">Light</option>
                   <option value="simple">Simple</option>
                 </select>
               </div>
+            </div>
+          )}
+
+          {section === 'Privacy' && (
+            <div className="flex flex-col gap-3">
+              <SectionHeader label="Privacy" helpId="settings.general" />
               <Checkbox
                 label="Confirm before login-node runs"
                 checked={settings.confirmOnLoginNodeRun}
@@ -227,55 +265,65 @@ export function SettingsDialog({
                 checked={settings.telemetryOptIn}
                 onChange={(value) => toggle('settings:telemetryOptIn', value)}
               />
-              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5">
-                <p className="mb-2 text-[11px] font-medium text-text-secondary">Setup</p>
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" size="sm" onClick={runStartupWizard}>
-                    Run startup wizard
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => void checkForUpdates()} disabled={checkingUpdates}>
-                    {checkingUpdates && <Loader2 size={12} className="mr-1 animate-spin" />}
-                    {checkingUpdates ? 'Checking...' : 'Check for updates'}
-                  </Button>
-                </div>
+            </div>
+          )}
+
+          {section === 'Setup' && (
+            <div className="flex flex-col gap-3">
+              <SectionHeader label="Setup" helpId="settings.general" />
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" size="sm" onClick={runStartupWizard}>
+                  Run startup wizard
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => void checkForUpdates()} disabled={checkingUpdates}>
+                  {checkingUpdates && <Loader2 size={12} className="mr-1 animate-spin" />}
+                  {checkingUpdates ? 'Checking...' : 'Check for updates'}
+                </Button>
               </div>
-              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5 flex flex-col gap-2">
-                <p className="text-[11px] font-medium text-text-secondary">Pre-run checks</p>
-                <Checkbox
-                  label="Skip input file checks (faster, uses last known result)"
-                  checked={settings.skipPreRunFileCheck}
-                  onChange={(value) => toggle('settings:skipPreRunFileCheck', value)}
-                />
-                <Checkbox
-                  label="Skip cluster doctor check before run"
-                  checked={settings.skipPreRunDoctorCheck}
-                  onChange={(value) => toggle('settings:skipPreRunDoctorCheck', value)}
-                />
+            </div>
+          )}
+
+          {section === 'Run Checks' && (
+            <div className="flex flex-col gap-3">
+              <SectionHeader label="Run Checks" helpId="settings.general" />
+              <Checkbox
+                label="Skip input file checks (faster, uses last known result)"
+                checked={settings.skipPreRunFileCheck}
+                onChange={(value) => toggle('settings:skipPreRunFileCheck', value)}
+              />
+              <Checkbox
+                label="Skip cluster doctor check before run"
+                checked={settings.skipPreRunDoctorCheck}
+                onChange={(value) => toggle('settings:skipPreRunDoctorCheck', value)}
+              />
+            </div>
+          )}
+
+          {section === 'Execution' && (
+            <div className="flex flex-col gap-3">
+              <SectionHeader label="Execution" helpId="settings.general" />
+              <div>
+                <label className="mb-1 block text-text-secondary text-xs font-medium">Array chain mode</label>
+                <select
+                  value={settings.arrayChainMode}
+                  onChange={(e) => text('settings:execution:arrayChainMode', e.target.value)}
+                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
+                >
+                  <option value="task-level">Task-level (`aftercorr` when supported)</option>
+                  <option value="job-level">Job-level (`afterok` only)</option>
+                </select>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="mb-1 block text-text-secondary text-xs font-medium">Array chain mode</label>
-                  <select
-                    value={settings.arrayChainMode}
-                    onChange={(e) => text('settings:execution:arrayChainMode', e.target.value)}
-                    className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
-                  >
-                    <option value="task-level">Task-level (`aftercorr` when supported)</option>
-                    <option value="job-level">Job-level (`afterok` only)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block text-text-secondary text-xs font-medium">File lifecycle</label>
-                  <select
-                    value={settings.fileLifecyclePolicy}
-                    onChange={(e) => text('settings:fileLifecyclePolicy', e.target.value)}
-                    className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
-                  >
-                    <option value="keep-all">Keep all files</option>
-                    <option value="keep-outputs-only">Delete marked intermediates after success</option>
-                    <option value="delete-intermediates-on-success">Aggressive intermediate cleanup after success</option>
-                  </select>
-                </div>
+              <div>
+                <label className="mb-1 block text-text-secondary text-xs font-medium">File lifecycle</label>
+                <select
+                  value={settings.fileLifecyclePolicy}
+                  onChange={(e) => text('settings:fileLifecyclePolicy', e.target.value)}
+                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
+                >
+                  <option value="keep-all">Keep all files</option>
+                  <option value="keep-outputs-only">Delete marked intermediates after success</option>
+                  <option value="delete-intermediates-on-success">Aggressive intermediate cleanup after success</option>
+                </select>
               </div>
             </div>
           )}
@@ -289,9 +337,11 @@ export function SettingsDialog({
                 placeholder="runs/{pipelineSlug}-{timestamp}"
                 onChange={(e) => text('settings:paths:runFolderTemplate', e.target.value)}
               />
-              <p className="text-[11px] text-text-muted">
-                Tokens: <code>{'{pipelineSlug}'}</code>, <code>{'{pipelineName}'}</code>, <code>{'{timestamp}'}</code>, <code>{'{date}'}</code>, <code>{'{user}'}</code>.
-              </p>
+              <SettingsGroup title="Template tokens">
+                <div className="text-[11px] text-text-muted" data-wrap>
+                  <code>{'{pipelineSlug}'}</code>, <code>{'{pipelineName}'}</code>, <code>{'{timestamp}'}</code>, <code>{'{date}'}</code>, <code>{'{user}'}</code>
+                </div>
+              </SettingsGroup>
               <Checkbox
                 label="Create scripts, outputs, and logs subfolders"
                 checked={settings.paths.createSubfolders}
@@ -337,43 +387,42 @@ export function SettingsDialog({
                 mode="directory"
                 title="Choose tools folder"
               />
-              <div className="grid grid-cols-2 gap-2">
-                <RemotePathField
-                  label="ANNOVAR scripts folder"
-                  value={settings.annovarScriptsPath}
-                  placeholder="~/bioflow/tools/annovar"
-                  onChange={(value) => text('settings:annovarScriptsPath', value)}
-                  mode="directory"
-                  title="Choose ANNOVAR scripts folder"
-                />
-                <RemotePathField
-                  label="ANNOVAR humandb folder"
-                  value={settings.annovarDbPath}
-                  placeholder="~/bioflow/tools/annovar/humandb"
-                  onChange={(value) => text('settings:annovarDbPath', value)}
-                  mode="directory"
-                  title="Choose ANNOVAR humandb folder"
-                />
-                <RemotePathField
-                  label="VEP executable or folder"
-                  value={settings.vepPath}
-                  placeholder="vep or ~/bioflow/tools/ensembl-vep/vep"
-                  onChange={(value) => text('settings:vepPath', value)}
-                  mode="file"
-                  title="Choose VEP executable or folder"
-                />
-                <RemotePathField
-                  label="VEP cache folder"
-                  value={settings.vepCachePath}
-                  placeholder="~/bioflow/tools/vep/cache"
-                  onChange={(value) => text('settings:vepCachePath', value)}
-                  mode="directory"
-                  title="Choose VEP cache folder"
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                Node inspector values override these defaults. ANNOVAR scripts may need manual download from the ANNOVAR site before database installs can run.
-              </p>
+              <SettingsGroup title="Tool-specific paths">
+                <div className="grid grid-cols-2 gap-2">
+                  <RemotePathField
+                    label="ANNOVAR scripts folder"
+                    value={settings.annovarScriptsPath}
+                    placeholder="~/bioflow/tools/annovar"
+                    onChange={(value) => text('settings:annovarScriptsPath', value)}
+                    mode="directory"
+                    title="Choose ANNOVAR scripts folder"
+                  />
+                  <RemotePathField
+                    label="ANNOVAR humandb folder"
+                    value={settings.annovarDbPath}
+                    placeholder="~/bioflow/tools/annovar/humandb"
+                    onChange={(value) => text('settings:annovarDbPath', value)}
+                    mode="directory"
+                    title="Choose ANNOVAR humandb folder"
+                  />
+                  <RemotePathField
+                    label="VEP executable or folder"
+                    value={settings.vepPath}
+                    placeholder="vep or ~/bioflow/tools/ensembl-vep/vep"
+                    onChange={(value) => text('settings:vepPath', value)}
+                    mode="file"
+                    title="Choose VEP executable or folder"
+                  />
+                  <RemotePathField
+                    label="VEP cache folder"
+                    value={settings.vepCachePath}
+                    placeholder="~/bioflow/tools/vep/cache"
+                    onChange={(value) => text('settings:vepCachePath', value)}
+                    mode="directory"
+                    title="Choose VEP cache folder"
+                  />
+                </div>
+              </SettingsGroup>
               <div>
                 <Button variant="secondary" size="sm" onClick={() => setAnnovarWizardOpen(true)}>
                   ANNOVAR setup wizard
@@ -408,17 +457,16 @@ export function SettingsDialog({
           {section === 'Advanced' && (
             <div className="flex flex-col gap-3">
               <SectionHeader label="Advanced" helpId="settings.advanced" />
-              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5">
-                <p className="mb-2 text-[11px] font-medium text-text-secondary">SSH transport</p>
+              <SettingsGroup title="SSH transport">
                 <Checkbox
                   label="Use OpenSSH ControlPersist for BioFlow operations"
                   checked={settings.useOpenSshControlPersist}
                   onChange={(value) => toggle('settings:ssh:useOpenSshControlPersist', value)}
                 />
-                <p className="mt-2 text-[11px] leading-relaxed text-text-muted">
+                <div className="text-[11px] leading-relaxed text-text-muted" data-wrap>
                   Off uses BioFlow&apos;s legacy ssh2 connection. On routes file browsing, uploads, downloads, remote commands, run submission, and Slurm polling through a BioFlow-managed OpenSSH master socket. The in-app terminal still uses ssh2 in this release.
-                </p>
-              </div>
+                </div>
+              </SettingsGroup>
               <Input
                 label="Login-node CPU warning threshold (seconds)"
                 type="number"
@@ -427,18 +475,19 @@ export function SettingsDialog({
                 value={settings.clusterLoginPolicyWarnSeconds}
                 onChange={(e) => number('settings:cluster:loginPolicyWarnSeconds', Number(e.target.value))}
               />
-              <p className="text-[11px] text-text-muted">
+              <SettingsGroup title="Login-node warning details">
+                <div className="text-[11px] text-text-muted" data-wrap>
                 Show a warning after connect when the cluster reports a login-node CPU time limit below this value. Use 0 to suppress the warning.
-              </p>
-              <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-relaxed text-text-primary">
-                PLINK tools now use the block-based flag builder so users can add documented flags, custom fallback flags, and suggested rerun fixes directly in the inspector.
-              </div>
-              <p className="text-[11px] text-text-muted">
-                This is the shared large-flag pattern we can extend to other tools with broad command surfaces in later passes.
-              </p>
+                </div>
+              </SettingsGroup>
+              <SettingsGroup title="PLINK flag builder">
+                <div className="text-[11px] text-text-muted" data-wrap>
+                  Documented flags, custom fallback flags, and suggested rerun fixes are handled directly in the inspector.
+                </div>
+              </SettingsGroup>
             </div>
           )}
-        </div>
+        </section>
       </div>
       <AnnovarSetupWizard open={annovarWizardOpen} onClose={() => setAnnovarWizardOpen(false)} />
       <Dialog
@@ -449,7 +498,6 @@ export function SettingsDialog({
           setPinError(null)
         }}
         title="Developer Options"
-        width="max-w-sm"
         footer={(
           <>
             <Button variant="secondary" onClick={() => setPinOpen(false)}>Cancel</Button>
@@ -468,7 +516,6 @@ export function SettingsDialog({
             }}
             autoFocus
           />
-          <p className="text-[11px] text-text-muted">RAP features are under development and stay locked after app restart.</p>
           {pinError && <p className="text-xs text-error">{pinError}</p>}
         </div>
       </Dialog>
@@ -481,6 +528,21 @@ function SectionHeader({ label, helpId }: { label: string; helpId: string }) {
     <div className="mb-1 flex items-center gap-2">
       <h3 className="text-sm font-semibold text-text-primary">{label}</h3>
       <HelpButton id={helpId} />
+    </div>
+  )
+}
+
+function SettingsGroup({
+  title,
+  children,
+}: {
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <div className="rounded-md bg-bg-tertiary px-3 py-2 text-xs text-text-secondary shadow-inner">
+      <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">{title}</div>
+      <div className="flex flex-col gap-2">{children}</div>
     </div>
   )
 }

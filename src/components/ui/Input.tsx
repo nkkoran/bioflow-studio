@@ -33,10 +33,10 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
             ref={ref}
             id={inputId}
             className={classNames(
-              'h-8 w-full rounded-md border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted',
-              'outline-none transition-colors',
-              'focus:ring-1 focus:ring-accent focus:border-accent',
-              error ? 'border-error' : 'border-border',
+              'bioflow-field h-8 w-full rounded-md border px-3 text-sm text-text-primary placeholder-text-muted shadow-sm',
+              'border-border-light bg-bg-tertiary/90 outline-none transition-all duration-150 ease-out',
+              'focus:border-accent focus:ring-2 focus:ring-accent/25',
+              error && 'border-error focus:border-error focus:ring-error/20',
               icon && 'pl-8',
               className,
             )}

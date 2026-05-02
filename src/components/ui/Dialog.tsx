@@ -1,22 +1,30 @@
 import React, { useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import { X } from 'lucide-react'
 import { classNames } from '@/lib/utils'
 
 interface DialogProps {
   open: boolean
   onClose: () => void
   title: string
+  subtitle?: React.ReactNode
+  icon?: React.ReactNode
   children: React.ReactNode
   footer?: React.ReactNode
-  width?: string
+  className?: string
+  bodyClassName?: string
 }
 
 export function Dialog({
   open,
   onClose,
   title,
+  subtitle,
+  icon,
   children,
   footer,
-  width = 'max-w-md',
+  className,
+  bodyClassName,
 }: DialogProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -34,71 +42,50 @@ export function Dialog({
 
   if (!open) return null
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity p-4"
+      className="bioflow-modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
     >
       <div
         className={classNames(
-          'w-full bg-bg-secondary border border-border rounded-lg shadow-2xl',
-          'animate-dialog-in',
-          'max-h-[90vh] flex flex-col',
-          width,
+          'bioflow-modal surface-popover rounded-lg',
+          'animate-fade-up',
+          className,
         )}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header — fixed */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
-          <h2 className="text-lg font-semibold text-text-primary">{title}</h2>
+        <div className="bioflow-modal-header">
+          {icon && (
+            <div className="mt-0.5 shrink-0 text-accent" aria-hidden>
+              {icon}
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-[15px] font-semibold leading-5 text-text-primary">{title}</h2>
+            {subtitle && <div className="mt-0.5 truncate text-xs text-text-muted">{subtitle}</div>}
+          </div>
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text-primary transition-colors rounded p-0.5"
+            className="rounded p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
             aria-label="Close dialog"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-            >
-              <path d="M4 4l8 8M12 4l-8 8" />
-            </svg>
+            <X size={16} />
           </button>
         </div>
 
-        {/* Body — scrolls when content exceeds available space */}
-        <div className="px-6 py-4 overflow-y-auto flex-1 min-h-0">{children}</div>
+        <div className={classNames('bioflow-modal-body', bodyClassName)}>{children}</div>
 
-        {/* Footer — fixed */}
         {footer && (
-          <div className="flex justify-end gap-2 px-6 py-3 border-t border-border shrink-0">
+          <div className="bioflow-modal-footer">
             {footer}
           </div>
         )}
       </div>
-
-      <style>{`
-        @keyframes dialog-in {
-          from {
-            opacity: 0;
-            transform: scale(0.95);
-          }
-          to {
-            opacity: 1;
-            transform: scale(1);
-          }
-        }
-        .animate-dialog-in {
-          animation: dialog-in 150ms ease-out;
-        }
-      `}</style>
-    </div>
+    </div>,
+    document.body,
   )
 }

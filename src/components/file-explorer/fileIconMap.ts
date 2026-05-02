@@ -21,40 +21,40 @@ export interface FileIconDef {
 
 const extensionMap: Record<string, FileIconDef> = {
   // PLINK2 filesets
-  pgen: { icon: Dna, color: 'text-blue-400' },
-  pvar: { icon: Dna, color: 'text-blue-400' },
-  psam: { icon: Dna, color: 'text-blue-400' },
+  pgen: { icon: Dna, color: 'text-accent' },
+  pvar: { icon: Dna, color: 'text-accent' },
+  psam: { icon: Dna, color: 'text-accent' },
   // PLINK1 filesets
-  bed: { icon: Dna, color: 'text-cyan-400' },
-  bim: { icon: Dna, color: 'text-cyan-400' },
-  fam: { icon: Dna, color: 'text-cyan-400' },
+  bed: { icon: Dna, color: 'text-accent' },
+  bim: { icon: Dna, color: 'text-accent' },
+  fam: { icon: Dna, color: 'text-accent' },
   // Data files
-  bgen: { icon: Database, color: 'text-purple-400' },
-  vcf: { icon: Dna, color: 'text-green-400' },
-  'vcf.gz': { icon: Dna, color: 'text-green-400' },
+  bgen: { icon: Database, color: 'text-text-secondary' },
+  vcf: { icon: Dna, color: 'text-accent' },
+  'vcf.gz': { icon: Dna, color: 'text-accent' },
   // Tabular
-  tsv: { icon: Table2, color: 'text-emerald-400' },
-  csv: { icon: Table2, color: 'text-emerald-400' },
-  pheno: { icon: Table2, color: 'text-emerald-400' },
+  tsv: { icon: Table2, color: 'text-text-secondary' },
+  csv: { icon: Table2, color: 'text-text-secondary' },
+  pheno: { icon: Table2, color: 'text-text-secondary' },
   txt: { icon: FileText, color: 'text-text-secondary' },
   // Scripts
-  R: { icon: FileCode, color: 'text-blue-300' },
-  r: { icon: FileCode, color: 'text-blue-300' },
-  py: { icon: FileCode, color: 'text-yellow-400' },
-  sh: { icon: Terminal, color: 'text-green-300' },
-  bash: { icon: Terminal, color: 'text-green-300' },
+  R: { icon: FileCode, color: 'text-text-secondary' },
+  r: { icon: FileCode, color: 'text-text-secondary' },
+  py: { icon: FileCode, color: 'text-text-secondary' },
+  sh: { icon: Terminal, color: 'text-text-secondary' },
+  bash: { icon: Terminal, color: 'text-text-secondary' },
   // Config
-  json: { icon: FileJson, color: 'text-yellow-300' },
-  yaml: { icon: FileJson, color: 'text-yellow-300' },
-  yml: { icon: FileJson, color: 'text-yellow-300' },
+  json: { icon: FileJson, color: 'text-text-secondary' },
+  yaml: { icon: FileJson, color: 'text-text-secondary' },
+  yml: { icon: FileJson, color: 'text-text-secondary' },
   // Archives
   gz: { icon: Archive, color: 'text-text-muted' },
   tar: { icon: Archive, color: 'text-text-muted' },
   zip: { icon: Archive, color: 'text-text-muted' },
   // Images
-  png: { icon: Image, color: 'text-pink-400' },
-  jpg: { icon: Image, color: 'text-pink-400' },
-  pdf: { icon: FileText, color: 'text-red-400' },
+  png: { icon: Image, color: 'text-text-secondary' },
+  jpg: { icon: Image, color: 'text-text-secondary' },
+  pdf: { icon: FileText, color: 'text-text-secondary' },
   // Log files
   log: { icon: FileText, color: 'text-text-muted' },
   out: { icon: FileText, color: 'text-text-muted' },

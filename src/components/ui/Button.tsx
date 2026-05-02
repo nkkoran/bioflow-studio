@@ -9,10 +9,10 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<NonNullable<ButtonProps['variant']>, string> = {
-  primary: 'bg-accent text-white hover:bg-accent-hover',
-  secondary: 'bg-bg-tertiary text-text-primary hover:bg-bg-hover border border-border',
-  ghost: 'bg-transparent text-text-secondary hover:bg-bg-hover hover:text-text-primary',
-  danger: 'bg-error/10 text-error hover:bg-error/20',
+  primary: 'bg-accent text-white shadow-md hover:bg-accent-hover font-medium tracking-[0.01em]',
+  secondary: 'bg-bg-tertiary/90 text-text-primary shadow-sm hover:bg-bg-hover',
+  ghost: 'bg-transparent text-text-secondary hover:bg-bg-hover/80 hover:text-text-primary',
+  danger: 'bg-error/10 text-error hover:bg-error/20 shadow-sm',
 }
 
 const sizeStyles: Record<NonNullable<ButtonProps['size']>, string> = {
@@ -33,11 +33,12 @@ export function Button({
   return (
     <button
       className={classNames(
-        'inline-flex items-center justify-center rounded-md font-medium transition-colors',
+        'interactive-button inline-flex items-center justify-center rounded-md font-medium transition-all duration-150 ease-out',
+        'focus-visible:ring-2 focus-visible:ring-accent/45 focus-visible:ring-offset-0',
         variantStyles[variant],
         sizeStyles[size],
         icon && children && 'gap-1.5',
-        disabled && 'opacity-50 cursor-not-allowed',
+        disabled && 'opacity-50 cursor-not-allowed shadow-none',
         className,
       )}
       disabled={disabled}

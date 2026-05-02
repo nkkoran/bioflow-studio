@@ -148,7 +148,7 @@ export function JobSummary({ run, runId, connectionId, ns }: Props) {
   }
 
   return (
-    <div className="border-b border-border-light bg-bg-secondary/40 px-3 py-2 shrink-0">
+    <div className="bg-bg-secondary/40 px-3 py-2 shadow-sm shrink-0">
       <div className="flex items-center gap-4 text-[11px] text-text-secondary">
         <span className={`px-1.5 py-0.5 rounded ${statusChipColor(ns.status)}`}>
           {ns.status}
@@ -174,14 +174,14 @@ export function JobSummary({ run, runId, connectionId, ns }: Props) {
       </div>
 
       {ns.error && (
-        <div className="mt-2 flex items-start gap-1.5 text-[11px] text-error bg-error/5 border border-error/20 rounded px-2 py-1">
+        <div className="mt-2 flex items-start gap-1.5 rounded bg-error/5 px-2 py-1 text-[11px] text-error shadow-sm">
           <AlertCircle size={12} className="mt-0.5 shrink-0" />
           <span className="font-mono whitespace-pre-wrap break-all">{ns.error}</span>
         </div>
       )}
 
       {dnxStatus && (
-        <div className="mt-2 rounded border border-cyan-500/20 bg-cyan-500/5 px-2 py-1.5 text-[11px] text-text-secondary">
+        <div className="mt-2 rounded bg-accent/10 px-2 py-1.5 text-[11px] text-text-secondary shadow-sm">
           <div className="flex flex-wrap items-center gap-3">
             <span>DNAnexus state <span className="font-mono text-text-primary">{dnxStatus.state}</span></span>
             {dnxStatus.projectId && <span>project <span className="font-mono text-text-primary">{dnxStatus.projectId}</span></span>}
@@ -202,7 +202,7 @@ export function JobSummary({ run, runId, connectionId, ns }: Props) {
       )}
 
       {ns.childJobs && ns.childJobs.length > 0 && (
-        <div className="mt-2 rounded border border-border-light bg-bg-primary px-2 py-1.5">
+        <div className="mt-2 rounded bg-bg-primary px-2 py-1.5 shadow-inner">
           <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Related jobs</div>
           <div className="flex flex-col gap-1">
             {ns.childJobs.map((job) => (
@@ -231,11 +231,11 @@ export function JobSummary({ run, runId, connectionId, ns }: Props) {
         ) : outputs.length === 0 ? (
           <div className="text-[11px] text-text-muted italic">No output files found in {ns.outputDir ?? '(unknown dir)'}.</div>
         ) : (
-          <div className="max-h-32 overflow-y-auto border border-border-light rounded bg-bg-primary">
+          <div className="max-h-32 overflow-y-auto rounded bg-bg-primary shadow-inner">
             <table className="w-full text-[11px] font-mono">
               <tbody>
                 {outputs.map((f) => (
-                  <tr key={f.name} className="border-b border-border-light last:border-b-0 hover:bg-bg-hover">
+                  <tr key={f.name} className="hover:bg-bg-hover">
                     <td className="px-2 py-0.5 flex items-center gap-1.5">
                       <FileText size={10} className="text-text-muted shrink-0" />
                       <button
@@ -320,7 +320,7 @@ function LogFileButton({
   onCopy: (path: string) => void | Promise<void>
 }) {
   return (
-    <div className="inline-flex items-center gap-1 rounded border border-border-light bg-bg-primary px-1.5 py-1 text-[10px]">
+    <div className="inline-flex items-center gap-1 rounded bg-bg-primary px-1.5 py-1 text-[10px] shadow-sm">
       <button
         className="font-mono text-text-primary hover:text-accent"
         title={path}

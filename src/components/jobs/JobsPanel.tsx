@@ -149,7 +149,7 @@ export function JobsPanel() {
 
   if (sortedRuns.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-sm text-text-muted">
+      <div className="animate-fade-up flex-1 flex items-center justify-center text-center text-sm text-text-muted">
         No runs yet. Click Run on a pipeline to start one.
       </div>
     )
@@ -158,12 +158,12 @@ export function JobsPanel() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header: run selector + cancel */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-light shrink-0">
+      <div className="flex items-center gap-2 px-3 py-1.5 shrink-0">
         <span className="text-xs text-text-muted">Run:</span>
         <select
           value={activeRunId ?? ''}
           onChange={(e) => setActiveRun(e.target.value || null)}
-          className="bg-bg-primary border border-border rounded px-2 py-0.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent min-w-[280px]"
+          className="bioflow-field min-w-[280px] rounded px-2 py-0.5 text-xs text-text-primary focus:outline-none"
         >
           {(['running', 'queued', 'done', 'failed', 'cancelled', 'other'] as const).map((bucket) => {
             const list = groupedRuns[bucket]
@@ -292,14 +292,14 @@ export function JobsPanel() {
       {activeRun ? (
         <div className="flex-1 flex min-h-0">
           {!nodesCollapsed ? (
-            <div className="w-[34%] min-w-[260px] max-w-[420px] border-r border-border-light flex flex-col min-h-0">
+            <div className="w-[34%] min-w-[260px] max-w-[420px] flex flex-col min-h-0">
               <RunHistoryList runs={sortedRuns} activeRunId={activeRun.runId} onSelect={setActiveRun} />
-              <div className="border-t border-border-light px-3 py-1.5 shrink-0 flex items-center gap-2">
+              <div className="px-3 py-1.5 shrink-0 flex items-center gap-2">
                 <span className="text-[10px] uppercase tracking-wide text-text-muted">Steps</span>
                 <span className="text-[10px] text-text-muted">{Object.keys(activeRun.nodes).length}</span>
                 <button
                   onClick={() => setNodesCollapsed(true)}
-                  className="ml-auto flex h-6 w-6 items-center justify-center rounded border border-border text-text-muted hover:bg-bg-hover hover:text-text-primary"
+                  className="ml-auto flex h-6 w-6 items-center justify-center rounded bg-bg-tertiary text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
                   title="Collapse step list"
                 >
                   <ChevronLeft size={13} />
@@ -312,7 +312,7 @@ export function JobsPanel() {
           ) : (
             <button
               onClick={() => setNodesCollapsed(false)}
-              className="w-8 shrink-0 border-r border-border-light bg-bg-secondary/40 text-text-muted hover:bg-bg-hover hover:text-text-primary flex items-center justify-center"
+              className="w-8 shrink-0 bg-bg-secondary/40 text-text-muted hover:bg-bg-hover hover:text-text-primary flex items-center justify-center"
               title="Show step list"
             >
               <ChevronRight size={14} />
@@ -413,15 +413,15 @@ function RunHistoryList({
 }) {
   return (
     <div className="shrink-0 max-h-36 overflow-y-auto">
-      <div className="sticky top-0 bg-bg-secondary border-b border-border-light px-3 py-1.5 text-[10px] uppercase tracking-wide text-text-muted">
+      <div className="sticky top-0 bg-bg-secondary/95 px-3 py-1.5 text-[10px] uppercase tracking-wide text-text-muted shadow-sm">
         Past runs
       </div>
       {runs.map((run) => (
         <button
           key={run.runId}
           onClick={() => onSelect(run.runId)}
-          className={`w-full text-left px-3 py-2 border-l-2 border-b border-border-light/60 hover:bg-bg-hover ${
-            activeRunId === run.runId ? 'bg-bg-hover border-accent' : 'border-transparent'
+          className={`mx-2 mb-1 w-[calc(100%-1rem)] rounded-md px-3 py-2 text-left transition-all duration-150 hover:bg-bg-hover hover:shadow-sm ${
+            activeRunId === run.runId ? 'bg-bg-hover shadow-sm ring-1 ring-accent/30' : ''
           }`}
         >
           <div className="flex items-center gap-2">
@@ -443,7 +443,7 @@ function RunHistoryList({
 
 function SelectedNodeSummary({ ns, label }: { ns: NodeRunState; label: string }) {
   return (
-    <div className="border-b border-border-light bg-bg-primary px-3 py-2 shrink-0">
+    <div className="bg-bg-primary/70 px-3 py-2 shadow-sm shrink-0">
       <div className="flex items-center gap-2 text-xs">
         <span className="font-medium text-text-primary truncate">{label}</span>
         <span className={`px-1.5 py-0.5 rounded text-[10px] ${statusChipColor(ns.status ?? 'idle')}`}>
@@ -463,7 +463,7 @@ function SelectedNodeSummary({ ns, label }: { ns: NodeRunState; label: string })
 
 function RunDetails({ run }: { run: RunState }) {
   return (
-    <div className="border-b border-border-light bg-bg-secondary/30 px-3 py-2 shrink-0">
+    <div className="bg-bg-secondary/30 px-3 py-2 shadow-sm shrink-0">
       <div className="flex items-center gap-3 text-[11px] text-text-secondary">
         <span className={`px-1.5 py-0.5 rounded ${statusChipColor(run.status)}`}>{run.status}</span>
         <span>

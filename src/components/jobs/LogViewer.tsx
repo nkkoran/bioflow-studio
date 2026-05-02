@@ -160,7 +160,7 @@ export function LogViewer({ run, connectionId }: Props) {
 
   if (!ns) {
     return (
-      <div className="h-full flex items-center justify-center text-xs text-text-muted">
+      <div className="animate-fade-up h-full flex items-center justify-center text-center text-xs text-text-muted">
         Select a node to view its logs.
       </div>
     )
@@ -172,7 +172,7 @@ export function LogViewer({ run, connectionId }: Props) {
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-light shrink-0">
+      <div className="flex shrink-0 items-center gap-2 px-3 py-1.5 shadow-sm">
         {sharedSlurmLog ? (
           <StreamTab label="slurm log" count={stdoutLineCount} active onClick={() => setStream('stdout')} />
         ) : (
@@ -188,7 +188,7 @@ export function LogViewer({ run, connectionId }: Props) {
             <select
               value={taskIdx}
               onChange={(e) => setTaskIdx(Number(e.target.value))}
-              className="bg-bg-primary border border-border rounded px-1.5 py-0.5 text-[10px] text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              className="bioflow-field rounded px-1.5 py-0.5 text-[10px] text-text-primary focus:outline-none"
             >
               {Array.from({ length: ns.arraySize ?? 0 }, (_, i) => (
                 <option key={i} value={i}>{i}</option>
@@ -237,7 +237,7 @@ export function LogViewer({ run, connectionId }: Props) {
         className="flex-1 overflow-auto m-0 px-3 py-2 text-[11px] leading-relaxed font-mono bg-bg-primary text-text-primary whitespace-pre-wrap break-all"
       >
         {error && <div className="text-warning italic">{error}</div>}
-        {diagnostic && <div className="mb-2 whitespace-pre-wrap rounded border border-warning/40 bg-warning/10 p-2 text-warning">{diagnostic}</div>}
+        {diagnostic && <div className="mb-2 whitespace-pre-wrap rounded bg-warning/10 p-2 text-warning shadow-sm">{diagnostic}</div>}
         {!error && displayContent.length === 0 && !loading && (
           <div className="text-text-muted italic">
             {ns.status === 'queued' ? 'Waiting for job to start…' : '— empty —'}
@@ -253,10 +253,10 @@ function StreamTab({ label, count, active, onClick }: { label: string; count: nu
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono rounded ${
+      className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-mono text-[10px] transition-all duration-150 ${
         active
-          ? 'bg-bg-hover text-text-primary'
-          : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
+          ? 'bg-bg-hover text-text-primary shadow-sm'
+          : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
       }`}
     >
       {label}

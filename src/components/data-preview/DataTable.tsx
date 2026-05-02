@@ -161,7 +161,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
 
   return (
     <div className="flex h-full w-full flex-col">
-      <div className="shrink-0 border-b border-border bg-bg-secondary px-3 py-2 flex flex-col gap-2">
+      <div className="flex shrink-0 flex-col gap-2 bg-bg-secondary/80 px-3 py-2 shadow-sm">
         <div className="flex items-center justify-between gap-2">
           <div>
             <div className="text-[10px] uppercase tracking-wide text-text-muted">Rows</div>
@@ -169,7 +169,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
           </div>
           <button
             onClick={() => setDraftFilters(filePath, [...draftFilters, newFilter(headers[0] ?? '', headers, rows)])}
-            className="h-7 rounded-md border border-accent/40 bg-accent/10 px-2 text-[11px] text-accent hover:bg-accent/15"
+            className="h-7 rounded-md bg-accent/10 px-2 text-[11px] text-accent shadow-sm hover:bg-accent/15"
           >
             Add filter
           </button>
@@ -179,21 +179,21 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
           <button
             onClick={() => applyDraftFilters(filePath)}
             disabled={!hasDraftChanges}
-            className="rounded border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded bg-accent/10 px-2 py-0.5 text-accent shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
           >
             Apply
           </button>
           <button
             onClick={() => resetDraftFilters(filePath)}
             disabled={!hasDraftChanges}
-            className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded bg-bg-tertiary px-2 py-0.5 shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
           >
             Revert draft
           </button>
           <button
             onClick={() => onExportFilteredFile?.(appliedRows)}
             disabled={appliedRows.length === 0 || hasDraftChanges}
-            className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded bg-bg-tertiary px-2 py-0.5 shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
             title={hasDraftChanges ? 'Apply the draft filters first, then export the applied result.' : undefined}
           >
             Export as file
@@ -201,14 +201,14 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
           <button
             onClick={() => onAddFilteredToPipeline?.()}
             disabled={filters.length === 0 || hasDraftChanges}
-            className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded bg-bg-tertiary px-2 py-0.5 shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
             title={hasDraftChanges ? 'Apply the draft filters first, then add the applied result to the pipeline.' : undefined}
           >
             Add to pipeline
           </button>
           {hasDraftChanges && <span>Previewing draft filters</span>}
         </div>
-        <div className="rounded-md border border-border bg-bg-primary/60 px-2 py-1 text-[11px] text-text-muted">
+        <div className="rounded-md bg-bg-primary/60 px-2 py-1 text-[11px] text-text-muted shadow-inner">
           {hasDraftChanges
             ? `Rows: ${displayedRows.length} in draft preview · ${appliedRows.length} applied · ${rows.length} original`
             : `Rows: ${rows.length} original · ${removedRows} removed · ${displayedRows.length} remaining`}
@@ -218,7 +218,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
             value={filterExpression}
             onChange={(e) => setFilterExpression(e.target.value)}
             placeholder='R-like filter, e.g. age > 50 & status == "case"'
-            className="h-7 flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary placeholder:text-text-muted outline-none focus:ring-1 focus:ring-accent"
+            className="bioflow-field h-7 flex-1 rounded-md px-2 text-xs text-text-primary placeholder:text-text-muted outline-none"
           />
           <button
             onClick={() => {
@@ -226,7 +226,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
               if (!parsed) return
               setDraftFilters(filePath, parsed)
             }}
-            className="h-7 rounded-md border border-accent/40 bg-accent/10 px-2 text-[11px] text-accent"
+            className="h-7 rounded-md bg-accent/10 px-2 text-[11px] text-accent shadow-sm hover:bg-accent/15"
           >
             Set draft
           </button>
@@ -258,12 +258,12 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
             ))}
           </div>
         ) : (
-          <div className="rounded-md border border-border bg-bg-primary/60 px-2 py-1.5 text-[11px] text-text-muted">
+          <div className="rounded-md bg-bg-primary/60 px-2 py-1.5 text-[11px] text-text-muted shadow-inner">
             No filters active. Try expressions like <span className="font-mono text-text-secondary">age &gt; 50</span>, <span className="font-mono text-text-secondary">status equals case</span>, or combine rows with <span className="font-mono text-text-secondary">AND / OR</span>.
           </div>
         )}
 
-        <div className="border-t border-border-light pt-2">
+        <div className="pt-2">
           <div className="mb-1 flex items-center justify-between gap-2">
             <div>
               <div className="text-[10px] uppercase tracking-wide text-text-muted">Columns shown</div>
@@ -297,7 +297,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
                 headers.find((header) => header === columnDraft.trim()) ?? availableColumns[0] ?? '',
               )}
               disabled={availableColumns.length === 0}
-              className="h-8 rounded-md border border-border px-2 text-[11px] text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+              className="h-8 rounded-md bg-bg-tertiary px-2 text-[11px] text-text-primary shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
             >
               Add
             </button>
@@ -310,7 +310,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
                   const next = visible.filter((column) => column !== header)
                   setVisibleColumns(filePath, next.length > 0 ? next : [header])
                 }}
-                className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-text-primary"
+                className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-text-primary shadow-sm"
                 title={`Hide ${header}`}
               >
                 {header} ×
@@ -332,13 +332,13 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
         }}
       >
         <table className="w-full border-collapse text-left">
-          <thead className="sticky top-0 z-10 bg-bg-tertiary">
+          <thead className="sticky top-0 z-10 bg-bg-tertiary shadow-sm">
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
                   <th
                     key={header.id}
-                    className="border-b border-border px-3 py-1.5 font-mono text-xs font-medium text-text-secondary"
+                    className="px-3 py-1.5 font-mono text-xs font-medium text-text-secondary"
                     style={{ maxWidth: header.column.columnDef.maxSize }}
                   >
                     {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
@@ -362,7 +362,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
               return (
                 <tr
                   key={row.id}
-                  className={`border-b border-border/50 hover:bg-bg-hover ${isEven ? 'bg-bg-primary' : 'bg-bg-secondary'}`}
+                  className={`hover:bg-bg-hover ${isEven ? 'bg-bg-primary' : 'bg-bg-secondary'}`}
                   style={{ height: 28 }}
                 >
                   {row.getVisibleCells().map((cell) => (
@@ -392,7 +392,7 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
         </table>
       </div>
 
-      <div className="shrink-0 border-t border-border bg-bg-secondary px-3 py-1.5">
+      <div className="shrink-0 bg-bg-secondary px-3 py-1.5 shadow-sm">
         <span className="text-xs text-text-muted">
           {hasDraftChanges
             ? `Showing ${displayedRows.length} preview rows (${appliedRows.length} applied) · ${visibleIndexes.length} of ${headers.length} columns`
@@ -468,14 +468,14 @@ function FilterRuleRow({
   const active = rule.column && (op.needsValue === false || String(rule.value ?? '').trim() !== '')
 
   return (
-    <div className={`flex flex-wrap items-center gap-1 rounded-md border px-1 py-1 ${
-      active ? 'border-accent/40 bg-accent/10' : 'border-border bg-bg-primary/40'
+    <div className={`flex flex-wrap items-center gap-1 rounded-md px-1 py-1 shadow-sm ${
+      active ? 'bg-accent/10' : 'bg-bg-primary/40'
     }`}>
       {index > 0 && (
         <select
           value={rule.join ?? 'and'}
           onChange={(e) => onChange({ ...rule, join: e.target.value as 'and' | 'or' })}
-          className="h-7 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary outline-none focus:ring-1 focus:ring-accent"
+          className="bioflow-field h-7 rounded-md px-2 text-xs text-text-primary outline-none"
         >
           <option value="and">AND</option>
           <option value="or">OR</option>
@@ -502,7 +502,7 @@ function FilterRuleRow({
           const nextMeta = FILTER_OPS.find((candidate) => candidate.value === nextOp)
           onChange({ ...rule, op: nextOp, value: nextMeta?.needsValue === false ? undefined : (rule.value ?? '') })
         }}
-        className="h-7 min-w-[130px] flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary outline-none focus:ring-1 focus:ring-accent"
+        className="bioflow-field h-7 min-w-[130px] flex-1 rounded-md px-2 text-xs text-text-primary outline-none"
       >
         {FILTER_OPS.map((candidate) => <option key={candidate.value} value={candidate.value}>{candidate.label}</option>)}
       </select>
@@ -511,7 +511,7 @@ function FilterRuleRow({
           value={rule.value ?? ''}
           onChange={(e) => onChange({ ...rule, value: e.target.value })}
           placeholder="Value or regex"
-          className="h-7 min-w-[180px] flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary placeholder:text-text-muted outline-none focus:ring-1 focus:ring-accent"
+          className="bioflow-field h-7 min-w-[180px] flex-1 rounded-md px-2 text-xs text-text-primary placeholder:text-text-muted outline-none"
         />
       )}
       <button
@@ -600,10 +600,10 @@ function ColumnAutocompleteInput({
             applySuggestion(suggestion)
           }
         }}
-        className="h-7 w-full rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary placeholder:text-text-muted outline-none focus:ring-1 focus:ring-accent"
+        className="bioflow-field h-7 w-full rounded-md px-2 text-xs text-text-primary placeholder:text-text-muted outline-none"
       />
       {focused && suggestions.length > 0 && (
-        <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-44 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+        <div className="surface-popover absolute left-0 right-0 top-full z-30 mt-1 max-h-44 overflow-y-auto rounded-md py-1">
           {suggestions.map((column, index) => (
             <button
               key={column}

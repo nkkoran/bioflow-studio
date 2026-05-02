@@ -91,7 +91,7 @@ export function UkbFieldBuilder({ nodeId, value }: Props) {
             applyPreset(e.target.value)
             e.currentTarget.value = ''
           }}
-          className="h-8 flex-1 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+          className="bioflow-field h-8 flex-1 rounded-md px-2 text-sm text-text-primary outline-none"
         >
           <option value="">Load preset…</option>
           {presets.map((preset) => (
@@ -131,7 +131,7 @@ export function UkbFieldBuilder({ nodeId, value }: Props) {
             />
             <button
               type="button"
-              className="mt-auto h-8 w-8 rounded border border-border text-text-muted hover:text-error hover:border-error/40"
+              className="mt-auto h-8 w-8 rounded bg-bg-tertiary text-text-muted shadow-sm hover:bg-error/10 hover:text-error"
               onClick={() => setRows(rows.filter((_, rowIndex) => rowIndex !== index))}
               title="Remove field"
             >

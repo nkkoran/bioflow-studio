@@ -36,7 +36,19 @@ export interface FilePickMode {
   onResolve?: (result: FilePickResult) => void
 }
 
-export type SettingsSection = 'General' | 'Paths' | 'Tools' | 'DNAnexus' | 'Notifications' | 'Advanced'
+export type SettingsSection =
+  | 'General'
+  | 'Interface'
+  | 'Appearance'
+  | 'Privacy'
+  | 'Setup'
+  | 'Run Checks'
+  | 'Execution'
+  | 'Paths'
+  | 'Tools'
+  | 'DNAnexus'
+  | 'Notifications'
+  | 'Advanced'
 
 interface UIStore {
   sidebarWidth: number

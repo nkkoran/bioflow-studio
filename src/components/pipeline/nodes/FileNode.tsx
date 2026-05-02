@@ -53,9 +53,11 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
   return (
     <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg px-3 py-2 min-w-[180px] max-w-[320px] transition-all',
-        missing ? 'border-error ring-2 ring-error/20' : selected ? 'border-accent ring-2 ring-accent/30' : 'border-amber-500/40',
+        'animate-fade-up relative min-w-[180px] max-w-[320px] rounded-lg bg-bg-secondary/95 px-4 py-2 transition-all duration-150 ease-out',
+        selected && 'translate-y-[-2px]',
+        missing && 'ring-2 ring-error/35',
       )}
+      style={{ boxShadow: selected ? 'var(--shadow-node-selected)' : 'var(--shadow-node)' }}
     >
       <div className="flex items-center gap-2">
         <FileText size={14} className="text-amber-400 shrink-0" />
@@ -63,7 +65,7 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
             {nodeData.fileType} {isInput ? 'input' : 'output'}{isInput && nodeData.source === 'local' ? ' · local' : ''}
           </div>
-          <div className="text-xs font-semibold text-text-primary truncate">
+          <div className="bioflow-canvas-node-label truncate text-xs font-semibold text-text-primary">
             {nodeData.label}
           </div>
           {isInput && nodeData.path && (
@@ -112,7 +114,7 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           <button
             type="button"
             onClick={() => void wireFileNodeToCompatibleInputs(id)}
-            className="absolute right-3 top-2 rounded border border-border bg-bg-tertiary p-1 text-text-muted hover:text-text-primary"
+            className="absolute right-4 top-2 rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
             title="Wire this file to all compatible inputs on the canvas"
           >
             <Share2 size={12} />
@@ -121,11 +123,20 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
             type="source"
             position={Position.Right}
             id="output"
+            className="bioflow-port-handle"
+            data-port-node={id}
+            data-port-id="output"
+            data-port-type="source"
             style={{
-              right: -8,
-              width: 10,
-              height: 10,
-              background: '#f59e0b',
+              position: 'absolute',
+              left: 'auto',
+              right: -6,
+              top: 'calc(50% - 6px)',
+              width: 12,
+              height: 12,
+              borderRadius: '50%',
+              transform: 'none',
+              background: 'var(--color-warning)',
               border: '2px solid var(--color-bg-secondary)',
             }}
           />
@@ -140,11 +151,20 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           type="target"
           position={Position.Left}
           id="input"
+          className="bioflow-port-handle"
+          data-port-node={id}
+          data-port-id="input"
+          data-port-type="target"
           style={{
-            left: -8,
-            width: 10,
-            height: 10,
-            background: '#f59e0b',
+            position: 'absolute',
+            left: -6,
+            right: 'auto',
+            top: 'calc(50% - 6px)',
+            width: 12,
+            height: 12,
+            borderRadius: '50%',
+            transform: 'none',
+            background: 'var(--color-warning)',
             border: '2px solid var(--color-bg-secondary)',
           }}
         />

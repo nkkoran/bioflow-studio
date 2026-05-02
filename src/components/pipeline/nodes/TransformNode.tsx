@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { SlidersHorizontal, CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import { classNames } from '@/lib/utils'
 import type { ToolNodeData, TransformNodeData } from '@/types/pipeline'
+import { useSuccessAnimation } from './useSuccessAnimation'
 
 function StatusBadge({ status = 'idle' }: { status?: ToolNodeData['status'] }) {
   const map: Record<NonNullable<ToolNodeData['status']>, { icon: React.ReactNode; label: string; cls: string }> = {
@@ -15,31 +16,34 @@ function StatusBadge({ status = 'idle' }: { status?: ToolNodeData['status'] }) {
   }
   const { icon, label, cls } = map[status]
   return (
-    <span className={classNames('flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium', cls)}>
+    <span className={classNames('bioflow-status-badge flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium', cls)}>
       {icon}
       {label}
     </span>
   )
 }
 
-function TransformNodeInner({ data, selected }: NodeProps) {
+function TransformNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as TransformNodeData
+  const successAnimating = useSuccessAnimation(nodeData.status)
   const filterCount = nodeData.filters?.length ?? 0
   const columnCount = nodeData.selectedColumns?.length ?? 0
 
   return (
     <div
       className={classNames(
-        'bg-bg-secondary border-2 rounded-md shadow-lg min-w-[200px] transition-all',
-        selected ? 'border-accent ring-2 ring-accent/30' : 'border-teal-500/40',
+        'animate-fade-up relative min-w-[200px] rounded-lg bg-bg-secondary/95 transition-all duration-150 ease-out',
+        selected && 'translate-y-[-2px]',
+        successAnimating && 'animate-success',
       )}
+      style={{ boxShadow: selected ? 'var(--shadow-node-selected)' : 'var(--shadow-node)' }}
     >
-      <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
+      <div className="px-3 py-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <SlidersHorizontal size={14} className="text-teal-400 shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="text-[10px] uppercase tracking-wide text-text-muted">transform</div>
-            <div className="text-xs font-semibold text-text-primary truncate">{nodeData.label}</div>
+            <div className="bioflow-canvas-node-label truncate text-xs font-semibold text-text-primary">{nodeData.label}</div>
           </div>
         </div>
         <StatusBadge status={nodeData.status} />
@@ -54,12 +58,19 @@ function TransformNodeInner({ data, selected }: NodeProps) {
         type="target"
         position={Position.Left}
         id="input"
+        className="bioflow-port-handle"
+        data-port-node={id}
+        data-port-id="input"
+        data-port-type="target"
         style={{
-          left: -8,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          width: 10,
-          height: 10,
+          position: 'absolute',
+          left: -6,
+          right: 'auto',
+          top: 'calc(50% - 6px)',
+          width: 12,
+          height: 12,
+          borderRadius: '50%',
+          transform: 'none',
           background: 'var(--color-accent)',
           border: '2px solid var(--color-bg-secondary)',
         }}
@@ -68,24 +79,31 @@ function TransformNodeInner({ data, selected }: NodeProps) {
         type="source"
         position={Position.Right}
         id="output"
+        className="bioflow-port-handle"
+        data-port-node={id}
+        data-port-id="output"
+        data-port-type="source"
         style={{
-          right: -8,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          width: 10,
-          height: 10,
-          background: 'var(--color-success, #10b981)',
+          position: 'absolute',
+          left: 'auto',
+          right: -6,
+          top: 'calc(50% - 6px)',
+          width: 12,
+          height: 12,
+          borderRadius: '50%',
+          transform: 'none',
+          background: 'var(--color-success)',
           border: '2px solid var(--color-bg-secondary)',
         }}
       />
 
       {nodeData.error && (
-        <div className="px-3 py-1.5 border-t border-error/20 bg-error/5 text-[10px] text-error truncate">
+        <div className="px-3 py-1.5 bg-error/10 text-[10px] text-error truncate">
           {nodeData.error}
         </div>
       )}
       {nodeData.jobId && (
-        <div className="px-3 py-1 border-t border-border text-[10px] text-text-muted font-mono">
+        <div className="px-3 py-1 text-[10px] text-text-muted font-mono">
           job: {nodeData.jobId}
         </div>
       )}

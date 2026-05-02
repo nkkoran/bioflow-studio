@@ -57,30 +57,41 @@ export async function headFile(filePath: string, lines: number): Promise<string>
   const { activeConnectionId } = useConnectionStore.getState()
   if (!activeConnectionId) throw new Error('Not connected')
 
-  if (activeConnectionId === LOCAL_CONNECTION_ID) {
+  return headFileForConnection(activeConnectionId, filePath, lines)
+}
+
+export async function headFileForConnection(connectionId: string, filePath: string, lines: number): Promise<string> {
+  if (connectionId === LOCAL_CONNECTION_ID) {
     return window.api.local.head(filePath, lines)
-  } else {
-    return window.api.sftp.head(activeConnectionId, filePath, lines)
   }
+  return window.api.sftp.head(connectionId, filePath, lines)
 }
 
 export async function statFile(filePath: string): Promise<{ size: number; modified: number; isDirectory: boolean; permissions: string }> {
   const { activeConnectionId } = useConnectionStore.getState()
   if (!activeConnectionId) throw new Error('Not connected')
 
-  return activeConnectionId === LOCAL_CONNECTION_ID
+  return statFileForConnection(activeConnectionId, filePath)
+}
+
+export async function statFileForConnection(connectionId: string, filePath: string): Promise<{ size: number; modified: number; isDirectory: boolean; permissions: string }> {
+  return connectionId === LOCAL_CONNECTION_ID
     ? window.api.local.stat(filePath)
-    : window.api.sftp.stat(activeConnectionId, filePath)
+    : window.api.sftp.stat(connectionId, filePath)
 }
 
 export async function headPreviewFile(filePath: string, lines: number): Promise<string> {
   const { activeConnectionId } = useConnectionStore.getState()
   if (!activeConnectionId) throw new Error('Not connected')
 
-  if (!filePath.toLowerCase().endsWith('.gz')) return headFile(filePath, lines)
-  if (activeConnectionId === LOCAL_CONNECTION_ID) return window.api.local.headGzip(filePath, lines)
+  return headPreviewFileForConnection(activeConnectionId, filePath, lines)
+}
+
+export async function headPreviewFileForConnection(connectionId: string, filePath: string, lines: number): Promise<string> {
+  if (!filePath.toLowerCase().endsWith('.gz')) return headFileForConnection(connectionId, filePath, lines)
+  if (connectionId === LOCAL_CONNECTION_ID) return window.api.local.headGzip(filePath, lines)
   const command = `gzip -cd -- ${shellQuote(filePath)} 2>/dev/null | head -n ${Math.max(1, Math.floor(lines))}`
-  const result = await window.api.ssh.exec(activeConnectionId, command)
+  const result = await window.api.ssh.exec(connectionId, command)
   if (result.exitCode !== 0 && !result.stdout) {
     throw new Error((result.stderr || `gzip preview failed with exit ${result.exitCode}`).trim())
   }

@@ -61,7 +61,7 @@ export function NodeRunList({ run }: Props) {
   }, [selectedNodeId, rows, setSelectedNode])
 
   return (
-    <div className="py-1">
+    <div className="px-2 py-1">
       {rows.map((ns) => {
         const NodeIcon = iconFor(ns.nodeId)
         const label = labelFor(ns.nodeId)
@@ -76,10 +76,10 @@ export function NodeRunList({ run }: Props) {
             ns.outputDir ? `outputs ${ns.outputDir}` : null,
             ns.error ? `error ${ns.error}` : null,
           ].filter(Boolean).join('\n')}
-          className={`w-full text-left px-3 py-2 flex items-center gap-2 text-xs border-l-2 transition-colors ${
+          className={`mb-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs transition-all duration-150 ${
             selectedNodeId === ns.nodeId
-              ? 'bg-bg-hover border-accent'
-              : 'border-transparent hover:bg-bg-hover'
+              ? 'bg-bg-hover shadow-sm ring-1 ring-accent/30'
+              : 'hover:bg-bg-hover hover:shadow-sm'
           }`}
         >
           <StatusIcon status={ns.status} />

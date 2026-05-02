@@ -72,16 +72,16 @@ export function DatasetGuideDialog({
   }
 
   return (
-    <Dialog open={open} onClose={onClose} title={guide.title} width="max-w-2xl">
+    <Dialog open={open} onClose={onClose} title={guide.title}>
       <div className="flex flex-col gap-3 text-sm">
         <p className="text-text-secondary">{guide.summary}</p>
-        <div className="rounded border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-secondary">
+        <div className="rounded bg-bg-tertiary px-3 py-2 text-xs text-text-secondary shadow-inner">
           <div><span className="text-text-muted">Expected disk: </span>{guide.disk}</div>
           <div className="mt-1"><span className="text-text-muted">Set on node: </span>{guide.pathHint}</div>
         </div>
         {guide.commands.map((entry) => (
-          <div key={entry.label} className="rounded border border-border bg-bg-primary">
-            <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
+          <div key={entry.label} className="rounded bg-bg-primary shadow-inner">
+            <div className="flex items-center justify-between px-3 py-1.5 shadow-sm">
               <span className="text-xs font-medium text-text-primary">{entry.label}</span>
               <Button
                 variant="secondary"

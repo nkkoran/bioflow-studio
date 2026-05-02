@@ -236,7 +236,6 @@ export function QuickExtractButton() {
         open={open}
         onClose={close}
         title="Quick UKB Extract"
-        width="max-w-3xl"
         footer={(
           <>
             <Button variant="secondary" onClick={close}>Cancel</Button>
@@ -348,7 +347,11 @@ export function QuickExtractButton() {
             </div>
             <Input label="Output filename" value={outputName} onChange={(event) => setOutputName(event.target.value)} />
             <Input label="DNAnexus output folder" value={outputFolder} onChange={(event) => setOutputFolder(event.target.value)} />
-            <div>
+          </div>
+
+          <details className="rounded-md bg-bg-tertiary px-3 py-2 text-xs text-text-secondary shadow-sm">
+            <summary className="cursor-pointer select-none text-text-primary">Advanced DNAnexus runtime</summary>
+            <div className="mt-3">
               <label className="mb-1 block text-xs font-medium text-text-secondary">Spark instance</label>
               <select
                 value={instanceType}
@@ -362,7 +365,7 @@ export function QuickExtractButton() {
                 ))}
               </select>
             </div>
-          </div>
+          </details>
 
           {error && (
             <div className="rounded-md border border-error/40 bg-error/10 px-3 py-2 text-xs text-error">
@@ -386,10 +389,6 @@ export function QuickExtractButton() {
               )}
             </div>
           )}
-
-          <p className="text-[11px] text-text-muted">
-            Quick Extract submits the same DNAnexus pipeline node through the normal runner, so progress, logs, and outputs land in the Jobs panel like any other run.
-          </p>
         </div>
       </Dialog>
     </>

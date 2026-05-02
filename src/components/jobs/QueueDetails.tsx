@@ -44,7 +44,7 @@ export function QueueDetails({ run, connectionId }: Props) {
   }, [connectionId, refreshQueue, snapshot.error])
 
   return (
-    <div className="border-b border-border-light bg-bg-secondary/50 shrink-0">
+    <div className="bg-bg-secondary/50 shrink-0 shadow-sm">
       <div className="flex items-center gap-2 px-3 py-1.5">
         <div className="min-w-0 flex-1">
           <div className="text-[10px] uppercase tracking-wide text-text-muted">Slurm queue</div>
@@ -76,13 +76,13 @@ export function QueueDetails({ run, connectionId }: Props) {
       </div>
 
       {rows.length > 0 && (
-        <div className="max-h-24 overflow-y-auto border-t border-border-light">
+        <div className="max-h-24 overflow-y-auto">
           <table className="w-full text-[10px] font-mono">
             <tbody>
               {rows.map((entry) => (
                 <tr
                   key={entry.jobId}
-                  className={`border-b border-border-light last:border-b-0 ${entry.isOurs ? 'bg-accent/5' : ''}`}
+                  className={entry.isOurs ? 'bg-accent/5' : 'hover:bg-bg-hover'}
                 >
                   <td className={`px-3 py-1 whitespace-nowrap ${entry.isOurs ? 'text-accent' : 'text-text-primary'}`}>
                     {entry.jobId}

@@ -21,11 +21,11 @@ export function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
   return (
     <div
       ref={scrollRef}
-      className="flex items-center gap-0.5 overflow-x-auto px-3 py-1.5 font-mono text-xs scrollbar-none"
+      className="flex min-w-0 items-center gap-0.5 overflow-x-auto px-3 py-1.5 font-mono text-xs scrollbar-none"
     >
       <button
         onClick={() => onNavigate('/')}
-        className="flex shrink-0 items-center gap-1 text-text-muted transition-colors hover:text-accent"
+        className="flex shrink-0 items-center gap-1 text-nowrap text-text-muted transition-colors hover:text-accent"
       >
         <FolderOpen className="h-3.5 w-3.5" />
         <span>/</span>
@@ -42,8 +42,8 @@ export function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
               onClick={() => onNavigate(segmentPath)}
               className={
                 isLast
-                  ? 'shrink-0 text-text-primary'
-                  : 'shrink-0 text-text-muted transition-colors hover:text-accent'
+                  ? 'shrink-0 text-nowrap text-text-primary'
+                  : 'shrink-0 text-nowrap text-text-muted transition-colors hover:text-accent'
               }
             >
               {segment}

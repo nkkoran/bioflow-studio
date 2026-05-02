@@ -111,7 +111,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
         >
           <span className="relative flex items-center shrink-0">
             <span
-              className={`w-2 h-2 rounded-full ${dotColor} ${isAnimated ? 'animate-pulse' : ''}`}
+              className={`w-2 h-2 rounded-full ${dotColor} ${isAnimated ? 'animate-fade-in' : ''}`}
             />
           </span>
 
@@ -183,8 +183,8 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
 
         {/* Dropdown when connected */}
         {dropdownOpen && status === 'connected' && activeEntry && (
-          <div className="absolute right-0 top-full mt-1 w-72 bg-bg-secondary border border-border rounded-lg shadow-lg z-50">
-            <div className="px-4 py-3 border-b border-border">
+          <div className="surface-popover animate-fade-up absolute right-0 top-full mt-1 w-72 rounded-lg z-50">
+            <div className="px-4 py-3">
               <div className="flex items-center gap-2 text-sm font-medium text-text-primary">
                 <Wifi size={14} className="text-success" />
                 {activeEntry.config.name}
@@ -208,7 +208,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
                 </div>
               )}
               {!isLocal && (
-                <div className="mt-2 rounded border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+                <div className="mt-2 rounded bg-warning/10 px-2 py-1.5 text-[11px] text-warning shadow-sm">
                   Keep heavy work on Slurm. Login-node actions are for setup, downloads, and quick checks only.
                 </div>
               )}
@@ -348,7 +348,7 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
   }
 
   return (
-    <div className="px-3 py-2 flex flex-col gap-2 border border-border rounded bg-bg-tertiary/40">
+    <div className="px-3 py-2 flex flex-col gap-2 rounded bg-bg-tertiary/70 shadow-sm">
       <div className="flex flex-col gap-1">
         <label className="text-text-secondary text-xs font-medium">Slurm account</label>
         <div className="flex items-center gap-1.5">
@@ -419,7 +419,7 @@ function SlurmSettings({ connectionId }: { connectionId: string }) {
           Save
         </Button>
         {saveMsg && (
-          <span className="text-[10px] text-accent animate-pulse">{saveMsg}</span>
+          <span className="text-[10px] text-accent animate-fade-in">{saveMsg}</span>
         )}
       </div>
       <p className="text-[10px] text-text-muted leading-relaxed">

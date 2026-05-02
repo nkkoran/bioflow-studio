@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { useTerminalStore } from '@/stores/terminalStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { Tabs } from '@/components/ui/Tabs'
 import { Button } from '@/components/ui/Button'
 import { TerminalTab } from './TerminalTab'
@@ -16,7 +16,7 @@ export function TerminalPanel() {
   const isLocal = activeEntry?.isLocal ?? false
 
   const handleNewTerminal = useCallback(async () => {
-    if (!activeConnectionId) return
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
     try {
       const result = await window.api.terminal.create(activeConnectionId)
       addTab(result, `Terminal ${tabs.length + 1}`)
@@ -81,6 +81,7 @@ export function TerminalPanel() {
           <button
             className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
             onClick={handleNewTerminal}
+            disabled={!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
             title="New Terminal"
           >
             <Plus size={14} />

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, ChevronUp, Clock3, Copy, Download, FilePlus2, Home, Loader2, MoveRight, RefreshCw, Star, EyeOff, PanelsLeftRight, Upload } from 'lucide-react'
+import { Clock3, EyeOff, FolderPlus, Grid2X2, List, PanelsLeftRight, RefreshCw, Star } from 'lucide-react'
 
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
@@ -7,7 +7,6 @@ import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStor
 import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useDialogStore } from '@/stores/dialogStore'
-import { usePipelineStore } from '@/stores/pipelineStore'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { collapseHomePath, expandHomePath, pathDirname } from '@/lib/remotePath'
 import { classNames } from '@/lib/utils'
@@ -15,7 +14,7 @@ import type { RemoteFileEntry } from '@/types'
 import { RemotePathInput } from './RemotePathInput'
 import type { FileOrigin } from '@/constants/connections'
 import { SplitFileTransferDialog } from '@/components/file-explorer/SplitFileTransferDialog'
-import { getFileIcon } from '@/components/file-explorer/fileIconMap'
+import { FileGlyph } from '@/components/file-explorer/FileGlyph'
 
 const RECENTS_KEY = 'fileBrowser:recents:v1'
 const FAVORITES_KEY = 'fileBrowser:favorites:v1'
@@ -61,10 +60,10 @@ export function RemoteFileBrowser({
   const devMode = useSettingsStore((s) => s.devMode)
   const fileExplorerViewMode = useSettingsStore((s) => s.settings.fileExplorerViewMode)
   const splitExplorerBasePane = useSettingsStore((s) => s.settings.splitExplorerBasePane)
+  const setSetting = useSettingsStore((s) => s.setSetting)
   const refreshDnxProjects = useDnxStore((s) => s.refreshProjects)
   const confirmDialog = useDialogStore((s) => s.confirm)
   const promptDialog = useDialogStore((s) => s.prompt)
-  const addFileNode = usePipelineStore((s) => s.addFileNode)
   const [cwd, setCwd] = useState(initialPath ?? '')
   const [origin, setOrigin] = useState<FileOrigin>('local')
   const [homeDir, setHomeDir] = useState<string | null>(null)
@@ -149,7 +148,12 @@ export function RemoteFileBrowser({
 
   useEffect(() => {
     if (!open || !cwd) return
-    if (origin === 'ssh' && !activeConnectionId) return
+    if (origin === 'ssh' && (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID)) {
+      setEntries([])
+      setLoading(false)
+      setError('Connect to SSH before browsing remote files.')
+      return
+    }
     if (origin === 'dnx' && !dnxDefaultProjectId) return
     const path = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, homeDir)
     let cancelled = false
@@ -211,9 +215,8 @@ export function RemoteFileBrowser({
     .sort((a, b) => {
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
       return a.name.localeCompare(b.name, undefined, { numeric: true })
-    }), [accept, entries, hideDotfiles, typeFilter])
+  }), [accept, entries, hideDotfiles, typeFilter])
   const selectedEntry = useMemo(() => entries.find((entry) => selected.includes(entry.path)) ?? null, [entries, selected])
-  const selectedEntries = useMemo(() => selected.map((path) => entries.find((entry) => entry.path === path)).filter((entry): entry is RemoteFileEntry => Boolean(entry)), [entries, selected])
 
   const navigateTo = (nextPath: string, opts: { pushHistory?: boolean } = {}) => {
     const normalized = origin === 'dnx'
@@ -316,13 +319,14 @@ export function RemoteFileBrowser({
     if (origin === 'local') return 'Local'
     return 'Rorqual (SSH)'
   }, [dnxAvailableProjects, dnxDefaultProjectId, origin])
+  const canMultiSelect = mode === 'multi-file'
 
   const selectEntry = (entry: RemoteFileEntry) => {
     if (entry.isDirectory) {
       setSelected([entry.path])
       return
     }
-    if (mode === 'multi-file') {
+    if (canMultiSelect) {
       setSelected((prev) => prev.includes(entry.path) ? prev.filter((path) => path !== entry.path) : [...prev, entry.path])
     } else {
       setSelected([entry.path])
@@ -436,81 +440,56 @@ export function RemoteFileBrowser({
     }
   }
 
-  const addSelectionToCanvas = () => {
-    const candidates = selectedEntries.length > 0
-      ? selectedEntries
-      : mode === 'directory'
-        ? [{ name: cwd.split('/').filter(Boolean).pop() || cwd || 'Folder', path: normalizeSelectedPath(cwd, origin, homeDir), isDirectory: true, size: 0, modified: Date.now(), permissions: '', extension: '' } as RemoteFileEntry]
-        : []
-    if (candidates.length === 0) {
-      setActionMessage('Select a file or folder first.')
-      return
+  const createFolderInCurrent = async () => {
+    if (origin === 'dnx' || actionBusy) return
+    const basePath = normalizeSelectedPath(cwd, origin, homeDir).replace(/\/+$/, '')
+    const next = await promptDialog({
+      title: 'New folder',
+      message: 'Choose the folder path.',
+      defaultValue: `${basePath}/new-folder`,
+      confirmLabel: 'Create',
+    })
+    if (!next?.trim()) return
+    setActionBusy(true)
+    setActionMessage(null)
+    try {
+      if (origin === 'local') await window.api.local.mkdir(next.trim())
+      else if (activeConnectionId) await window.api.sftp.mkdir(activeConnectionId, next.trim())
+      setActionMessage('Folder created')
+      refreshCurrentFolder()
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setActionBusy(false)
     }
-    const nodeOrigin = origin === 'dnx' ? 'dnx' : origin
-    const source = nodeOrigin === 'local' ? 'local' : 'remote'
-    const offset = Date.now() % 96
-    if (candidates.length === 1) {
-      const entry = candidates[0]
-      addFileNode(
-        { x: 120 + offset, y: 160 + offset },
-        {
-          isInput: true,
-          label: entry.name,
-          path: normalizeSelectedPath(entry.path, origin, homeDir),
-          fileType: entry.isDirectory ? 'any' : inferFileType(entry.name),
-          source,
-          origin: nodeOrigin,
-        },
-      )
-      setActionMessage(`Added ${entry.name} to the canvas`)
-      return
-    }
-    const items = candidates.map((entry) => ({ key: entry.name, path: normalizeSelectedPath(entry.path, origin, homeDir) }))
-    addFileNode(
-      { x: 120 + offset, y: 160 + offset },
-      {
-        isInput: true,
-        label: `${items.length} selected paths`,
-        path: '',
-        fileType: 'any',
-        source,
-        origin: nodeOrigin,
-        split: { axis: 'file', items, pattern: { kind: 'manual' } },
-      },
-    )
-    setActionMessage(`Added ${items.length} selected paths as a split input`)
   }
 
-  const footer = (
-    browseOnly ? (
-      <Button variant="secondary" onClick={onClose}>Close</Button>
-    ) : (
-      <>
-        <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        <Button
-          variant="primary"
-          onClick={async () => {
-            const picked = mode === 'directory'
-              ? [selected[0] ? normalizeSelectedPath(selected[0], origin, homeDir) : normalizeSelectedPath(cwd, origin, homeDir)]
-              : selected.length > 0 ? selected : []
-            if (picked.length === 0) return
-            const nextRecents = [...new Set([...picked, ...recents])].slice(0, 12)
-            await window.api.store.set(RECENTS_KEY, nextRecents)
-            onSelect(picked, origin)
-            onClose()
-          }}
-          disabled={(mode !== 'directory' && selected.length === 0) || (mode === 'directory' && !cwd)}
-        >
-          Select
-        </Button>
-      </>
-    )
-  )
+  const confirmSelection = async () => {
+    const picked = mode === 'directory'
+      ? [selected[0] ? normalizeSelectedPath(selected[0], origin, homeDir) : normalizeSelectedPath(cwd, origin, homeDir)]
+      : selected.length > 0 ? selected.map((path) => normalizeSelectedPath(path, origin, homeDir)) : []
+    if (browseOnly || picked.length === 0) {
+      onClose()
+      return
+    }
+    const nextRecents = [...new Set([...picked, ...recents])].slice(0, 12)
+    await window.api.store.set(RECENTS_KEY, nextRecents)
+    onSelect(picked, origin)
+    onClose()
+  }
+
+  const canSelect = mode === 'directory' ? Boolean(cwd) : selected.length > 0
 
   return (
-    <Dialog open={open} onClose={onClose} title={title} width="max-w-4xl" footer={footer}>
-      <div className="grid min-h-[420px] grid-cols-[180px_1fr] gap-4">
-        <div className="border-r border-border pr-3">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={title}
+      className="bioflow-file-browser-dialog"
+      bodyClassName="bioflow-file-browser-body"
+    >
+      <div className="bioflow-file-browser-grid">
+        <aside className="bioflow-file-browser-sidebar p-3">
           <div className="mb-3 flex flex-col gap-1">
             {([
               { key: 'local', label: 'Local', disabled: false },
@@ -571,175 +550,88 @@ export function RemoteFileBrowser({
               )) : <div className="px-2 text-[11px] text-text-muted">No recent picks yet.</div>}
             </div>
           </div>
-        </div>
+        </aside>
 
-        <div className="flex min-w-0 flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goBack} disabled={backStack.length === 0}>
-              <ChevronLeft size={12} />
-            </Button>
-            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goForward} disabled={forwardStack.length === 0}>
-              <ChevronRight size={12} />
-            </Button>
-            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goUp}>
-              <ChevronUp size={12} />
-            </Button>
-            <Button variant="secondary" size="sm" className="h-8 px-2" onClick={goHome} disabled={origin !== 'dnx' && !homeDir}>
-              <Home size={12} />
-            </Button>
-            <RemotePathInput
-              value={cwd}
-              onChange={setCwd}
-              placeholder={origin === 'dnx' ? '/folder/on/project' : '~/project/data'}
-              mode="directory"
-              minPrefixChars={2}
-              origin={origin}
-              projectId={dnxDefaultProjectId}
-              className="flex-1"
-            />
-            <Button
-              variant="secondary"
-              size="sm"
-              className="h-8 px-2"
-              title={favoritePaths.includes(normalizeSelectedPath(cwd, origin, homeDir)) ? 'Remove current folder from favorites' : 'Add current folder to favorites'}
-              disabled={!cwd}
-              onClick={() => void toggleFavorite(normalizeSelectedPath(cwd, origin, homeDir))}
-            >
-              <Star size={12} className={favoritePaths.includes(normalizeSelectedPath(cwd, origin, homeDir)) ? 'fill-current' : ''} />
-            </Button>
-            <Button variant="secondary" size="sm" onClick={refreshCurrentFolder}>
-              <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-            </Button>
-            {origin === 'ssh' && (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="h-8 px-2"
-                title="Upload a local file here"
-                disabled={actionBusy}
-                onClick={() => void uploadToCurrentFolder()}
-              >
-                <Upload size={12} className={actionBusy ? 'animate-pulse' : ''} />
-              </Button>
-            )}
-            {selectedEntry && origin === 'ssh' && !selectedEntry.isDirectory && (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="h-8 px-2"
-                title="Download selected file"
-                disabled={actionBusy}
-                onClick={() => void downloadSelected()}
-              >
-                <Download size={12} />
-              </Button>
-            )}
-            {selectedEntry && origin !== 'dnx' && (
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-8 px-2"
-                  title="Copy selected path"
-                  disabled={actionBusy}
-                  onClick={() => void copySelected()}
-                >
-                  <Copy size={12} />
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-8 px-2"
-                  title="Move or rename selected path"
-                  disabled={actionBusy}
-                  onClick={() => void moveSelected()}
-                >
-                  <MoveRight size={12} />
-                </Button>
-              </>
-            )}
-            <Button
-              variant="secondary"
-              size="sm"
-              className="h-8 px-2 text-[11px]"
-              title="Add selected path to the canvas"
-              onClick={addSelectionToCanvas}
-            >
-              <FilePlus2 size={12} className="mr-1" />
-              Add to canvas
-            </Button>
+        <>
+          <header className="bioflow-file-browser-header">
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <div className="flex min-w-0 items-center gap-1 text-xs text-text-secondary">
+                {breadcrumbs.map((crumb, index) => (
+                  <button
+                    key={`${crumb.path}-${index}`}
+                    type="button"
+                    className="text-nowrap min-w-0 max-w-[12rem] rounded px-1.5 py-1 hover:bg-bg-hover hover:text-text-primary"
+                    onClick={() => navigateTo(crumb.path)}
+                    title={crumb.path}
+                  >
+                    {crumb.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             {showTransfer && (
               <Button
                 variant="secondary"
                 size="sm"
-                className="h-8 px-2"
-                title="Open split transfer view"
+                className="h-7 shrink-0 gap-1.5 px-2"
+                title="Open two-pane file explorer"
                 onClick={() => setSplitOpen(true)}
               >
-                <PanelsLeftRight size={12} />
+                <PanelsLeftRight size={14} />
+                <span className="text-nowrap text-xs">Split</span>
               </Button>
             )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-bg-tertiary/30 px-2 py-1 text-[11px] text-text-muted">
-            {breadcrumbs.map((crumb, index) => (
-              <button
-                key={`${crumb.path}-${index}`}
-                type="button"
-                className="truncate rounded px-1 py-0.5 hover:bg-bg-hover hover:text-text-primary"
-                onClick={() => navigateTo(crumb.path)}
-              >
-                {crumb.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            {(['all', 'tabular', 'variants', 'plink'] as const).map((option) => (
-              <button
-                key={option}
-                type="button"
-                onClick={() => setTypeFilter(option)}
-                className={`rounded border px-2 py-0.5 ${
-                  typeFilter === option ? 'border-accent/50 bg-accent/10 text-text-primary' : 'border-border text-text-muted'
-                }`}
-              >
-                {option}
-              </button>
-            ))}
-            <button
-              type="button"
-              onClick={() => setHideDotfiles((prev) => !prev)}
-              className="ml-auto inline-flex items-center gap-1 text-text-muted hover:text-text-primary"
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 min-w-7 px-0"
+              title={fileExplorerViewMode === 'icons' ? 'Show list view' : 'Show icon grid'}
+              onClick={() => void setSetting('settings:fileExplorerViewMode', fileExplorerViewMode === 'icons' ? 'list' : 'icons')}
             >
-              <EyeOff size={11} />
-              {hideDotfiles ? 'Show dotfiles' : 'Hide dotfiles'}
-            </button>
-          </div>
+              {fileExplorerViewMode === 'icons' ? <List size={14} /> : <Grid2X2 size={14} />}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 min-w-7 px-0"
+              title="New folder"
+              disabled={origin === 'dnx' || actionBusy}
+              onClick={() => void createFolderInCurrent()}
+            >
+              <FolderPlus size={14} />
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 min-w-7 px-0"
+              title="Refresh"
+              onClick={refreshCurrentFolder}
+            >
+              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            </Button>
+          </header>
 
-          {actionMessage && (
-            <div className="rounded border border-border bg-bg-secondary px-3 py-1.5 text-[11px] text-text-secondary">
-              {actionMessage}
-            </div>
-          )}
-
-          <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
+          <main className="bioflow-file-browser-list">
+            {actionMessage && (
+              <div className="animate-fade-up mx-3 mt-3 rounded-md bg-bg-secondary px-3 py-1.5 text-[11px] text-text-secondary shadow-sm">
+                {actionMessage}
+              </div>
+            )}
             {error ? (
               <div className="p-3 text-xs text-error">{error}</div>
             ) : (
-              <div className="h-full overflow-y-auto">
+              <div>
                 {loading && (
-                  <div className="flex items-center gap-2 p-3 text-xs text-text-muted">
-                    <Loader2 size={12} className="animate-spin" />
-                    Loading files…
+                  <div className="flex flex-col gap-2 p-3">
+                    <div className="animate-shimmer h-8 rounded-md" />
+                    <div className="animate-shimmer h-8 rounded-md" />
+                    <div className="animate-shimmer h-8 rounded-md" />
                   </div>
                 )}
                 {fileExplorerViewMode === 'icons' ? (
                   <div className="grid grid-cols-[repeat(auto-fill,96px)] justify-start gap-x-3 gap-y-4 p-3">
                     {visibleEntries.map((entry) => {
                       const selectedHere = selected.includes(entry.path)
-                      const iconDef = getFileIcon(entry.extension, entry.isDirectory)
-                      const Icon = iconDef.icon
                       return (
                         <div key={entry.path} className="relative h-[112px] w-24">
                           <button
@@ -754,12 +646,7 @@ export function RemoteFileBrowser({
                             )}
                             title={entry.path}
                           >
-                            <span className={classNames(
-                              'flex h-12 w-12 items-center justify-center rounded-xl',
-                              selectedHere ? 'bg-accent/20' : 'bg-bg-tertiary',
-                            )}>
-                              <Icon size={28} className={iconDef.color} />
-                            </span>
+                            <FileGlyph entry={entry} size="grid" selected={selectedHere} />
                             <span
                               className="w-full overflow-hidden break-words text-[11px] leading-4"
                               style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }}
@@ -768,50 +655,30 @@ export function RemoteFileBrowser({
                             </span>
                             <span className="text-[10px] text-text-muted">{entry.isDirectory ? 'folder' : inferFileType(entry.name)}</span>
                           </button>
-                          {entry.isDirectory && (
-                            <button
-                              type="button"
-                              className={`absolute right-1 top-1 rounded p-1 ${favoritePaths.includes(entry.path) ? 'text-amber-300' : 'text-text-muted hover:text-amber-300'}`}
-                              title={favoritePaths.includes(entry.path) ? 'Remove from favorites' : 'Add to favorites'}
-                              onClick={() => void toggleFavorite(entry.path)}
-                            >
-                              <Star size={11} className={favoritePaths.includes(entry.path) ? 'fill-current' : ''} />
-                            </button>
-                          )}
                         </div>
                       )
                     })}
                   </div>
                 ) : visibleEntries.map((entry) => {
                   const selectedHere = selected.includes(entry.path)
-                  const iconDef = getFileIcon(entry.extension, entry.isDirectory)
-                  const Icon = iconDef.icon
                   return (
-                    <div key={entry.path} className="relative border-b border-border/50">
+                    <div key={entry.path} className="relative">
                       <button
                         type="button"
                         onClick={() => selectEntry(entry)}
                         onDoubleClick={() => activateEntry(entry)}
-                        className={`flex w-full items-center gap-2 px-3 py-2 pr-16 text-left text-xs ${
-                          selectedHere ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-                        }`}
+                        className={classNames(
+                          'bioflow-file-browser-row w-full text-left text-xs',
+                          selectedHere ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+                        )}
+                        title={entry.path}
                       >
-                        <Icon size={14} className={iconDef.color} />
-                        <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-                        <span className="shrink-0 text-[10px] text-text-muted">
+                        <FileGlyph entry={entry} size="row" selected={selectedHere} />
+                        <span className="text-nowrap min-w-0 flex-1">{entry.name}</span>
+                        <span className="bioflow-badge text-nowrap w-12 shrink-0 text-right text-[10px] text-text-muted">
                           {entry.isDirectory ? 'folder' : inferFileType(entry.name)}
                         </span>
                       </button>
-                      {entry.isDirectory && (
-                        <button
-                          type="button"
-                          className={`absolute right-8 top-1/2 -translate-y-1/2 rounded p-1 ${favoritePaths.includes(entry.path) ? 'text-amber-300' : 'text-text-muted hover:text-amber-300'}`}
-                          title={favoritePaths.includes(entry.path) ? 'Remove from favorites' : 'Add to favorites'}
-                          onClick={() => void toggleFavorite(entry.path)}
-                        >
-                          <Star size={11} className={favoritePaths.includes(entry.path) ? 'fill-current' : ''} />
-                        </button>
-                      )}
                     </div>
                   )
                 })}
@@ -820,16 +687,42 @@ export function RemoteFileBrowser({
                 )}
               </div>
             )}
-          </div>
+          </main>
 
-          <div className="rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-muted">
-            {mode === 'directory'
-              ? `Current ${originLabel} folder: ${cwd || (homeDir ? collapseHomePath(homeDir, homeDir) : '/')}`
-              : selected.length > 0
-                ? selected.map((path) => collapseHomePath(path, homeDir)).join(', ')
-                : 'Select a file to continue.'}
-          </div>
-        </div>
+          <footer className="bioflow-file-browser-footer">
+            <div className="flex min-w-0 flex-1 items-center gap-1">
+              {(['all', 'tabular', 'variants', 'plink'] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setTypeFilter(option)}
+                  className={classNames(
+                    'interactive-row h-7 px-2 text-[11px]',
+                    typeFilter === option ? 'bg-accent/10 text-text-primary' : 'text-text-muted',
+                  )}
+                >
+                  <span className="text-nowrap">{option}</span>
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setHideDotfiles((prev) => !prev)}
+                className="interactive-row flex h-7 items-center gap-1 px-2 text-[11px] text-text-muted"
+              >
+                <EyeOff size={11} />
+                <span className="text-nowrap">{hideDotfiles ? 'Dotfiles off' : 'Dotfiles on'}</span>
+              </button>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button variant="ghost" onClick={onClose}>{browseOnly ? 'Close' : 'Cancel'}</Button>
+              {!browseOnly && (
+                <Button variant="primary" onClick={() => void confirmSelection()} disabled={!canSelect}>
+                  Select
+                </Button>
+              )}
+            </div>
+          </footer>
+        </>
       </div>
       <SplitFileTransferDialog open={splitOpen} onClose={() => setSplitOpen(false)} initialPanes={splitInitialPanes} />
     </Dialog>

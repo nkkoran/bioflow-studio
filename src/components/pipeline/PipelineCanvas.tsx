@@ -145,17 +145,28 @@ function CanvasInner() {
       const key = `${edge.source}:${edge.sourceHandle ?? 'output'}`
       fanOutGroups.set(key, [...(fanOutGroups.get(key) ?? []), edge.id])
     }
-    return edges.map((edge) => ({
-      ...edge,
-      type: 'axed',
-      data: {
-        ...(edge.data ?? {}),
-        axisChip: chips[edge.id],
-        label: chips[edge.id]?.label ?? '',
-        fanOutIndex: fanOutGroups.get(`${edge.source}:${edge.sourceHandle ?? 'output'}`)?.indexOf(edge.id) ?? 0,
-        fanOutTotal: fanOutGroups.get(`${edge.source}:${edge.sourceHandle ?? 'output'}`)?.length ?? 1,
-      },
-    }))
+    const nodeStatus = new Map(nodes.map((node) => [node.id, (node.data as { status?: string }).status ?? 'idle']))
+    return edges.map((edge) => {
+      const flowing = nodeStatus.get(edge.source) === 'running' || nodeStatus.get(edge.target) === 'running'
+      return {
+        ...edge,
+        type: 'axed',
+        animated: false,
+        style: {
+          ...(edge.style ?? {}),
+          stroke: 'var(--color-accent)',
+          strokeWidth: flowing ? 2 : 1.5,
+        },
+        data: {
+          ...(edge.data ?? {}),
+          axisChip: chips[edge.id],
+          label: chips[edge.id]?.label ?? '',
+          fanOutIndex: fanOutGroups.get(`${edge.source}:${edge.sourceHandle ?? 'output'}`)?.indexOf(edge.id) ?? 0,
+          fanOutTotal: fanOutGroups.get(`${edge.source}:${edge.sourceHandle ?? 'output'}`)?.length ?? 1,
+          flowing,
+        },
+      }
+    })
   }, [edges, nodes, groups])
   const hiddenNodeIds = useMemo(() => {
     const visualMembership = new Map<string, Array<{ collapsed: boolean }>>()
@@ -678,7 +689,7 @@ function CanvasInner() {
 
   const defaultEdgeOptions = useMemo(
     () => ({
-      style: { stroke: 'var(--color-accent, #6366f1)', strokeWidth: 1.5 },
+      style: { stroke: 'var(--color-accent)', strokeWidth: 1.5 },
       animated: false,
     }),
     [],
@@ -699,7 +710,7 @@ function CanvasInner() {
   }, [deleteEdge])
 
   return (
-    <div ref={wrapperRef} data-tour="canvas" className="relative flex-1 h-full w-full" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
+    <div ref={wrapperRef} data-tour="canvas" className="bioflow-canvas-region relative h-full w-full flex-1 overflow-hidden" onDrop={(event) => { void onDrop(event) }} onDragOver={onDragOver}>
       <ReactFlow
         nodes={displayNodes}
         edges={visibleEdges}
@@ -735,15 +746,14 @@ function CanvasInner() {
           pannable
           zoomable
           nodeColor={(n) => {
-            if (n.type === 'tool') return '#6366f1'
-            if (n.type === 'file') return '#f59e0b'
-            if (n.type === 'note') return '#fbbf24'
-            if (n.type === 'merge') return '#818cf8'
-            if (n.type === 'transfer') return '#22d3ee'
-            if (n.type === 'transform') return '#2dd4bf'
-            return '#888'
+            if (n.type === 'file') return 'var(--color-warning)'
+            if (n.type === 'note') return 'var(--color-text-muted)'
+            if (n.type === 'merge') return 'var(--color-accent-hover)'
+            if (n.type === 'transfer') return 'var(--color-accent)'
+            if (n.type === 'transform') return 'var(--color-success)'
+            return 'var(--color-accent)'
           }}
-          maskColor="rgba(0,0,0,0.5)"
+          maskColor="oklch(from var(--color-bg-primary) l c h / 0.5)"
           style={{ background: 'var(--color-bg-secondary)' }}
         />
         <GroupOverlay
@@ -755,7 +765,7 @@ function CanvasInner() {
       </ReactFlow>
       {nodes.length === 0 && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-          <div className="rounded-lg border border-dashed border-border bg-bg-secondary/70 px-6 py-5 text-center shadow-xl backdrop-blur-sm">
+          <div className="animate-fade-up rounded-xl bg-bg-secondary/80 px-6 py-5 text-center shadow-xl backdrop-blur-sm">
             <div className="text-sm font-medium text-text-primary">Build a pipeline</div>
             <div className="mt-1 text-xs text-text-secondary">
               Drag a file or folder here, or pick a tool from the left sidebar.
@@ -767,9 +777,9 @@ function CanvasInner() {
         </div>
       )}
       {dropMessage && (
-        <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded border border-accent/40 bg-bg-secondary px-3 py-1 text-xs text-text-primary shadow">
+        <div className="animate-fade-up pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded-lg bg-bg-secondary/95 px-3 py-1.5 text-xs text-text-primary shadow-xl">
           <div className="flex items-center gap-2">
-            {dropBusy && <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />}
+            {dropBusy && <span className="h-2 w-2 rounded-full bg-accent animate-fade-in" />}
             <span>{dropMessage}</span>
           </div>
         </div>
@@ -779,7 +789,7 @@ function CanvasInner() {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
           <div
-            className="fixed z-50 min-w-[180px] rounded border border-border bg-bg-secondary py-1 shadow-xl"
+            className="surface-popover fixed z-50 min-w-[180px] rounded-lg py-1"
             style={{ left: menu.x, top: menu.y }}
           >
             {menu.kind === 'selection' && (

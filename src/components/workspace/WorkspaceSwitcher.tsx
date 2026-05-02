@@ -163,7 +163,7 @@ export function WorkspaceSwitcher() {
         {open && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-            <div className="absolute left-0 top-full z-50 mt-1 w-80 rounded border border-border bg-bg-secondary py-1 shadow-xl">
+            <div className="surface-popover absolute left-0 top-full z-50 mt-1 w-80 rounded py-1">
               {workspaces.length > 0 ? (
                 workspaces.map((workspace) => (
                   <div key={workspace.id} className="flex items-center hover:bg-bg-hover">
@@ -257,7 +257,6 @@ export function WorkspaceSwitcher() {
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={form.id ? 'Edit Workspace' : 'Workspace Setup'}
-        width="max-w-3xl"
         footer={(
           <>
             <Button variant="secondary" onClick={() => setEditorOpen(false)}>
@@ -305,7 +304,7 @@ export function WorkspaceSwitcher() {
             <select
               value={form.recommendedTemplateId}
               onChange={(e) => setForm((prev) => ({ ...prev, recommendedTemplateId: e.target.value }))}
-              className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+              className="bioflow-field h-8 rounded-md px-2 text-sm text-text-primary outline-none"
             >
               <option value="">None</option>
               {PIPELINE_TEMPLATES.map((template) => (
@@ -315,43 +314,48 @@ export function WorkspaceSwitcher() {
               ))}
             </select>
           </div>
-          <Input
-            label="Tools root"
-            value={form.toolsRoot}
-            placeholder="~/bioflow/tools"
-            onChange={(e) => setForm((prev) => ({ ...prev, toolsRoot: e.target.value }))}
-          />
-          <Input
-            label="ANNOVAR scripts"
-            value={form.annovarScriptsPath}
-            placeholder="~/bioflow/tools/annovar"
-            onChange={(e) => setForm((prev) => ({ ...prev, annovarScriptsPath: e.target.value }))}
-          />
-          <Input
-            label="ANNOVAR humandb"
-            value={form.annovarDbPath}
-            placeholder="~/bioflow/tools/annovar/humandb"
-            onChange={(e) => setForm((prev) => ({ ...prev, annovarDbPath: e.target.value }))}
-          />
-          <Input
-            label="VEP executable"
-            value={form.vepPath}
-            placeholder="vep or /path/to/vep"
-            onChange={(e) => setForm((prev) => ({ ...prev, vepPath: e.target.value }))}
-          />
-          <Input
-            label="VEP cache"
-            value={form.vepCachePath}
-            placeholder="~/bioflow/tools/vep/cache"
-            onChange={(e) => setForm((prev) => ({ ...prev, vepCachePath: e.target.value }))}
-          />
+          <details className="col-span-2 rounded-md bg-bg-tertiary/40 p-3 shadow-inner">
+            <summary className="cursor-pointer text-xs font-medium text-text-secondary">Advanced tool paths</summary>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Input
+                label="Tools root"
+                value={form.toolsRoot}
+                placeholder="~/bioflow/tools"
+                onChange={(e) => setForm((prev) => ({ ...prev, toolsRoot: e.target.value }))}
+              />
+              <Input
+                label="ANNOVAR scripts"
+                value={form.annovarScriptsPath}
+                placeholder="~/bioflow/tools/annovar"
+                onChange={(e) => setForm((prev) => ({ ...prev, annovarScriptsPath: e.target.value }))}
+              />
+              <Input
+                label="ANNOVAR humandb"
+                value={form.annovarDbPath}
+                placeholder="~/bioflow/tools/annovar/humandb"
+                onChange={(e) => setForm((prev) => ({ ...prev, annovarDbPath: e.target.value }))}
+              />
+              <Input
+                label="VEP executable"
+                value={form.vepPath}
+                placeholder="vep or /path/to/vep"
+                onChange={(e) => setForm((prev) => ({ ...prev, vepPath: e.target.value }))}
+              />
+              <Input
+                label="VEP cache"
+                value={form.vepCachePath}
+                placeholder="~/bioflow/tools/vep/cache"
+                onChange={(e) => setForm((prev) => ({ ...prev, vepCachePath: e.target.value }))}
+              />
+            </div>
+          </details>
           <div className="col-span-2 flex flex-col gap-1">
             <label className="text-text-secondary text-xs font-medium">Notes</label>
             <textarea
               value={form.notes}
               onChange={(e) => setForm((prev) => ({ ...prev, notes: e.target.value }))}
               rows={4}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent"
+              className="bioflow-field w-full rounded-md px-3 py-2 text-sm text-text-primary outline-none"
               placeholder="Cluster-specific notes, expected project folders, or handoff instructions."
             />
           </div>

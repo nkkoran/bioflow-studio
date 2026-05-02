@@ -47,7 +47,7 @@ export function RemotePathInput({
         if (!cancelled) setHomeDir(home)
         return
       }
-      if (!activeConnectionId) return
+      if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) return
       const result = await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"')
       if (!cancelled) setHomeDir(result.stdout.trim() || null)
     }
@@ -59,7 +59,7 @@ export function RemotePathInput({
 
   useEffect(() => {
     const canSuggest = effectiveOrigin === 'local'
-      || (effectiveOrigin === 'ssh' && Boolean(activeConnectionId))
+      || (effectiveOrigin === 'ssh' && Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID))
       || (effectiveOrigin === 'dnx' && Boolean(projectId))
     if (!focused || !canSuggest) {
       setSuggestions([])
@@ -158,10 +158,10 @@ export function RemotePathInput({
             applySuggestion(entry)
           }
         }}
-        className={`h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent ${className ?? ''}`}
+        className={`bioflow-field h-8 w-full rounded-md px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors ${className ?? ''}`}
       />
       {focused && renderedSuggestions.length > 0 && (
-        <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
+        <div className="surface-popover absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md py-1">
           {renderedSuggestions.map((entry, index) => (
             <button
               key={entry.path}
