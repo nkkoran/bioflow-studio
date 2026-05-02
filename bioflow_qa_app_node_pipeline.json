@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "id": "qa-app-node-filter-gwas-20260502",
+  "name": "BioFlow QA app-node filter + GWAS",
+  "description": "Small QA pipeline using BioFlow canvas nodes only: toy VCF + phenotype TSV -> Custom Shell -> one GWAS output.",
+  "execution": {
+    "arrayChainMode": "task-level",
+    "fileLifecyclePolicy": "keep-all"
+  },
+  "createdAt": 1777737600000,
+  "updatedAt": 1777737600000,
+  "nodes": [
+    {
+      "id": "qa_vcf",
+      "type": "file",
+      "position": { "x": 80, "y": 120 },
+      "data": {
+        "label": "Toy VCF",
+        "path": "/home/nkkoran/bioflow_qa_codex_20260502_120114/toy.vcf",
+        "source": "remote",
+        "origin": "ssh",
+        "fileType": "vcf",
+        "status": "present",
+        "isInput": true
+      }
+    },
+    {
+      "id": "qa_pheno",
+      "type": "file",
+      "position": { "x": 80, "y": 300 },
+      "data": {
+        "label": "Toy phenotype",
+        "path": "/home/nkkoran/bioflow_qa_codex_20260502_120114/pheno.tsv",
+        "source": "remote",
+        "origin": "ssh",
+        "fileType": "tsv",
+        "status": "present",
+        "isInput": true
+      }
+    },
+    {
+      "id": "qa_filter_gwas",
+      "type": "tool",
+      "position": { "x": 380, "y": 190 },
+      "data": {
+        "toolId": "custom.shell",
+        "label": "Filter + GWAS",
+        "paramValues": {
+          "script": "set -euo pipefail\nif [ -e \"$OUTPUT\" ]; then\n  echo \"Refusing to overwrite existing output: $OUTPUT\" >&2\n  exit 1\nfi\nmodule load plink/2.00a3.6\nWORK=\"$OUTPUT_DIR/work\"\nmkdir -p \"$WORK\"\nplink2 --vcf \"$INPUT_1\" --double-id --maf 0.01 --make-pgen --out \"$WORK/toy_filtered\"\nplink2 --pfile \"$WORK/toy_filtered\" --pheno \"$INPUT_2\" --pheno-name PHENO --glm hide-covar --out \"$WORK/toy_gwas\"\ncp \"$WORK/toy_gwas.PHENO.glm.linear\" \"$OUTPUT\""
+        },
+        "outputContract": {
+          "mode": "script-writes-output",
+          "requireNonEmpty": true
+        },
+        "slurmOverride": {
+          "cpus": 1,
+          "memoryGB": 1,
+          "timeHours": 0.25
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "qa_gwas_output",
+      "type": "file",
+      "position": { "x": 720, "y": 220 },
+      "data": {
+        "label": "GWAS result",
+        "path": "/home/nkkoran/bioflow_qa_codex_20260502_120114/app_node_gwas_from_ui.tsv",
+        "source": "remote",
+        "origin": "ssh",
+        "fileType": "tsv",
+        "status": "unknown",
+        "isInput": false
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_vcf_to_shell",
+      "source": "qa_vcf",
+      "sourceHandle": "output",
+      "target": "qa_filter_gwas",
+      "targetHandle": "input"
+    },
+    {
+      "id": "edge_pheno_to_shell",
+      "source": "qa_pheno",
+      "sourceHandle": "output",
+      "target": "qa_filter_gwas",
+      "targetHandle": "input"
+    },
+    {
+      "id": "edge_shell_to_output",
+      "source": "qa_filter_gwas",
+      "sourceHandle": "output",
+      "target": "qa_gwas_output",
+      "targetHandle": "input"
+    }
+  ],
+  "groups": []
+}
