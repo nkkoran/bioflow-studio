@@ -1,6 +1,6 @@
 # Visual Bugs
 
-Total logged: 14
+Total logged: 17
 
 ## CRITICAL
 
@@ -17,10 +17,13 @@ Total logged: 14
 - [x] [Connection dialog] — Saved preset host/user details are too small and truncate aggressively, making presets harder to compare. — src/components/connection/ConnectionDialog.tsx:453
 - [x] [Popup file explorer grid] — Grid file names wrap awkwardly around underscores and directory suffixes, producing uneven card labels. — src/components/file-browser/RemoteFileBrowser.tsx:1133
 - [x] [Global typography contract] — Fast re-walk found legacy 8–10px utility classes in secondary panels and popovers, below the visual QA readability floor. — src/renderer/styles/layout.css:31
+- [x] [Settings dialog] — In light theme, the settings side navigation remains a very dark surface while the rest of the dialog switches light, producing a jarring mixed-theme panel. — src/components/settings/SettingsDialog.tsx; src/renderer/styles/layout.css
+- [x] [Popup file explorer] — In light theme, the source rail and preview panel remain dark while the main list switches light, making the modal look split across two themes. — src/components/file-browser/RemoteFileBrowser.tsx; src/renderer/styles/layout.css
+- [x] [PLINK inspector] — Parameter search, Custom, and Validate settings controls can be squeezed/cut off in the inspector instead of wrapping cleanly. — src/components/pipeline/inspector/AnalysisOptionsPanel.tsx
+- [x] [Global typography scale] — Sidebar action text, file rows, node text, and inspector parameter labels use visibly mismatched sizes, especially after window/zoom changes. — src/components/pipeline/ToolPalette.tsx; src/renderer/styles/layout.css
 
 ## POLISH
 
-- [ ] [Settings dialog] — In light theme, the settings side navigation remains a very dark surface while the rest of the dialog switches light, producing a jarring mixed-theme panel. — src/components/settings/SettingsDialog.tsx
-- [ ] [Workspace dialog] — Expanded advanced tool path placeholders are clipped without a clear ellipsis in the two-column form. — src/components/workspace/WorkspaceSwitcher.tsx:303
-- [ ] [Canvas minimap] — The minimap has high visual weight and competes with selected-node/inspector content in the upper-right canvas area. — src/components/pipeline/PipelineCanvas.tsx
-- [ ] [Bottom panel tabs] — Small tab badges can render below the readable text floor. — src/components/layout/BottomPanel.tsx:104
+- [x] [Workspace dialog] — Expanded advanced tool path placeholders are clipped without a clear ellipsis in the two-column form. — src/components/workspace/WorkspaceSwitcher.tsx:303
+- [x] [Canvas minimap] — The minimap has high visual weight and competes with selected-node/inspector content in the upper-right canvas area. — src/components/pipeline/PipelineCanvas.tsx
+- [x] [Bottom panel tabs] — Small tab badges can render below the readable text floor. — src/components/layout/BottomPanel.tsx:104
