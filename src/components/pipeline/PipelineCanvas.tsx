@@ -192,6 +192,7 @@ function CanvasInner() {
     rawPath: string,
     position: { x: number; y: number },
     localDrop: boolean,
+    clientPosition?: { x: number; y: number },
   ) => {
     setDropBusy(true)
     const fileType = inferFileType(rawPath) as FileType
@@ -275,8 +276,8 @@ function CanvasInner() {
 
       setDropMessage(`Choose which input should receive ${label}.`)
       setPortPicker({
-        x: wrapperRef.current?.getBoundingClientRect().left ?? position.x,
-        y: wrapperRef.current?.getBoundingClientRect().top ?? position.y,
+        x: clientPosition?.x ?? wrapperRef.current?.getBoundingClientRect().left ?? position.x,
+        y: clientPosition?.y ?? wrapperRef.current?.getBoundingClientRect().top ?? position.y,
         ports: activeInputs,
         droppedType: fileType,
         occupiedPortIds: occupied,
@@ -490,7 +491,7 @@ function CanvasInner() {
           else await handleDroppedSshFolder(filePath, position)
           return
         }
-        await handleDroppedPath(filePath || droppedLocalPath, position, Boolean(droppedLocalPath))
+        await handleDroppedPath(filePath || droppedLocalPath, position, Boolean(droppedLocalPath), { x: event.clientX, y: event.clientY })
         return
       }
 
@@ -547,7 +548,7 @@ function CanvasInner() {
       }
       void window.api.local.stat(detail.paths[0]).then((stat) => {
         if (stat.isDirectory) return handleDroppedFolder(detail.paths[0], position)
-        return handleDroppedPath(detail.paths[0], position, true)
+        return handleDroppedPath(detail.paths[0], position, true, { x: detail.clientX, y: detail.clientY })
       })
     }
     window.addEventListener('bioflow:global-file-drop', onGlobalDrop as EventListener)

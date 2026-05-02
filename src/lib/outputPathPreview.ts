@@ -1,4 +1,4 @@
-import type { FileNodeData, FileType, PipelineSnapshot, ToolNodeData, TransferNodeData, TransformNodeData } from '@/types/pipeline'
+import type { FileNodeData, FileType, MergeStrategy, PipelineSnapshot, ToolNodeData, TransferNodeData, TransformNodeData } from '@/types/pipeline'
 import type { FileOrigin } from '@/constants/connections'
 import type { PathSettings } from '@/stores/settingsStore'
 import { getTool } from '@/lib/toolRegistry'
@@ -18,13 +18,10 @@ export function computeNodeOutputPreview(
     : trimTrailingSlash(runDir)
 
   if (node.type === 'tool') {
-    const data = node.data as ToolNodeData
-    const tool = getTool(data.toolId)
+    const tool = getTool((node.data as ToolNodeData).toolId)
     const port = tool?.outputs[0]
     if (!port) return null
-    const outputDir = previewOutputDir(data.outputDirOverride, outputRoot, slug)
-    const sink = connectedOutputSink(snapshot, nodeId, port.id)
-    return sink ? sinkPath(sink, outputDir, defaultOutputPath(outputDir, slug, port.id, port.fileType)) : defaultOutputPath(outputDir, slug, port.id, port.fileType)
+    return computeToolPortOutputPreview(nodeId, port.id, snapshot, pathSettings)
   }
 
   if (node.type === 'transform') {
@@ -53,6 +50,36 @@ export function computeNodeOutputPreview(
   return null
 }
 
+export function computeToolPortOutputPreview(
+  nodeId: string,
+  portId: string,
+  snapshot: PipelineSnapshot,
+  pathSettings: PathSettings,
+): string | null {
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node || node.type !== 'tool') return null
+  const data = node.data as ToolNodeData
+  const tool = getTool(data.toolId)
+  const port = tool?.outputs.find((candidate) => candidate.id === portId)
+  if (!port) return null
+
+  const slug = buildNodeSlugs(snapshot).get(nodeId) ?? nodeId
+  const runDir = pathSettings.runFolderTemplate || 'runs/{pipelineSlug}-{timestamp}'
+  const outputRoot = pathSettings.createSubfolders
+    ? joinRemotePath(trimTrailingSlash(runDir), cleanSegment(pathSettings.outputsSubfolder || 'outputs'))
+    : trimTrailingSlash(runDir)
+  const outputDir = previewOutputDir(data.outputDirOverride, outputRoot, slug)
+  const sink = connectedOutputSink(snapshot, nodeId, port.id)
+  const mergeMode = data.outputMerge?.[port.id]
+  const autoMergeEnabled = mergeMode ? mergeMode.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
+  const mergeStrategy = resolvePreviewMergeStrategy(mergeMode?.strategy ?? port.autoMergeDefault, port.fileType)
+  const hasSplitInput = toolHasSplitInput(snapshot, nodeId)
+  const fallback = autoMergeEnabled && hasSplitInput && mergeStrategy
+    ? joinRemotePath(outputDir, `${slug}.${port.id}.merged${mergeOutputExtPreview(mergeStrategy)}`)
+    : defaultOutputPath(outputDir, slug, port.id, port.fileType)
+  return sink ? sinkPath(sink, outputDir, fallback) : fallback
+}
+
 export function computeFileOutputPreview(
   nodeId: string,
   snapshot: PipelineSnapshot,
@@ -71,6 +98,39 @@ export function computeFileOutputPreview(
 
 function defaultOutputPath(outputDir: string, slug: string, portId: string, fileType: FileType): string {
   return joinRemotePath(outputDir, `${slug}.${portId}${extForFileType(fileType)}`)
+}
+
+function toolHasSplitInput(snapshot: PipelineSnapshot, nodeId: string): boolean {
+  return snapshot.edges.some((edge) => {
+    if (edge.target !== nodeId) return false
+    const source = snapshot.nodes.find((candidate) => candidate.id === edge.source)
+    if (!source || source.type !== 'file') return false
+    const data = source.data as FileNodeData
+    return (data.split?.items?.length ?? 0) > 0
+  })
+}
+
+function resolvePreviewMergeStrategy(strategy: MergeStrategy | undefined, fileType: FileType): Exclude<MergeStrategy, 'auto'> | null {
+  if (!strategy) return null
+  if (strategy !== 'auto') return strategy
+  if (fileType === 'tsv' || fileType === 'csv') return 'tsv-concat-header'
+  if (fileType === 'vcf' || fileType === 'bcf') return 'bcftools-concat'
+  if (fileType === 'plink' || fileType === 'pgen') return 'plink-pmerge-list'
+  return 'cat'
+}
+
+function mergeOutputExtPreview(strategy: Exclude<MergeStrategy, 'auto'>): string {
+  switch (strategy) {
+    case 'bcftools-concat': return '.vcf.gz'
+    case 'plink-pmerge-list': return ''
+    case 'tsv-concat-header':
+    case 'tabular-inner':
+    case 'tabular-outer':
+    case 'tabular-left':
+      return '.tsv'
+    default:
+      return '.txt'
+  }
 }
 
 function connectedOutputSink(snapshot: PipelineSnapshot, nodeId: string, portId: string): FileNodeData | null {

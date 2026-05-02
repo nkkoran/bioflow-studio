@@ -4,24 +4,21 @@ import { readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, appendF
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { resolve as resolvePath } from 'path'
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow } from 'electron'
 import { execFile } from 'child_process'
 
 import type { ConnectionConfig, ConnectionResult, ConnectionStatus, ExecResult, LoginPolicy, SshKeySetupRequest, SshKeySetupResult } from './types'
+import { promptUser, type PromptRequestPayload } from './prompt'
+import { OpenSshTransport, type OpenSshConnectionHandle } from './OpenSshTransport'
 
 interface ManagedConnection {
-  client: Client
+  client: Client | null
   config: ConnectionConfig
   connectedAt: number
   reconnecting: boolean
-}
-
-interface PromptRequestPayload {
-  title: string
-  message: string
-  detail?: string
-  isPassword: boolean
-  placeholder?: string
+  transport: NonNullable<ConnectionConfig['transport']>
+  openSshAlias?: string
+  openSshControlPath?: string
 }
 
 /**
@@ -37,6 +34,7 @@ function expandPath(filePath: string): string {
 function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
   return {
     ...config,
+    transport: config.transport ?? 'ssh2',
     name: config.name.trim(),
     host: config.host.trim(),
     username: config.username.trim(),
@@ -155,54 +153,6 @@ function buildConnectOptions(config: ConnectionConfig, onAuthDebug?: (detail: st
   }
 
   return options
-}
-
-/**
- * Ask the renderer to show a prompt dialog and return the user's input.
- * Used for MFA/2FA codes during keyboard-interactive auth.
- */
-function promptUser(request: PromptRequestPayload): Promise<string | null> {
-  return new Promise((resolve) => {
-    const windows = BrowserWindow.getAllWindows()
-    if (windows.length === 0) {
-      console.warn('[SSH] Cannot show authentication prompt because no BrowserWindow is available')
-      resolve(null)
-      return
-    }
-
-    const promptId = randomUUID()
-    let settled = false
-
-    // Listen for the response
-    const handler = (_event: Electron.IpcMainEvent, data: { promptId: string; value: string | null }) => {
-      if (data.promptId === promptId) {
-        settled = true
-        ipcMain.removeListener('ssh:prompt-response', handler)
-        console.log(`[SSH] Authentication prompt answered (${data.value === null ? 'cancelled' : 'submitted'})`)
-        resolve(data.value)
-      }
-    }
-    ipcMain.on('ssh:prompt-response', handler)
-
-    // Ask renderer to show prompt
-    console.log(`[SSH] Showing authentication prompt: ${request.message}`)
-    for (const win of windows) {
-      if (!win.webContents.isDestroyed()) {
-        win.webContents.send('ssh:prompt', {
-          promptId,
-          ...request,
-        })
-      }
-    }
-
-    // Timeout after 60 seconds
-    setTimeout(() => {
-      if (settled) return
-      ipcMain.removeListener('ssh:prompt-response', handler)
-      console.warn('[SSH] Authentication prompt timed out after 60 seconds')
-      resolve(null)
-    }, 60_000)
-  })
 }
 
 function parseLoginPolicyFields(stdout: string): { host: string; cpu: string; mem: string } {
@@ -680,6 +630,7 @@ export class SshManager {
     return {
       keyPath,
       publicKeyPath,
+      publicKey,
       agentAdded,
       keychainAdded,
       alias,
@@ -688,14 +639,69 @@ export class SshManager {
     }
   }
 
-  connect(config: ConnectionConfig): Promise<ConnectionResult> {
+  async connect(config: ConnectionConfig): Promise<ConnectionResult> {
+    const cleanConfig = normalizeConnectionConfig(config)
+    if (cleanConfig.transport === 'openssh-controlpersist') {
+      return this.connectOpenSsh(cleanConfig)
+    }
+    return this.connectSsh2(cleanConfig)
+  }
+
+  private async connectOpenSsh(cleanConfig: ConnectionConfig): Promise<ConnectionResult> {
+    const dedupeKey = connectionDedupeKey(cleanConfig)
+    const reusable = this.findReusableConnection(dedupeKey)
+    if (reusable) {
+      this.emitDebug(reusable.id, 'connect', `Reused existing OpenSSH ControlPersist connection for ${cleanConfig.username}@${cleanConfig.host}`)
+      return {
+        id: reusable.id,
+        host: cleanConfig.host,
+        username: cleanConfig.username,
+        reused: true,
+        transport: 'openssh-controlpersist',
+      }
+    }
+
+    const id = randomUUID()
+    this.emitDebug(id, 'connect', `Connecting to ${cleanConfig.host}:${cleanConfig.port} as ${cleanConfig.username} with OpenSSH ControlPersist`)
+    try {
+      const result = await OpenSshTransport.getInstance().connect(cleanConfig, (stage, detail) => this.emitDebug(id, stage, detail))
+      const nextConfig = { ...cleanConfig, alias: result.alias, writeConfig: true }
+      this.connections.set(id, {
+        client: null,
+        config: nextConfig,
+        connectedAt: Date.now(),
+        reconnecting: false,
+        transport: 'openssh-controlpersist',
+        openSshAlias: result.alias,
+        openSshControlPath: result.controlPath,
+      })
+      this.connectionKeys.set(id, dedupeKey)
+      this.emitDebug(id, 'connect', result.reused ? 'OpenSSH ControlPersist master reused' : 'OpenSSH ControlPersist master ready')
+      this.sendStatusChange(id, true)
+      void this.getLoginPolicy(id).catch((err) => {
+        console.warn(`[SSH] login policy probe failed for ${id}:`, err instanceof Error ? err.message : err)
+      })
+      return {
+        id,
+        host: cleanConfig.host,
+        username: cleanConfig.username,
+        reused: result.reused,
+        transport: 'openssh-controlpersist',
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      this.emitDebug(id, 'error', `${message}. Disable OpenSSH persistence for this connection to use the legacy ssh2 transport.`)
+      throw err
+    }
+  }
+
+  private connectSsh2(cleanConfig: ConnectionConfig): Promise<ConnectionResult> {
     return new Promise((resolve, reject) => {
-      const cleanConfig = normalizeConnectionConfig(config)
       const dedupeKey = connectionDedupeKey(cleanConfig)
       const reusable = this.findReusableConnection(dedupeKey)
       if (reusable) {
         this.emitDebug(reusable.id, 'connect', `Reused existing SSH session for ${cleanConfig.username}@${cleanConfig.host}`)
-        resolve({ id: reusable.id, host: cleanConfig.host, username: cleanConfig.username, reused: true })
+        resolve({ id: reusable.id, host: cleanConfig.host, username: cleanConfig.username, reused: true, transport: 'ssh2' })
         return
       }
 
@@ -785,6 +791,7 @@ export class SshManager {
           config: cleanConfig,
           connectedAt: Date.now(),
           reconnecting: false,
+          transport: 'ssh2',
         })
         this.connectionKeys.set(id, dedupeKey)
         this.emitDebug(id, 'connect', 'SSH session ready')
@@ -792,7 +799,7 @@ export class SshManager {
         void this.getLoginPolicy(id).catch((err) => {
           console.warn(`[SSH] login policy probe failed for ${id}:`, err instanceof Error ? err.message : err)
         })
-        resolve({ id, host: cleanConfig.host, username: cleanConfig.username })
+        resolve({ id, host: cleanConfig.host, username: cleanConfig.username, transport: 'ssh2' })
       })
 
       client.on('error', (err) => {
@@ -849,11 +856,24 @@ export class SshManager {
     })
   }
 
-  disconnect(id: string): void {
+  async disconnect(id: string): Promise<void> {
     const conn = this.connections.get(id)
     if (!conn) return
     conn.reconnecting = true
-    conn.client.end()
+    try {
+      if (conn.transport === 'openssh-controlpersist' && conn.openSshAlias && conn.openSshControlPath) {
+        await OpenSshTransport.getInstance().disconnect({
+          connectionId: id,
+          config: conn.config,
+          alias: conn.openSshAlias,
+          controlPath: conn.openSshControlPath,
+        })
+      } else {
+        conn.client?.end()
+      }
+    } catch (err) {
+      this.emitDebug(id, 'error', err instanceof Error ? err.message : String(err))
+    }
     this.connections.delete(id)
     this.connectionKeys.delete(id)
     this.loginPolicies.delete(id)
@@ -874,12 +894,29 @@ export class SshManager {
       host: conn.config.host,
       username: conn.config.username,
       uptime: Date.now() - conn.connectedAt,
+      transport: conn.transport,
     }
   }
 
   getClient(id: string): Client | null {
     const conn = this.connections.get(id)
-    return conn && !conn.reconnecting ? conn.client : null
+    return conn && !conn.reconnecting && conn.transport === 'ssh2' ? conn.client : null
+  }
+
+  isConnectionReady(id: string): boolean {
+    const conn = this.connections.get(id)
+    return Boolean(conn && !conn.reconnecting)
+  }
+
+  getOpenSshConnection(id: string): OpenSshConnectionHandle | null {
+    const conn = this.connections.get(id)
+    if (!conn || conn.reconnecting || conn.transport !== 'openssh-controlpersist' || !conn.openSshAlias || !conn.openSshControlPath) return null
+    return {
+      connectionId: id,
+      config: conn.config,
+      alias: conn.openSshAlias,
+      controlPath: conn.openSshControlPath,
+    }
   }
 
   getLoginPolicy(id: string): Promise<LoginPolicy> {
@@ -951,6 +988,11 @@ export class SshManager {
   }
 
   private execOnce(id: string, command: string): Promise<ExecResult> {
+    const openSsh = this.getOpenSshConnection(id)
+    if (openSsh) {
+      return OpenSshTransport.getInstance().exec(openSsh, command, (stage, detail) => this.emitDebug(id, stage, detail))
+    }
+
     return new Promise((resolve, reject) => {
       const conn = this.connections.get(id)
       if (!conn) {
@@ -959,6 +1001,10 @@ export class SshManager {
       }
       if (conn.reconnecting) {
         reject(new Error(`Connection ${id} is reconnecting`))
+        return
+      }
+      if (!conn.client) {
+        reject(new Error(`Connection ${id} does not have an ssh2 client`))
         return
       }
 
@@ -1023,9 +1069,21 @@ export class SshManager {
     onData: (chunk: string, stream: 'stdout' | 'stderr') => void,
     onClose?: (exitCode: number | null) => void,
   ): { cancel: () => void } {
+    const openSsh = this.getOpenSshConnection(id)
+    if (openSsh) {
+      return OpenSshTransport.getInstance().execStream(
+        openSsh,
+        command,
+        onData,
+        onClose,
+        (stage, detail) => this.emitDebug(id, stage, detail),
+      )
+    }
+
     const conn = this.connections.get(id)
     if (!conn) return { cancel: () => {} }
     if (conn.reconnecting) return { cancel: () => {} }
+    if (!conn.client) return { cancel: () => {} }
 
     let active = true
     let streamRef: ClientChannel | null = null
@@ -1068,8 +1126,16 @@ export class SshManager {
         reject(new Error(`Connection ${id} not found`))
         return
       }
+      if (conn.transport === 'openssh-controlpersist') {
+        reject(new Error('The in-app terminal still uses ssh2 in this release. Open a system terminal with the generated ssh alias for OpenSSH persisted sessions.'))
+        return
+      }
       if (conn.reconnecting) {
         reject(new Error(`Connection ${id} is reconnecting`))
+        return
+      }
+      if (!conn.client) {
+        reject(new Error(`Connection ${id} does not have an ssh2 client`))
         return
       }
 
@@ -1086,6 +1152,7 @@ export class SshManager {
   private attemptReconnect(id: string): void {
     const conn = this.connections.get(id)
     if (!conn || conn.reconnecting) return
+    if (conn.transport === 'openssh-controlpersist') return
 
     conn.reconnecting = true
     this.sendStatusChange(id, 'reconnecting')
@@ -1178,9 +1245,11 @@ export class SshManager {
     if (win) {
       const statusStr = typeof status === 'string' ? status :
         status ? 'connected' : 'disconnected'
+      const conn = this.connections.get(id)
       win.webContents.send('ssh:status-change', {
         connectionId: id,
         status: statusStr,
+        transport: conn?.transport,
       })
     }
   }
@@ -1208,6 +1277,7 @@ export class SshManager {
 
 function connectionDedupeKey(config: ConnectionConfig): string {
   return [
+    config.transport ?? 'ssh2',
     config.host,
     config.port,
     config.username,

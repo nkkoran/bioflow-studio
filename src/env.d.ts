@@ -25,7 +25,7 @@ interface Window {
       exec: (id: string, command: string) => Promise<import('./types/ssh').ExecResult>
       setupKey: (request: import('./types/ssh').SshKeySetupRequest) => Promise<import('./types/ssh').SshKeySetupResult>
       listConnections: () => Promise<Array<{ id: string; config: Omit<import('./types/ssh').ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }>>
-      onStatusChange: (callback: (event: any, data: { connectionId: string; status: string }) => void) => () => void
+      onStatusChange: (callback: (event: any, data: { connectionId: string; status: string; transport?: NonNullable<import('./types/ssh').ConnectionConfig['transport']> }) => void) => () => void
       onPrompt: (callback: (data: { promptId: string; title: string; message: string; detail?: string; isPassword: boolean; placeholder?: string }) => void) => () => void
       respondToPrompt: (promptId: string, value: string | null) => void
       onBanner: (callback: (data: { connectionId: string; message: string }) => void) => () => void

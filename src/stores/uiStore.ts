@@ -156,6 +156,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
           fileType,
           origin,
           source: origin === 'local' ? 'local' : 'remote',
+          status: 'present',
         })
       })
     }

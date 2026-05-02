@@ -297,7 +297,10 @@ function RunReviewDetails({
           <span>
             Delete generated intermediate outputs after the run succeeds
             <span className="mt-0.5 block text-[10px] leading-snug text-text-muted">
-              Off by default. BioFlow protects all file-node inputs and PLINK sidecars; only generated outputs explicitly marked as intermediate are eligible.
+              Off by default. BioFlow protects all file-node inputs and PLINK sidecars; generated outputs marked as intermediate and auto-merge shard files are eligible.
+              {review.cleanupPlan.generatedIntermediatePaths.length > 0
+                ? ` ${review.cleanupPlan.generatedIntermediatePaths.length} generated path${review.cleanupPlan.generatedIntermediatePaths.length === 1 ? '' : 's'} would be removed when this is enabled.`
+                : ''}
             </span>
           </span>
         </label>

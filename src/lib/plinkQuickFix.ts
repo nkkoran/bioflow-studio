@@ -121,11 +121,11 @@ export function snapshotWithPlinkFlagEnabled(
 ): PipelineSnapshot {
   return {
     ...snapshot,
-    nodes: snapshot.nodes.map((node) => (
-      node.id === nodeId && node.type === 'tool'
-        ? { ...node, data: { ...node.data, ...nodeDataWithPlinkFlagEnabled(node.data as ToolNodeData, flagId, value) } }
-        : node
-    )),
+    nodes: snapshot.nodes.map((node) => {
+      if (node.id !== nodeId || node.type !== 'tool') return node
+      const data = node.data as ToolNodeData
+      return { ...node, data: { ...data, ...nodeDataWithPlinkFlagEnabled(data, flagId, value) } as ToolNodeData }
+    }),
     updatedAt: Date.now(),
   }
 }
@@ -138,11 +138,11 @@ export function snapshotWithAnalysisOptionEnabled(
 ): PipelineSnapshot {
   return {
     ...snapshot,
-    nodes: snapshot.nodes.map((node) => (
-      node.id === nodeId && node.type === 'tool'
-        ? { ...node, data: { ...node.data, ...nodeDataWithAnalysisOptionEnabled(node.data as ToolNodeData, optionOrPortId, value) } }
-        : node
-    )),
+    nodes: snapshot.nodes.map((node) => {
+      if (node.id !== nodeId || node.type !== 'tool') return node
+      const data = node.data as ToolNodeData
+      return { ...node, data: { ...data, ...nodeDataWithAnalysisOptionEnabled(data, optionOrPortId, value) } as ToolNodeData }
+    }),
     updatedAt: Date.now(),
   }
 }

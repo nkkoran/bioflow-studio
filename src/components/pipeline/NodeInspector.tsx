@@ -83,6 +83,8 @@ import { classNames, pathBasename, pathDirname } from '@/lib/utils'
 import { expandHomePath } from '@/lib/remotePath'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { buildAxisAlignmentReport } from '@/lib/dataArtifacts'
+import { computeToolPortOutputPreview } from '@/lib/outputPathPreview'
+import { validateCustomShellScript } from '@/lib/customShellValidation'
 
 const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
 const GENOME_BUILD_OPTIONS = ['', 'GRCh38', 'GRCh37', 'hg38', 'hg19'] as const
@@ -614,13 +616,15 @@ function ShellScriptField({
 }) {
   const mode = outputContract?.mode ?? 'capture-stdout'
   const requireNonEmpty = outputContract?.requireNonEmpty ?? true
+  const script = value === undefined || value === null ? '' : String(value)
+  const validationIssues = validateCustomShellScript(script, outputContract)
   return (
     <div className="flex flex-col gap-1">
       <label className="text-text-secondary text-xs font-medium">
         Shell script <span className="text-error">*</span>
       </label>
       <textarea
-        value={value === undefined || value === null ? '' : String(value)}
+        value={script}
         placeholder={'cat "$INPUT"'}
         onChange={(e) => onChange(e.target.value)}
         rows={7}
@@ -633,6 +637,18 @@ function ShellScriptField({
         <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code> for all inputs. Use{' '}
         <code className="font-mono text-text-primary">$OUTPUT</code> for the declared result file.
       </div>
+      {validationIssues.length > 0 && (
+        <div className="rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] leading-relaxed">
+          <div className="mb-1 font-medium text-text-primary">Basic bash validation</div>
+          <div className="flex flex-col gap-1">
+            {validationIssues.map((issue) => (
+              <div key={issue.code} className={issue.severity === 'error' ? 'text-error' : 'text-warning'}>
+                {issue.message}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="mt-1 rounded-md border border-border bg-bg-tertiary/60 p-2">
         <div className="mb-1 text-[10px] uppercase tracking-wide text-text-muted">Output behavior</div>
         <div className="grid grid-cols-2 gap-1 rounded border border-border bg-bg-primary p-1">
@@ -877,9 +893,14 @@ function ToolOutputRow({
   snapshot: PipelineSnapshot
 }) {
   const deleteEdge = usePipelineStore((s) => s.deleteEdge)
+  const pathSettings = useSettingsStore((s) => s.settings.paths)
   const mergeConfig = data.outputMerge?.[port.id]
   const autoMergeEnabled = mergeConfig ? mergeConfig.mode === 'auto-merge' : Boolean(port.autoMergeDefault)
   const intermediate = data.outputIntermediate?.[port.id] ?? false
+  const finalOutputPreview = useMemo(
+    () => computeToolPortOutputPreview(nodeId, port.id, snapshot, pathSettings),
+    [nodeId, pathSettings, port.id, snapshot],
+  )
   return (
     <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
       <div className="flex items-center gap-2">
@@ -894,6 +915,14 @@ function ToolOutputRow({
           ? `${consumers.length} downstream connection${consumers.length === 1 ? '' : 's'}`
           : 'Not connected downstream; the file is still written when the node runs.'}
       </div>
+      {finalOutputPreview && (
+        <div className="mt-1.5 rounded border border-border bg-bg-primary px-2 py-1 text-[11px] text-text-muted">
+          <span className="text-text-secondary">{autoMergeEnabled && showMergeBehavior ? 'Final merged file: ' : 'Final file: '}</span>
+          <span className="font-mono text-text-primary" title={finalOutputPreview}>
+            <MiddleEllipsis value={finalOutputPreview} max={48} />
+          </span>
+        </div>
+      )}
       {consumers.length > 0 && (
         <div className="mt-1.5 flex flex-col gap-1">
           {consumers.map((edge) => {
@@ -2273,6 +2302,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       origin: 'local',
       path: localPath,
       fileType: inferFileType(localPath),
+      status: 'present',
     })
     setUploadMessage(`Using ${pathBasename(localPath)}`)
     if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && await confirmDialog({
@@ -2327,35 +2357,36 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             onDrop={(event) => {
               if ((data.source ?? 'remote') === 'local') void acceptDroppedLocalFile(event)
             }}
-	          >
-	            {(data.source ?? 'remote') === 'local' ? (
-	              <LocalPathField
-	                value={data.path}
-	                placeholder="/Users/you/data/phenotype.txt"
-	                onChange={(value) => updateNodeData(nodeId, { path: value })}
-	                className="flex-1"
-	                mode="file"
-	              />
-	            ) : (
-	              <RemotePathField
-	                value={data.path}
-	                placeholder="/project/username/data/input.vcf.gz"
-	                onChange={(value) => {
-	                  const inferred = inferFileType(value)
-	                  updateNodeData(nodeId, {
-	                    path: value,
-	                    origin: 'ssh',
-	                    fileType: data.fileType === 'plink' && inferred === 'bed' ? 'plink' : inferred,
-	                  })
-	                }}
-	                className="flex-1"
-	                title={`Choose file for ${data.label}`}
-	                mode="file"
-	                accept={data.fileType !== 'any' ? [data.fileType] : undefined}
-	              />
-	            )}
-	          </div>
-	          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
+          >
+            {(data.source ?? 'remote') === 'local' ? (
+              <LocalPathField
+                value={data.path}
+                placeholder="/Users/you/data/phenotype.txt"
+                onChange={(value) => updateNodeData(nodeId, { path: value, status: 'unknown' })}
+                className="flex-1"
+                mode="file"
+              />
+            ) : (
+              <RemotePathField
+                value={data.path}
+                placeholder="/project/username/data/input.vcf.gz"
+                onChange={(value) => {
+                  const inferred = inferFileType(value)
+                  updateNodeData(nodeId, {
+                    path: value,
+                    origin: 'ssh',
+                    fileType: data.fileType === 'plink' && inferred === 'bed' ? 'plink' : inferred,
+                    status: 'unknown',
+                  })
+                }}
+                className="flex-1"
+                title={`Choose file for ${data.label}`}
+                mode="file"
+                accept={data.fileType !== 'any' ? [data.fileType] : undefined}
+              />
+            )}
+          </div>
+          {(data.source ?? 'remote') === 'local' && activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID && data.path.trim() && (
             <div className="flex items-center gap-2">
               <Button variant="secondary" size="sm" className="h-7 text-[11px]" disabled={uploading} onClick={() => void uploadLocalFile()}>
                 {uploading ? 'Uploading...' : 'Upload to cluster'}
@@ -2377,6 +2408,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 outputFilename: filename,
                 outputDir: folder || undefined,
                 path: joinOutputPath(folder, filename),
+                status: 'unknown',
               })
             }}
           />
@@ -2391,6 +2423,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 outputFilename: filename || undefined,
                 outputDir: folder || undefined,
                 path: joinOutputPath(folder, filename),
+                status: 'unknown',
               })
             }}
           />
@@ -2789,7 +2822,7 @@ async function uploadLocalFileForPath(
   const remotePath = `${uploadDir}/${fileName}`
   await window.api.sftp.mkdir(activeConnectionId, uploadDir).catch(() => undefined)
   await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
-  updateNodeData(nodeId, { path: remotePath, source: 'remote', origin: 'ssh' })
+  updateNodeData(nodeId, { path: remotePath, source: 'remote', origin: 'ssh', status: 'present' })
   setUploadMessage(`Uploaded to ${remotePath}`)
 }
 
@@ -3439,13 +3472,18 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
       )}
 
       {data.to === 'local' && (
-        <LocalPathField
-          label="Local folder"
-          value={data.localFolder ?? ''}
-          placeholder="~/BioFlow/transfers"
-          onChange={(value) => updateNodeData(nodeId, { localFolder: value || undefined })}
-          mode="directory"
-        />
+        <div>
+          <LocalPathField
+            label="Local destination folder"
+            value={data.localFolder ?? ''}
+            placeholder="Required, e.g. ~/BioFlow/transfers"
+            onChange={(value) => updateNodeData(nodeId, { localFolder: value || undefined })}
+            mode="directory"
+          />
+          <p className="mt-1 text-[10px] text-text-muted">
+            Downloads fail validation until this folder is set, so SCP results never disappear into an implicit path.
+          </p>
+        </div>
       )}
 
       {devMode && data.to === 'dnx' && (

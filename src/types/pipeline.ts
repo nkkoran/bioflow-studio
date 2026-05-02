@@ -420,6 +420,8 @@ export interface FileNodeData {
   fileType: FileType
   /** Reference/genome build represented by this file, when coordinates are present. */
   genomeBuild?: GenomeBuild
+  /** Best-known existence state from explorer actions or file probes. */
+  status?: 'unknown' | 'present' | 'missing'
   isInput: boolean              // true = source, false = sink
   outputFilename?: string
   outputDir?: string

@@ -19,8 +19,11 @@ import { getTool, areTypesCompatible } from '@/lib/toolRegistry'
 import { blockHasValue, getFlagDef, toolUsesFlagBuilder, CUSTOM_FLAG_ID } from '@/lib/flagRegistry'
 import { connectedInputSchema, toolColumnWarnings, transformInputWarnings, type SchemaCache } from '@/lib/schemaResolver'
 import { getActiveToolInputs, validateAnalysisOptions } from '@/lib/analysisOptions'
+import { validateCustomShellScript } from '@/lib/customShellValidation'
 
 export type ValidationSeverity = 'error' | 'warning' | 'info'
+
+const SPLIT_ALIGNED_OPTION_PORTS = new Set(['read-freq'])
 
 export interface ValidationIssue {
   severity: ValidationSeverity
@@ -202,6 +205,14 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
     if (node.type === 'file') {
       const d = node.data as FileNodeData
       const split = d.split
+      if (d.isInput && d.status === 'missing') {
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'FILE_NODE_PATH_MISSING',
+          message: `Input file "${d.label}" was marked missing from the file explorer.`,
+          suggestion: 'Pick an existing file path, upload the file again, or remove this input from the pipeline.',
+        })
+      }
       if (split) {
         const splitItems = Array.isArray((split as { items?: unknown }).items) ? split.items : []
         if (d.isInput && (d.origin === 'local' || d.source === 'local')) {
@@ -425,6 +436,18 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
             code: 'MISSING_REQUIRED_PARAM',
             message: `Tool "${d.label}" is missing required parameter "${p.label}".`,
             suggestion: `Set "${p.label}" in the node inspector.`,
+          })
+        }
+      }
+
+      if (d.toolId === 'custom.shell') {
+        for (const issue of validateCustomShellScript(String(d.paramValues?.script ?? ''), d.outputContract)) {
+          issues.push({
+            severity: issue.severity,
+            nodeId: node.id,
+            code: issue.code,
+            message: issue.message,
+            suggestion: issue.suggestion,
           })
         }
       }
@@ -662,6 +685,14 @@ export function validatePipeline(snapshot: PipelineSnapshot, opts?: {
           code: 'TRANSFER_SAME_BACKEND',
           message: `Transfer "${d.label}" copies data within the same backend.`,
           suggestion: 'Remove it unless you need the explicit relocation step.',
+        })
+      }
+      if (d.to === 'local' && !d.localFolder?.trim()) {
+        issues.push({
+          severity: 'error', nodeId: node.id,
+          code: 'TRANSFER_LOCAL_FOLDER_MISSING',
+          message: `Transfer "${d.label}" needs a local destination folder.`,
+          suggestion: 'Set the local folder in the Transfer inspector before running.',
         })
       }
       if (d.to === 'dnx' && d.from !== 'dnx') {
@@ -1050,6 +1081,21 @@ function validateToolAxisChoices(
     })
   }
   if (candidates.length === 0) return issues
+  const primarySplit = candidates.find((candidate) => candidate.portId === 'input') ?? candidates[0]
+  for (const port of activeInputs) {
+    if (!SPLIT_ALIGNED_OPTION_PORTS.has(port.id)) continue
+    const edges = inMap.get(port.id) ?? []
+    const splitCandidate = candidates.find((candidate) => candidate.portId === port.id)
+    if (!primarySplit || splitCandidate) continue
+    issues.push({
+      severity: 'error',
+      nodeId,
+      portId: port.id,
+      code: 'AXIS_MISMATCH_SINGLE_MULTI',
+      message: `"${data.label}" has split genotypes but "${port.label}" is a single file or typed path.`,
+      suggestion: `Connect a split "${port.label}" input with the same ${primarySplit.axis} keys as the genotype split.`,
+    })
+  }
   if (data.arrayOver === null) {
     issues.push({
       severity: 'error',

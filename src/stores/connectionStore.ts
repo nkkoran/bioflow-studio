@@ -7,6 +7,7 @@ export { LOCAL_CONNECTION_ID } from '@/constants/connections'
 function normalizeConnectionConfig(config: ConnectionConfig): ConnectionConfig {
   return {
     ...config,
+    transport: config.transport ?? 'ssh2',
     name: config.name.trim(),
     host: config.host.trim(),
     username: config.username.trim(),
@@ -107,6 +108,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       port: 0,
       username: 'local',
       authMethod: 'agent',
+      transport: 'ssh2',
       defaultDirectory: defaultDir,
     }
 
@@ -228,7 +230,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 // Subscribe to SSH status change events from main process
 if (typeof window !== 'undefined' && window.api?.ssh?.onStatusChange) {
   window.api.ssh.onStatusChange(
-    (_event: any, data: { connectionId: string; status: string }) => {
+    (_event: any, data: { connectionId: string; status: string; transport?: NonNullable<ConnectionConfig['transport']> }) => {
       const store = useConnectionStore.getState()
       store.updateStatus(data.connectionId, data.status as ConnectionState)
       if (data.status === 'connected') {

@@ -31,6 +31,7 @@ export interface AppSettings {
   fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
   skipPreRunFileCheck: boolean
   skipPreRunDoctorCheck: boolean
+  useOpenSshControlPersist: boolean
   dnxAuthTokenStored: boolean
   dnxDefaultProjectId: string | null
   onboardingComplete: boolean
@@ -73,6 +74,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fileLifecyclePolicy: 'keep-all',
   skipPreRunFileCheck: false,
   skipPreRunDoctorCheck: false,
+  useOpenSshControlPersist: false,
   dnxAuthTokenStored: false,
   dnxDefaultProjectId: null,
   onboardingComplete: false,
@@ -135,6 +137,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       fileLifecyclePolicy: await readSetting('settings:fileLifecyclePolicy', DEFAULT_SETTINGS.fileLifecyclePolicy),
       skipPreRunFileCheck: await readSetting('settings:skipPreRunFileCheck', DEFAULT_SETTINGS.skipPreRunFileCheck),
       skipPreRunDoctorCheck: await readSetting('settings:skipPreRunDoctorCheck', DEFAULT_SETTINGS.skipPreRunDoctorCheck),
+      useOpenSshControlPersist: await readSetting('settings:ssh:useOpenSshControlPersist', DEFAULT_SETTINGS.useOpenSshControlPersist),
       dnxAuthTokenStored: Boolean(await window.api.store.getSecret('dnx:authToken')),
       dnxDefaultProjectId: await readSetting('dnx:defaultProjectId', DEFAULT_SETTINGS.dnxDefaultProjectId),
       onboardingComplete: onboardingVersionComplete >= CURRENT_ONBOARDING_VERSION,
@@ -197,6 +200,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         break
       case 'settings:skipPreRunFileCheck': next.skipPreRunFileCheck = Boolean(value); break
       case 'settings:skipPreRunDoctorCheck': next.skipPreRunDoctorCheck = Boolean(value); break
+      case 'settings:ssh:useOpenSshControlPersist': next.useOpenSshControlPersist = Boolean(value); break
       case 'dnx:defaultProjectId': next.dnxDefaultProjectId = value ? String(value) : null; break
       case 'settings:onboardingComplete':
         next.onboardingComplete = Boolean(value)

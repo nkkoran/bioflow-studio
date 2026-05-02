@@ -137,4 +137,41 @@ describe('dataArtifacts', () => {
 
     expect(cleanup.generatedIntermediatePaths).toEqual(['/work/assoc.output.1.tsv', '/work/assoc.output.2.tsv'])
   })
+
+  it('includes auto-merge shard paths in cleanup review even when the final output is not marked intermediate', () => {
+    const snapshot: PipelineSnapshot = {
+      version: 1,
+      id: 'p1',
+      name: 'test',
+      createdAt: 1,
+      updatedAt: 1,
+      nodes: [
+        {
+          id: 'assoc',
+          type: 'tool',
+          position: { x: 0, y: 0 },
+          data: {
+            toolId: 'plink2.assoc',
+            label: 'Assoc',
+            paramValues: {},
+            status: 'idle',
+          },
+        },
+      ],
+      edges: [],
+      execution: { fileLifecyclePolicy: 'keep-all' },
+    }
+
+    const cleanup = buildCleanupPlan(snapshot, [{
+      nodeId: 'assoc',
+      label: 'Assoc',
+      mode: 'array',
+      script: '',
+      outputPaths: ['/work/assoc.output.merged.tsv'],
+      intermediatePaths: ['/work/assoc.output.1.tsv', '/work/assoc.output.2.tsv'],
+    }])
+
+    expect(cleanup.generatedIntermediatePaths).toEqual(['/work/assoc.output.1.tsv', '/work/assoc.output.2.tsv'])
+    expect(cleanup.generatedIntermediatePaths).not.toContain('/work/assoc.output.merged.tsv')
+  })
 })

@@ -408,6 +408,17 @@ export function SettingsDialog({
           {section === 'Advanced' && (
             <div className="flex flex-col gap-3">
               <SectionHeader label="Advanced" helpId="settings.advanced" />
+              <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2.5">
+                <p className="mb-2 text-[11px] font-medium text-text-secondary">SSH transport</p>
+                <Checkbox
+                  label="Use OpenSSH ControlPersist for BioFlow operations"
+                  checked={settings.useOpenSshControlPersist}
+                  onChange={(value) => toggle('settings:ssh:useOpenSshControlPersist', value)}
+                />
+                <p className="mt-2 text-[11px] leading-relaxed text-text-muted">
+                  Off uses BioFlow&apos;s legacy ssh2 connection. On routes file browsing, uploads, downloads, remote commands, run submission, and Slurm polling through a BioFlow-managed OpenSSH master socket. The in-app terminal still uses ssh2 in this release.
+                </p>
+              </div>
               <Input
                 label="Login-node CPU warning threshold (seconds)"
                 type="number"

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Info, Plus, X } from 'lucide-react'
+import { CheckCircle2, Info, ListChecks, Plus, X, XCircle } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
@@ -494,6 +494,7 @@ export function AnalysisOptionsPanel({
   const [customValue, setCustomValue] = useState('')
   const [commandDraft, setCommandDraft] = useState(nodeData.commandOverride?.trim() ?? '')
   const [disconnectNotice, setDisconnectNotice] = useState<{ count: number; portId: string } | null>(null)
+  const [validationOpen, setValidationOpen] = useState(false)
   const connectedPortIds = useMemo(
     () => snapshot.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.targetHandle ?? 'input'),
     [snapshot.edges, nodeId],
@@ -502,6 +503,7 @@ export function AnalysisOptionsPanel({
   const options = useMemo(() => normalizeAnalysisOptions(tool, nodeData, { connectedPortIds }), [tool, nodeData, connectedPortIds])
   const issues = validateAnalysisOptions(tool, { ...nodeData, analysisOptions: options }, connectedPortIds)
   const issueByOption = new Map(issues.map((issue) => [issue.optionId, issue.message]))
+  const errorCount = issues.length
   const preview = useMemo(
     () => previewAnalysisCommand(tool, { ...nodeData, analysisOptions: options }, (portId) => connectedInputPath(snapshot, nodeId, portId)),
     [tool, nodeData, options, snapshot, nodeId],
@@ -615,7 +617,31 @@ export function AnalysisOptionsPanel({
           <Plus size={13} />
           Custom
         </Button>
+        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setValidationOpen((value) => !value)}>
+          <ListChecks size={13} />
+          Validate settings
+        </Button>
       </div>
+      {validationOpen && (
+        <div className={classNames('rounded-md border px-3 py-2 text-[11px]', errorCount > 0 ? 'border-error/35 bg-error/10' : 'border-success/30 bg-success/10')}>
+          <div className="mb-1 flex items-center gap-2 font-medium text-text-primary">
+            {errorCount > 0 ? <XCircle size={13} className="text-error" /> : <CheckCircle2 size={13} className="text-success" />}
+            {issues.length === 0 ? 'Settings are ready' : `${errorCount} setting error${errorCount === 1 ? '' : 's'}`}
+          </div>
+          {issues.length > 0 ? (
+            <div className="flex flex-col gap-1">
+              {issues.map((issue) => (
+                <div key={`${issue.optionId}-${issue.code}`} className="rounded border border-border/70 bg-bg-primary px-2 py-1">
+                  <span className="text-error">{issue.code}</span>
+                  <span className="ml-2 text-text-secondary">{issue.message}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-text-secondary">Required flags and file-valued options have usable values or connected inputs.</div>
+          )}
+        </div>
+      )}
       {recommendedDefs.length > 0 && !term && (
         <div className="rounded-md border border-border bg-bg-tertiary/30 p-2">
           <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Recommended</div>

@@ -20,6 +20,7 @@ export interface ConnectionConfig {
   port: number
   username: string
   authMethod: 'key' | 'password' | 'agent'
+  transport?: 'ssh2' | 'openssh-controlpersist'
   privateKeyPath?: string
   passphrase?: string
   password?: string
@@ -38,6 +39,7 @@ export interface ConnectionResult {
   host: string
   username: string
   reused?: boolean
+  transport?: NonNullable<ConnectionConfig['transport']>
 }
 
 export interface ConnectionStatus {
@@ -45,6 +47,7 @@ export interface ConnectionStatus {
   host: string
   username: string
   uptime: number
+  transport?: NonNullable<ConnectionConfig['transport']>
 }
 
 export interface LoginPolicy {
@@ -106,6 +109,7 @@ export interface SshKeySetupRequest {
 export interface SshKeySetupResult {
   keyPath: string
   publicKeyPath: string
+  publicKey: string
   agentAdded: boolean
   keychainAdded: boolean
   alias?: string
@@ -158,7 +162,7 @@ const api = {
      */
     listConnections: (): Promise<Array<{ id: string; config: Omit<ConnectionConfig, 'password' | 'passphrase'>; connectedAt: number; connected: boolean }>> =>
       ipcRenderer.invoke('ssh:list-connections'),
-    onStatusChange: (callback: (event: any, data: { connectionId: string; status: string }) => void): (() => void) => {
+    onStatusChange: (callback: (event: any, data: { connectionId: string; status: string; transport?: NonNullable<ConnectionConfig['transport']> }) => void): (() => void) => {
       const handler = (_event: any, data: any) => callback(_event, data)
       ipcRenderer.on('ssh:status-change', handler)
       return () => ipcRenderer.removeListener('ssh:status-change', handler)

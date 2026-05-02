@@ -6,9 +6,10 @@ import { Input } from '@/components/ui/Input'
 import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
 import { connectionConfigSchema } from '@/lib/validators'
-import { Server, Lock, User, Eye, EyeOff, Loader2, FolderOpen, Sparkles } from 'lucide-react'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { Server, Lock, User, Eye, EyeOff, Loader2, FolderOpen, Sparkles, Copy, KeyRound } from 'lucide-react'
 import type { ConnectionConfig } from '@/types'
-import type { SshDebugEvent } from '@/types/ssh'
+import type { SshDebugEvent, SshKeySetupResult } from '@/types/ssh'
 import type { ZodError } from 'zod'
 
 interface ConnectionDialogProps {
@@ -35,6 +36,13 @@ interface FormData {
   defaultDirectory: string
 }
 
+interface ExistingSetupKey {
+  keyPath: string
+  publicKeyPath: string
+  privateExists: boolean
+  publicExists: boolean
+}
+
 const initialFormData: FormData = {
   name: '',
   host: '',
@@ -54,6 +62,10 @@ const initialFormData: FormData = {
 
 // Saved connections stored locally for quick access
 const STORAGE_KEY = 'bioflow-saved-connections'
+
+function slugifyKeySegment(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'host'
+}
 
 function loadSavedConnectionsFallback(): ConnectionConfig[] {
   try {
@@ -124,10 +136,17 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
   const [setupAddAgent, setSetupAddAgent] = useState(true)
   const [setupAddKeychain, setSetupAddKeychain] = useState(true)
   const [setupOverwrite, setSetupOverwrite] = useState(false)
+  const [setupExistingKey, setSetupExistingKey] = useState<ExistingSetupKey | null>(null)
+  const [setupResult, setSetupResult] = useState<SshKeySetupResult | null>(null)
+  const [setupCopied, setSetupCopied] = useState<'public-key' | 'key-path' | null>(null)
 
   const { connect, connectLocal } = useConnectionStore()
+  const settingsLoaded = useSettingsStore((s) => s.loaded)
+  const loadSettings = useSettingsStore((s) => s.load)
+  const useOpenSshControlPersist = useSettingsStore((s) => s.settings.useOpenSshControlPersist)
+  const selectedTransport: NonNullable<ConnectionConfig['transport']> = useOpenSshControlPersist ? 'openssh-controlpersist' : 'ssh2'
   const setupReady = useMemo(
-    () => form.host.trim() && form.username.trim() && form.port > 0,
+    () => Boolean(form.host.trim() && form.username.trim() && form.port > 0),
     [form.host, form.port, form.username],
   )
   const defaultAlias = useMemo(() => {
@@ -137,6 +156,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
 
   useEffect(() => {
     if (open) {
+      if (!settingsLoaded) void loadSettings().catch(() => undefined)
       void loadSavedConnections().then(hydrateRememberedPasswords).then(setSavedConnections).catch(() => {
         void hydrateRememberedPasswords(loadSavedConnectionsFallback()).then(setSavedConnections)
       })
@@ -149,8 +169,39 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       setSetupPassword('')
       setSetupRunning(false)
       setSetupMessage(null)
+      setSetupExistingKey(null)
+      setSetupResult(null)
+      setSetupCopied(null)
     }
-  }, [open])
+  }, [loadSettings, open, settingsLoaded])
+
+  useEffect(() => {
+    if (!open || !setupReady) {
+      setSetupExistingKey(null)
+      return
+    }
+
+    let cancelled = false
+    async function checkExistingKey() {
+      try {
+        const home = await window.api.local.homedir()
+        const keyPath = `${home}/.ssh/bioflow_${slugifyKeySegment(form.host.trim())}_${slugifyKeySegment(form.username.trim())}`
+        const publicKeyPath = `${keyPath}.pub`
+        const rows = await window.api.local.statMany([keyPath, publicKeyPath])
+        if (cancelled) return
+        const privateExists = Boolean(rows.find((row) => row.path === keyPath)?.ok)
+        const publicExists = Boolean(rows.find((row) => row.path === publicKeyPath)?.ok)
+        setSetupExistingKey(privateExists || publicExists ? { keyPath, publicKeyPath, privateExists, publicExists } : null)
+      } catch {
+        if (!cancelled) setSetupExistingKey(null)
+      }
+    }
+
+    void checkExistingKey()
+    return () => {
+      cancelled = true
+    }
+  }, [form.host, form.username, open, setupReady])
 
   useEffect(() => {
     if (!open || !window.api.ssh.onDebug) return
@@ -166,6 +217,40 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       return rest
     })
     setConnectError(null)
+  }
+
+  async function copySetupText(value: string, kind: 'public-key' | 'key-path') {
+    if (!value) return
+    await navigator.clipboard.writeText(value)
+    setSetupCopied(kind)
+    window.setTimeout(() => setSetupCopied(null), 1600)
+  }
+
+  async function useExistingSetupKey() {
+    if (!setupExistingKey?.privateExists) return
+    let publicKey = ''
+    if (setupExistingKey.publicExists) {
+      publicKey = await window.api.local.read(setupExistingKey.publicKeyPath).then((value) => value.trim()).catch(() => '')
+    }
+    const existingResult: SshKeySetupResult = {
+      keyPath: setupExistingKey.keyPath,
+      publicKeyPath: setupExistingKey.publicKeyPath,
+      publicKey,
+      agentAdded: false,
+      keychainAdded: false,
+      alias: defaultAlias,
+      note: `Using existing BioFlow key at ${setupExistingKey.keyPath}.`,
+    }
+    setForm((prev) => ({
+      ...prev,
+      authMethod: 'key',
+      privateKeyPath: setupExistingKey.keyPath,
+      passphrase: '',
+      alias: defaultAlias || prev.alias,
+    }))
+    setSetupResult(existingResult)
+    setSetupMessage(existingResult.note ?? null)
+    setSetupOpen(false)
   }
 
   function fillFromSaved(config: ConnectionConfig) {
@@ -200,6 +285,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       port: form.port,
       username: form.username.trim(),
       authMethod: form.authMethod,
+      transport: selectedTransport,
       ...(form.authMethod === 'key' && {
         privateKeyPath: form.privateKeyPath.trim(),
         passphrase: form.passphrase || undefined,
@@ -208,7 +294,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       ...(form.authMethod === 'password' && { rememberPassword: form.rememberPassword }),
       ...(form.authMethod === 'key' && form.privateKeyPath.trim() && { generatedKeyPath: form.privateKeyPath.trim() }),
       ...(defaultAlias && { alias: defaultAlias }),
-      ...(form.writeConfig ? { writeConfig: true } : {}),
+      ...((form.writeConfig || selectedTransport === 'openssh-controlpersist') ? { writeConfig: true } : {}),
       ...(form.controlPersistHours > 0 ? { controlPersistHours: form.controlPersistHours } : {}),
       ...(form.serverAliveIntervalSeconds > 0 ? { serverAliveIntervalSeconds: form.serverAliveIntervalSeconds } : {}),
       ...(form.defaultDirectory.trim() && { defaultDirectory: form.defaultDirectory.trim() }),
@@ -280,6 +366,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
         passphrase: '',
         alias: result.alias ?? prev.alias,
       }))
+      setSetupResult(result)
       setSetupMessage(result.note ?? `Key installed at ${result.keyPath}`)
       setSetupOpen(false)
     } catch (err) {
@@ -529,16 +616,62 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
         )}
 
         <div className="rounded-md border border-border bg-bg-secondary px-3 py-2 text-[11px] text-text-secondary">
-          <div className="font-medium text-text-primary">SSH key, alias, and app reuse are separate</div>
+          <div className="font-medium text-text-primary">SSH key, alias, and app transport are separate</div>
           <div className="mt-1">
-            The generated SSH alias is for terminal use such as <code>ssh {defaultAlias}</code> and can keep one OpenSSH session warm for a few hours.
-            BioFlow&apos;s own MFA reuse still comes from the app reusing its existing `ssh2` connection, not from `ControlPersist`.
+            {selectedTransport === 'openssh-controlpersist'
+              ? <>OpenSSH ControlPersist is enabled in Settings. BioFlow operations will use an internal master socket that bypasses personal SSH aliases; the in-app terminal remains on ssh2 for now.</>
+              : <>The generated SSH alias is for terminal use such as <code>ssh {defaultAlias}</code>. BioFlow operations use the legacy ssh2 transport unless OpenSSH ControlPersist is enabled in Settings &gt; Advanced.</>}
           </div>
         </div>
 
         {setupMessage && (
           <div className="px-3 py-2 rounded-md bg-bg-secondary border border-border text-text-secondary text-xs">
             {setupMessage}
+          </div>
+        )}
+
+        {setupResult && (
+          <div className="rounded-md border border-accent/25 bg-accent/10 p-3 text-xs text-text-secondary">
+            <div className="mb-2 flex items-center gap-2 font-medium text-text-primary">
+              <KeyRound size={14} className="text-accent" />
+              SSH key ready
+            </div>
+            <div className="space-y-1 text-[11px]">
+              <div><strong className="text-text-primary">Private key:</strong> <code className="break-all">{setupResult.keyPath}</code></div>
+              <div><strong className="text-text-primary">Public key:</strong> <code className="break-all">{setupResult.publicKeyPath}</code></div>
+            </div>
+            {setupResult.publicKey ? (
+              <textarea
+                readOnly
+                value={setupResult.publicKey}
+                className="mt-2 h-20 w-full resize-none rounded border border-border bg-bg-primary p-2 font-mono text-[10px] text-text-secondary"
+                aria-label="Generated SSH public key"
+              />
+            ) : (
+              <div className="mt-2 rounded border border-warning/25 bg-warning/10 p-2 text-[11px] text-warning">
+                Public key text could not be read locally. The path above is still available for manual inspection.
+              </div>
+            )}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {setupResult.publicKey && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Copy size={12} />}
+                  onClick={() => void copySetupText(setupResult.publicKey, 'public-key')}
+                >
+                  {setupCopied === 'public-key' ? 'Copied' : 'Copy public key'}
+                </Button>
+              )}
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<Copy size={12} />}
+                onClick={() => void copySetupText(setupResult.keyPath, 'key-path')}
+              >
+                {setupCopied === 'key-path' ? 'Copied' : 'Copy private key path'}
+              </Button>
+            </div>
           </div>
         )}
 
@@ -583,10 +716,10 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
             <Button
               variant="primary"
               onClick={() => void handleSetupKey()}
-              disabled={setupRunning}
+              disabled={setupRunning || Boolean(setupExistingKey && !setupOverwrite)}
               icon={setupRunning ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
             >
-              {setupRunning ? 'Setting up…' : 'Generate and install'}
+              {setupRunning ? 'Setting up…' : setupOverwrite ? 'Replace and install' : 'Generate and install'}
             </Button>
           </>
         )}
@@ -600,6 +733,33 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
           <p>
             BioFlow will generate a dedicated ed25519 key locally, append the public key to <code>~/.ssh/authorized_keys</code> on the remote host, and then switch this connection to key auth. Optionally it will also write a BioFlow-managed SSH config snippet so you can use <code>ssh {defaultAlias}</code> in Terminal.
           </p>
+          {setupExistingKey && (
+            <div className="rounded-md border border-warning/25 bg-warning/10 p-3 text-[11px] text-text-secondary">
+              <div className="font-medium text-warning">BioFlow key already exists for this host/user</div>
+              <div className="mt-1 break-all">
+                <strong className="text-text-primary">Private:</strong> {setupExistingKey.keyPath}
+              </div>
+              <div className="break-all">
+                <strong className="text-text-primary">Public:</strong> {setupExistingKey.publicKeyPath}
+              </div>
+              <div className="mt-2">
+                {setupExistingKey.privateExists
+                  ? 'Use it now, or enable replacement below to generate and install a fresh key.'
+                  : 'Only the public half was found. Enable replacement below to regenerate the key pair.'}
+              </div>
+              {setupExistingKey.privateExists && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="mt-2"
+                  icon={<KeyRound size={12} />}
+                  onClick={() => void useExistingSetupKey()}
+                >
+                  Use existing key
+                </Button>
+              )}
+            </div>
+          )}
           <Input
             label="Current account password"
             type="password"

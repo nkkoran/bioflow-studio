@@ -27,7 +27,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useDataCartStore } from '@/stores/dataCartStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
-import type { DataArtifact, DataArtifactRole } from '@/types/pipeline'
+import type { DataArtifact, DataArtifactRole, FileNodeData } from '@/types/pipeline'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { classifyPreview } from '@/lib/filePreviewClassifier'
 import { artifactFromEntry, basename, collectProtectedInputPaths, isLargeGeneticPath, stripKnownPlinkExtension } from '@/lib/dataArtifacts'
@@ -103,6 +103,7 @@ export function FileExplorer() {
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const devMode = useSettingsStore((s) => s.devMode)
   const fileExplorerViewMode = useSettingsStore((s) => s.settings.fileExplorerViewMode)
@@ -702,7 +703,8 @@ export function FileExplorer() {
 
   const deleteEntry = useCallback(async (entry: RemoteFileEntry) => {
     if (!activeConnectionId || origin !== 'fs') return
-    const protectedInputs = new Set(collectProtectedInputPaths(exportSnapshot()))
+    const snapshot = exportSnapshot()
+    const protectedInputs = new Set(collectProtectedInputPaths(snapshot))
     if (protectedInputs.has(entry.path)) {
       setUploadMessage('That path is currently used as a pipeline input, so BioFlow will not delete it from the explorer.')
       window.setTimeout(() => setUploadMessage(null), 5000)
@@ -730,14 +732,22 @@ export function FileExplorer() {
     try {
       if (activeConnectionId === LOCAL_CONNECTION_ID) await window.api.local.delete(entry.path)
       else await window.api.sftp.delete(activeConnectionId, entry.path)
-      setUploadMessage(`Deleted ${entry.name}`)
+      const affectedNodes = snapshot.nodes.filter((node) => (
+        node.type === 'file' && fileNodeReferencesDeletedPath(node.data as FileNodeData, entry.path, entry.isDirectory)
+      ))
+      for (const node of affectedNodes) updateNodeData(node.id, { status: 'missing' } as Partial<FileNodeData>)
+      setUploadMessage(
+        affectedNodes.length > 0
+          ? `Deleted ${entry.name}; flagged ${affectedNodes.length} canvas file node${affectedNodes.length === 1 ? '' : 's'} as missing.`
+          : `Deleted ${entry.name}`,
+      )
       clearSelection()
       handleCloseContextMenu()
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, clearSelection, confirmDialog, exportSnapshot, handleCloseContextMenu, origin, refresh])
+  }, [activeConnectionId, clearSelection, confirmDialog, exportSnapshot, handleCloseContextMenu, origin, refresh, updateNodeData])
 
   const createFileInFolder = useCallback(async (dirPath: string) => {
     if (!activeConnectionId || origin !== 'fs') return
@@ -1431,6 +1441,19 @@ function collapsePlinkFileEntries(entries: RemoteFileEntry[]): RemoteFileEntry[]
     group[0]
   ))
   return [...passthrough, ...collapsed]
+}
+
+function fileNodeReferencesDeletedPath(data: FileNodeData, deletedPath: string, isDirectory: boolean): boolean {
+  const normalizedDeleted = deletedPath.replace(/\/+$/, '')
+  const folderPrefix = `${normalizedDeleted}/`
+  const matches = (candidate?: string) => {
+    if (!candidate) return false
+    const normalizedCandidate = candidate.replace(/\/+$/, '')
+    if (normalizedCandidate === normalizedDeleted) return true
+    return isDirectory && normalizedCandidate.startsWith(folderPrefix)
+  }
+
+  return matches(data.path) || (data.split?.items ?? []).some((item) => matches(item.path))
 }
 
 function shellQuote(value: string): string {

@@ -203,8 +203,11 @@ export function buildCleanupPlan(snapshot: PipelineSnapshot, scripts: DryRunScri
     }
   }
   for (const script of scripts) {
-    if (!flaggedNodeIds.has(script.nodeId)) continue
-    const paths = script.intermediatePaths?.length ? script.intermediatePaths : script.outputPaths
+    const paths = script.intermediatePaths?.length
+      ? script.intermediatePaths
+      : flaggedNodeIds.has(script.nodeId)
+        ? script.outputPaths
+        : []
     for (const path of paths) generatedIntermediatePaths.add(path)
   }
   const unsafe = [...generatedIntermediatePaths].filter((path) => protectedSet.has(path))

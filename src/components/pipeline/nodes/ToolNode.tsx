@@ -176,8 +176,15 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
         )}
         {activeInputs.map((port) => {
           const connected = connectedInputs.has(port.id)
+          const missingRequired = port.required && !connected
           return (
-            <div key={port.id} className="relative flex items-center h-7 gap-2">
+            <div
+              key={port.id}
+              className={classNames(
+                'relative flex h-7 items-center gap-2 rounded-sm px-1',
+                missingRequired ? 'bg-error/5 ring-1 ring-error/25' : '',
+              )}
+            >
               <Handle
                 type="target"
                 position={Position.Left}
@@ -198,6 +205,15 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
               >
                 {port.label}
                 {port.required && <span className="text-error ml-0.5">*</span>}
+              </span>
+              <span
+                className={classNames(
+                  'shrink-0 rounded px-1 py-0.5 text-[8px] font-medium uppercase',
+                  port.required ? 'bg-error/15 text-error' : 'bg-bg-tertiary text-text-muted',
+                )}
+                title={port.required ? 'Required input' : 'Optional input'}
+              >
+                {port.required ? 'req' : 'opt'}
               </span>
               <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[9px] text-text-muted shrink-0">
                 {port.fileType}

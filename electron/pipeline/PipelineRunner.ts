@@ -750,7 +750,7 @@ export class PipelineRunner {
     }
 
     const connectionId = connectionIdOverride || run.connectionId
-    if (!this.ssh.getClient(connectionId)) {
+    if (!this.ssh.isConnectionReady(connectionId)) {
       return (ns.outputPaths ?? []).map((path) => ({
         name: pathBasename(path),
         path,
@@ -1811,27 +1811,25 @@ export class PipelineRunner {
       const tool = getTool(data.toolId)
       if (!tool) return []
       for (const port of tool.outputs) {
-        const flagged = data.outputIntermediate?.[port.id] ?? false
-        if (!flagged) continue
         const implicit = plan.implicitMerges?.[port.id]
         if (implicit) {
           for (const path of implicit.input.paths) seen.add(path)
-        } else {
-          addValuePaths(plan.outputs[port.id])
         }
+        const flagged = data.outputIntermediate?.[port.id] ?? false
+        if (!flagged) continue
+        addValuePaths(plan.outputs[port.id])
       }
       return [...seen]
     }
 
     if (node.type === 'transform') {
       const data = node.data as TransformNodeData
-      if (!data.outputIntermediate?.output) return []
       const implicit = plan.implicitMerges?.output
       if (implicit) {
         for (const path of implicit.input.paths) seen.add(path)
-      } else {
-        addValuePaths(plan.outputs.output)
       }
+      if (!data.outputIntermediate?.output) return [...seen]
+      addValuePaths(plan.outputs.output)
       return [...seen]
     }
 

@@ -25,7 +25,7 @@ export const HELP_CONTENT: Record<string, HelpEntry> = {
   },
   'settings.advanced': {
     title: 'Advanced execution',
-    body: 'Controls for pre-run checks, array dependencies, and experimental builder behavior.',
+    body: 'Controls for SSH transport, pre-run checks, array dependencies, and experimental builder behavior.',
   },
   'settings.notifications': {
     title: 'Notifications',

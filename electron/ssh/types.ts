@@ -4,6 +4,7 @@ export interface ConnectionConfig {
   port: number
   username: string
   authMethod: 'key' | 'password' | 'agent'
+  transport?: 'ssh2' | 'openssh-controlpersist'
   privateKeyPath?: string
   passphrase?: string
   password?: string
@@ -22,6 +23,7 @@ export interface ConnectionResult {
   host: string
   username: string
   reused?: boolean
+  transport?: NonNullable<ConnectionConfig['transport']>
 }
 
 export interface LoginPolicy {
@@ -36,6 +38,7 @@ export interface ConnectionStatus {
   host: string
   username: string
   uptime: number
+  transport?: NonNullable<ConnectionConfig['transport']>
 }
 
 export interface ExecResult {
@@ -79,6 +82,7 @@ export interface SshKeySetupRequest {
 export interface SshKeySetupResult {
   keyPath: string
   publicKeyPath: string
+  publicKey: string
   agentAdded: boolean
   keychainAdded: boolean
   alias?: string

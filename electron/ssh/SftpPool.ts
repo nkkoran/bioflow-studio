@@ -1,5 +1,6 @@
 import type { SFTPWrapper, FileEntry as SshFileEntry } from 'ssh2'
 import { SshManager } from './SshManager'
+import { OpenSshTransport } from './OpenSshTransport'
 import type { RemoteFileEntry, FileStat } from './types'
 import { createReadStream, createWriteStream } from 'fs'
 import { promises as fs } from 'fs'
@@ -196,6 +197,13 @@ export class SftpPool {
       return cached.entries
     }
 
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      const entries = await OpenSshTransport.getInstance().ls(openSsh, remotePath)
+      this.cache.set(cacheKey, { entries, timestamp: Date.now() })
+      return entries
+    }
+
     return this.withSftp(connectionId, async (sftp) => {
       const list = await new Promise<SshFileEntry[]>((resolve, reject) => {
         sftp.readdir(remotePath, (err, fileList) => {
@@ -255,6 +263,9 @@ export class SftpPool {
   }
 
   async stat(connectionId: string, remotePath: string): Promise<FileStat> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) return OpenSshTransport.getInstance().stat(openSsh, remotePath)
+
     return this.withSftp(connectionId, async (sftp) => {
       const attrs = await new Promise<{ size: number; mtime: number; mode: number }>(
         (resolve, reject) => {
@@ -300,6 +311,9 @@ export class SftpPool {
     offset?: number,
     length?: number,
   ): Promise<Buffer> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) return OpenSshTransport.getInstance().readBuffer(openSsh, remotePath, offset, length)
+
     return this.withSftp(connectionId, async (sftp) => {
       return await new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
@@ -326,6 +340,9 @@ export class SftpPool {
     remotePath: string,
     lines: number,
   ): Promise<string> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) return OpenSshTransport.getInstance().head(openSsh, remotePath, lines)
+
     return this.withSftp(connectionId, async (sftp) => {
       const content = await new Promise<string>((resolve, reject) => {
         const chunks: Buffer[] = []
@@ -351,6 +368,13 @@ export class SftpPool {
   }
 
   async mkdir(connectionId: string, remotePath: string): Promise<void> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      await OpenSshTransport.getInstance().mkdir(openSsh, remotePath)
+      this.invalidateCache(connectionId, parentDir(remotePath))
+      return
+    }
+
     const sftp = await this.acquire(connectionId)
     try {
       await this.mkdirRecursive(sftp, remotePath)
@@ -365,6 +389,14 @@ export class SftpPool {
     oldPath: string,
     newPath: string,
   ): Promise<void> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      await OpenSshTransport.getInstance().rename(openSsh, oldPath, newPath)
+      this.invalidateCache(connectionId, parentDir(oldPath))
+      this.invalidateCache(connectionId, parentDir(newPath))
+      return
+    }
+
     const sftp = await this.acquire(connectionId)
     try {
       await new Promise<void>((resolve, reject) => {
@@ -381,6 +413,13 @@ export class SftpPool {
   }
 
   async remove(connectionId: string, remotePath: string): Promise<void> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      await OpenSshTransport.getInstance().remove(openSsh, remotePath)
+      this.invalidateCache(connectionId, parentDir(remotePath))
+      return
+    }
+
     const sftp = await this.acquire(connectionId)
     try {
       await this.removePath(sftp, remotePath)
@@ -463,6 +502,13 @@ export class SftpPool {
     remotePath: string,
     content: string,
   ): Promise<void> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      await OpenSshTransport.getInstance().write(openSsh, remotePath, content)
+      this.invalidateCache(connectionId, parentDir(remotePath))
+      return
+    }
+
     const sftp = await this.acquire(connectionId)
     try {
       await new Promise<void>((resolve, reject) => {
@@ -478,6 +524,13 @@ export class SftpPool {
   }
 
   async upload(connectionId: string, localPath: string, remotePath: string, onProgress?: SftpProgressCallback): Promise<void> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      await OpenSshTransport.getInstance().upload(openSsh, localPath, remotePath, onProgress)
+      this.invalidateCache(connectionId, parentDir(remotePath))
+      return
+    }
+
     const sftp = await this.acquire(connectionId)
     try {
       const total = await fs.stat(localPath).then((stat) => stat.size).catch(() => undefined)
@@ -502,6 +555,12 @@ export class SftpPool {
   }
 
   async download(connectionId: string, remotePath: string, localPath: string, onProgress?: SftpProgressCallback): Promise<void> {
+    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
+    if (openSsh) {
+      await OpenSshTransport.getInstance().download(openSsh, remotePath, localPath, onProgress)
+      return
+    }
+
     const sftp = await this.acquire(connectionId)
     try {
       await fs.mkdir(localPath.replace(/\/[^/]+$/, ''), { recursive: true }).catch(() => undefined)

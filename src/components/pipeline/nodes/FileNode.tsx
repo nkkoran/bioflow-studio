@@ -5,7 +5,7 @@
 import { memo, useMemo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { classNames } from '@/lib/utils'
-import { FileText, Share2 } from 'lucide-react'
+import { AlertTriangle, FileText, Share2 } from 'lucide-react'
 import type { FileNodeData } from '@/types/pipeline'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -15,6 +15,7 @@ import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 function FileNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as FileNodeData
   const isInput = nodeData.isInput
+  const missing = nodeData.status === 'missing'
   const outputLabel = nodeData.outputFilename || nodeData.path?.split('/').pop()
   const outputFolder = nodeData.outputDir || (nodeData.path?.includes('/') ? nodeData.path.slice(0, nodeData.path.lastIndexOf('/')) : '')
   const nodes = usePipelineStore((s) => s.nodes)
@@ -53,7 +54,7 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
     <div
       className={classNames(
         'bg-bg-secondary border-2 rounded-md shadow-lg px-3 py-2 min-w-[180px] max-w-[320px] transition-all',
-        selected ? 'border-accent ring-2 ring-accent/30' : 'border-amber-500/40',
+        missing ? 'border-error ring-2 ring-error/20' : selected ? 'border-accent ring-2 ring-accent/30' : 'border-amber-500/40',
       )}
     >
       <div className="flex items-center gap-2">
@@ -68,6 +69,12 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           {isInput && nodeData.path && (
             <div className="text-[10px] text-text-muted font-mono truncate">
               <MiddleEllipsis value={nodeData.path} max={40} />
+            </div>
+          )}
+          {missing && (
+            <div className="mt-1 flex items-center gap-1 rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">
+              <AlertTriangle size={10} />
+              Path deleted or missing
             </div>
           )}
           {isInput && nodeData.split?.items?.length && (
