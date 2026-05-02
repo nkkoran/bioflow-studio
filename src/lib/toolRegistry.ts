@@ -801,7 +801,7 @@ export const TOOLS: ToolDef[] = [
     description: 'Run an arbitrary shell command',
     command: 'bash',
     inputs: [{ id: 'input', label: 'Input', description: 'Any connected files become $INPUT, $INPUT_1, $INPUT_2, and ${INPUTS[@]} in the script.', fileType: 'any', multi: true }],
-    outputs: [{ id: 'output', label: 'Output', description: 'Stdout from the shell script is captured into this output path as $OUTPUT.', fileType: 'any' }],
+    outputs: [{ id: 'output', label: 'Output', description: 'The shell script writes to $OUTPUT, or BioFlow captures stdout there when configured.', fileType: 'any' }],
     params: [
       { name: 'script', label: 'Shell script', type: 'string', required: true, placeholder: 'cat "$INPUT"' },
     ],

@@ -62,6 +62,7 @@ export function FileTreeNode({
   return (
     <Tooltip content={formatDate(entry.modified)} side="right" delay={500}>
       <div
+        data-file-path={entry.path}
         className={classNames(
           'flex h-8 cursor-pointer items-center gap-2 px-3 transition-colors',
           isSelected

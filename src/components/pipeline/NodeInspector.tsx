@@ -82,6 +82,7 @@ import type { ClusterModuleSuggestion, LearnedResourceSummary } from '@/types/ss
 import { classNames, pathBasename, pathDirname } from '@/lib/utils'
 import { expandHomePath } from '@/lib/remotePath'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
+import { buildAxisAlignmentReport } from '@/lib/dataArtifacts'
 
 const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
 const GENOME_BUILD_OPTIONS = ['', 'GRCh38', 'GRCh37', 'hg38', 'hg19'] as const
@@ -603,10 +604,16 @@ function ModuleAutocompleteField({
 function ShellScriptField({
   value,
   onChange,
+  outputContract,
+  onOutputContractChange,
 }: {
   value: unknown
   onChange: (v: unknown) => void
+  outputContract: ToolNodeData['outputContract']
+  onOutputContractChange: (contract: ToolNodeData['outputContract']) => void
 }) {
+  const mode = outputContract?.mode ?? 'capture-stdout'
+  const requireNonEmpty = outputContract?.requireNonEmpty ?? true
   return (
     <div className="flex flex-col gap-1">
       <label className="text-text-secondary text-xs font-medium">
@@ -623,9 +630,38 @@ function ShellScriptField({
         Connected files are available as <code className="font-mono text-text-primary">$INPUT</code>,{' '}
         <code className="font-mono text-text-primary">$INPUT_1</code>,{' '}
         <code className="font-mono text-text-primary">$INPUT_2</code>, and{' '}
-        <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code> for all inputs. The node captures stdout into{' '}
-        <code className="font-mono text-text-primary">$OUTPUT</code>, so{' '}
-        <code className="font-mono text-text-primary">cat "$INPUT"</code> creates the output file.
+        <code className="font-mono text-text-primary">{'${INPUTS[@]}'}</code> for all inputs. Use{' '}
+        <code className="font-mono text-text-primary">$OUTPUT</code> for the declared result file.
+      </div>
+      <div className="mt-1 rounded-md border border-border bg-bg-tertiary/60 p-2">
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-text-muted">Output behavior</div>
+        <div className="grid grid-cols-2 gap-1 rounded border border-border bg-bg-primary p-1">
+          {[
+            { value: 'capture-stdout', label: 'Capture stdout' },
+            { value: 'script-writes-output', label: 'Script writes $OUTPUT' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onOutputContractChange({ mode: option.value as 'capture-stdout' | 'script-writes-output', requireNonEmpty })}
+              className={classNames(
+                'h-7 rounded text-[11px] transition-colors',
+                mode === option.value ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={requireNonEmpty}
+            onChange={(event) => onOutputContractChange({ mode, requireNonEmpty: event.target.checked })}
+            className="accent-accent"
+          />
+          Require the output file to exist and be non-empty
+        </label>
       </div>
     </div>
   )
@@ -1333,6 +1369,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
     }
     return result
   }, [nodes, edges, nodeId, tool, data])
+  const axisAlignment = useMemo(() => buildAxisAlignmentReport(snapshot, nodeId), [snapshot, nodeId])
 
   const setParam = useCallback(
     (name: string, value: unknown) => {
@@ -1797,7 +1834,15 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                   <div className="flex flex-col gap-2">
                     {sectionParams.map((p) => (
                       p.name === 'script'
-                        ? <ShellScriptField key={p.name} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
+                        ? (
+                            <ShellScriptField
+                              key={p.name}
+                              value={data.paramValues[p.name]}
+                              onChange={(v) => setParam(p.name, v)}
+                              outputContract={data.outputContract}
+                              onOutputContractChange={(contract) => updateNodeData(nodeId, { outputContract: contract })}
+                            />
+                          )
                         : <ParamField key={p.name} param={p} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
                     ))}
                   </div>
@@ -1831,6 +1876,28 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
             This tool receives at least one split input. BioFlow can submit one Slurm array task per accepted item,
             passing that item's path into the selected input port.
           </div>
+          {axisAlignment.rows.length > 1 && (
+            <div className={classNames(
+              'mb-2 rounded border px-2 py-1.5 text-[11px] leading-5',
+              axisAlignment.status === 'ok'
+                ? 'border-success/30 bg-success/10 text-success'
+                : 'border-warning/30 bg-warning/10 text-warning',
+            )}>
+              <div className="font-medium">{axisAlignment.message}</div>
+              <div className="mt-1 grid gap-1">
+                {axisAlignment.rows.map((row) => (
+                  <div key={row.portId} className="flex items-center justify-between gap-2">
+                    <span className="font-mono">{row.portId}</span>
+                    <span className="truncate text-right">
+                      {row.keys.length} keys
+                      {row.missingKeys.length > 0 ? ` · missing ${row.missingKeys.slice(0, 4).join(', ')}` : ''}
+                      {row.extraKeys.length > 0 ? ` · extra ${row.extraKeys.slice(0, 4).join(', ')}` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex flex-col gap-1">
             <label className="text-text-secondary text-xs font-medium">
               Input that controls the array
@@ -1848,7 +1915,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               <option value="__auto__">Auto: use the only split input</option>
               <option value="__none__">Single job: do not fan out</option>
               {axedInputPorts.map((p) => {
-                const port = tool.inputs.find((ip) => ip.id === p.portId)
+                const port = activeInputs.find((ip) => ip.id === p.portId)
                 return (
                   <option key={p.portId} value={p.portId}>
                     {port?.label ?? p.portId}: one task per "{p.axis}" item

@@ -14,6 +14,11 @@ interface CacheEntry {
   timestamp: number
 }
 
+interface Waiter {
+  resolve: (sftp: SFTPWrapper) => void
+  reject: (err: unknown) => void
+}
+
 // HPC login nodes can have low SSH channel/session limits. Keep SFTP
 // conservative so ordinary exec calls (script preview, mkdir, sbatch) still
 // have room to open a channel on the same SSH connection.
@@ -26,7 +31,8 @@ export class SftpPool {
   private static instance: SftpPool
   private pool = new Map<string, PoolEntry>()
   private cache = new Map<string, CacheEntry>()
-  private waitQueue = new Map<string, Array<(sftp: SFTPWrapper) => void>>()
+  private waitQueue = new Map<string, Waiter[]>()
+  private deadSessions = new WeakSet<SFTPWrapper>()
 
   private constructor() {}
 
@@ -45,8 +51,9 @@ export class SftpPool {
     }
 
     // Return an available session
-    if (entry.available.length > 0) {
+    while (entry.available.length > 0) {
       const sftp = entry.available.pop()!
+      if (this.deadSessions.has(sftp)) continue
       entry.inUse.add(sftp)
       return sftp
     }
@@ -60,16 +67,13 @@ export class SftpPool {
     }
 
     // Wait for one to become available
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let queue = this.waitQueue.get(connectionId)
       if (!queue) {
         queue = []
         this.waitQueue.set(connectionId, queue)
       }
-      queue.push((sftp) => {
-        entry!.inUse.add(sftp)
-        resolve(sftp)
-      })
+      queue.push({ resolve, reject })
     })
   }
 
@@ -78,21 +82,78 @@ export class SftpPool {
     if (!entry) return
 
     entry.inUse.delete(sftp)
+    if (this.deadSessions.has(sftp)) {
+      this.closeSftp(sftp)
+      this.replaceDeadSessionForNextWaiter(connectionId, entry)
+      return
+    }
 
     // Fulfill a waiting request if any
     const queue = this.waitQueue.get(connectionId)
     if (queue && queue.length > 0) {
       const next = queue.shift()!
-      next(sftp)
+      entry.inUse.add(sftp)
+      next.resolve(sftp)
       return
     }
 
     if (entry.available.length >= MAX_IDLE_PER_CONNECTION) {
-      try { sftp.end() } catch { /* ignore */ }
+      this.closeSftp(sftp)
       return
     }
 
     entry.available.push(sftp)
+  }
+
+  private discard(connectionId: string, sftp: SFTPWrapper): void {
+    const entry = this.pool.get(connectionId)
+    if (entry) entry.inUse.delete(sftp)
+    this.deadSessions.add(sftp)
+    this.closeSftp(sftp)
+    if (entry) this.replaceDeadSessionForNextWaiter(connectionId, entry)
+  }
+
+  private closeSftp(sftp: SFTPWrapper): void {
+    try { sftp.end() } catch { /* ignore */ }
+  }
+
+  private async withSftp<T>(
+    connectionId: string,
+    operation: (sftp: SFTPWrapper) => Promise<T>,
+    opts: { retryOnSessionFailure?: boolean } = {},
+  ): Promise<T> {
+    const maxAttempts = opts.retryOnSessionFailure ? 2 : 1
+    let lastError: unknown
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const sftp = await this.acquire(connectionId)
+      let keep = true
+      try {
+        return await operation(sftp)
+      } catch (err) {
+        lastError = err
+        if (isSftpSessionFailure(err)) {
+          keep = false
+          this.discard(connectionId, sftp)
+          if (attempt + 1 < maxAttempts) continue
+        }
+        throw err
+      } finally {
+        if (keep) this.release(connectionId, sftp)
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'SFTP operation failed'))
+  }
+
+  private replaceDeadSessionForNextWaiter(connectionId: string, entry: PoolEntry): void {
+    const queue = this.waitQueue.get(connectionId)
+    if (!queue || queue.length === 0) return
+    const next = queue.shift()!
+    this.createSftp(connectionId)
+      .then((fresh) => {
+        entry.inUse.add(fresh)
+        next.resolve(fresh)
+      })
+      .catch((err) => next.reject(err))
   }
 
   cleanup(connectionId: string): void {
@@ -105,6 +166,12 @@ export class SftpPool {
         sftp.end()
       }
       this.pool.delete(connectionId)
+    }
+    const queue = this.waitQueue.get(connectionId)
+    if (queue) {
+      for (const waiter of queue) {
+        waiter.reject(new Error(`SSH connection ${connectionId} closed`))
+      }
     }
     this.waitQueue.delete(connectionId)
     this.invalidateCache(connectionId)
@@ -129,8 +196,7 @@ export class SftpPool {
       return cached.entries
     }
 
-    const sftp = await this.acquire(connectionId)
-    try {
+    return this.withSftp(connectionId, async (sftp) => {
       const list = await new Promise<SshFileEntry[]>((resolve, reject) => {
         sftp.readdir(remotePath, (err, fileList) => {
           if (err) reject(err)
@@ -185,14 +251,11 @@ export class SftpPool {
 
       this.cache.set(cacheKey, { entries, timestamp: Date.now() })
       return entries
-    } finally {
-      this.release(connectionId, sftp)
-    }
+    }, { retryOnSessionFailure: true })
   }
 
   async stat(connectionId: string, remotePath: string): Promise<FileStat> {
-    const sftp = await this.acquire(connectionId)
-    try {
+    return this.withSftp(connectionId, async (sftp) => {
       const attrs = await new Promise<{ size: number; mtime: number; mode: number }>(
         (resolve, reject) => {
           sftp.stat(remotePath, (err, stats) => {
@@ -208,9 +271,7 @@ export class SftpPool {
         isDirectory: (attrs.mode & 0o40000) !== 0,
         permissions: modeToPermissions(attrs.mode),
       }
-    } finally {
-      this.release(connectionId, sftp)
-    }
+    }, { retryOnSessionFailure: true })
   }
 
   async read(
@@ -239,8 +300,7 @@ export class SftpPool {
     offset?: number,
     length?: number,
   ): Promise<Buffer> {
-    const sftp = await this.acquire(connectionId)
-    try {
+    return this.withSftp(connectionId, async (sftp) => {
       return await new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
         const readStream = sftp.createReadStream(remotePath, {
@@ -258,9 +318,7 @@ export class SftpPool {
 
         readStream.on('error', reject)
       })
-    } finally {
-      this.release(connectionId, sftp)
-    }
+    }, { retryOnSessionFailure: true })
   }
 
   async head(
@@ -268,8 +326,7 @@ export class SftpPool {
     remotePath: string,
     lines: number,
   ): Promise<string> {
-    const sftp = await this.acquire(connectionId)
-    try {
+    return this.withSftp(connectionId, async (sftp) => {
       const content = await new Promise<string>((resolve, reject) => {
         const chunks: Buffer[] = []
         const readStream = sftp.createReadStream(remotePath, {
@@ -290,9 +347,7 @@ export class SftpPool {
 
       const allLines = content.split('\n')
       return allLines.slice(0, lines).join('\n')
-    } finally {
-      this.release(connectionId, sftp)
-    }
+    }, { retryOnSessionFailure: true })
   }
 
   async mkdir(connectionId: string, remotePath: string): Promise<void> {
@@ -484,7 +539,13 @@ export class SftpPool {
     return new Promise((resolve, reject) => {
       client.sftp((err, sftp) => {
         if (err) reject(err)
-        else resolve(sftp)
+        else {
+          const markDead = () => this.deadSessions.add(sftp)
+          sftp.on('close', markDead)
+          sftp.on('end', markDead)
+          sftp.on('error', markDead)
+          resolve(sftp)
+        }
       })
     })
   }
@@ -493,6 +554,12 @@ export class SftpPool {
 function parentDir(filePath: string): string {
   const idx = filePath.lastIndexOf('/')
   return idx <= 0 ? '/' : filePath.slice(0, idx)
+}
+
+function isSftpSessionFailure(err: unknown): boolean {
+  const message = String(err instanceof Error ? err.message : err).toLowerCase()
+  return /channel|socket|connection|session|closed|not open|econnreset|eof|no response/.test(message)
+    && !/no such file|not found|permission denied/.test(message)
 }
 
 function modeToPermissions(mode: number): string {

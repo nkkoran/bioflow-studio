@@ -6,12 +6,13 @@ import type { RunState } from '@/types/pipeline'
 
 interface Props {
   run: RunState
+  connectionId: string | null
 }
 
-export function QueueDetails({ run }: Props) {
+export function QueueDetails({ run, connectionId }: Props) {
   const snapshots = useSlurmQueueStore((s) => s.byConnection)
   const refreshQueue = useSlurmQueueStore((s) => s.refreshQueue)
-  const snapshot = getQueueSnapshot(snapshots, run.connectionId)
+  const snapshot = connectionId ? getQueueSnapshot(snapshots, connectionId) : getQueueSnapshot(snapshots, '')
 
   const knownJobIds = useMemo(() => {
     const ids = new Set<string>()
@@ -28,19 +29,19 @@ export function QueueDetails({ run }: Props) {
   const oursCount = rows.filter((entry) => entry.isOurs).length
 
   useEffect(() => {
-    if (!run.connectionId) return
-    void refreshQueue(run.connectionId)
-  }, [run.connectionId, refreshQueue])
+    if (!connectionId) return
+    void refreshQueue(connectionId)
+  }, [connectionId, refreshQueue])
 
   // Pause auto-refresh when the last fetch errored — avoids spamming a dead
   // SSH connection every 10s. User-initiated Refresh still works and clears
   // the error on success.
   useEffect(() => {
-    if (!run.connectionId) return
+    if (!connectionId) return
     if (snapshot.error) return
-    const timer = setInterval(() => void refreshQueue(run.connectionId), 10_000)
+    const timer = setInterval(() => void refreshQueue(connectionId), 10_000)
     return () => clearInterval(timer)
-  }, [run.connectionId, refreshQueue, snapshot.error])
+  }, [connectionId, refreshQueue, snapshot.error])
 
   return (
     <div className="border-b border-border-light bg-bg-secondary/50 shrink-0">
@@ -50,6 +51,8 @@ export function QueueDetails({ run }: Props) {
           <div className="text-[11px] text-text-secondary truncate">
             {snapshot.error
               ? snapshot.error
+              : !connectionId
+                ? 'Reconnect to view the Slurm queue for this saved run'
               : rows.length > 0
                 ? `${rows.length} job${rows.length === 1 ? '' : 's'} in your queue · ${oursCount} from this run`
                 : 'No jobs currently visible in squeue'}
@@ -64,8 +67,8 @@ export function QueueDetails({ run }: Props) {
           variant="ghost"
           size="sm"
           icon={<RefreshCw size={11} className={snapshot.loading ? 'animate-spin' : ''} />}
-          onClick={() => void refreshQueue(run.connectionId)}
-          disabled={snapshot.loading}
+          onClick={() => { if (connectionId) void refreshQueue(connectionId) }}
+          disabled={snapshot.loading || !connectionId}
           className="h-6 px-2 text-[10px]"
         >
           Queue

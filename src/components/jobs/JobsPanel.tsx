@@ -20,6 +20,7 @@ import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStor
 import { useUIStore } from '@/stores/uiStore'
 import { useDialogStore } from '@/stores/dialogStore'
 import { buildRunManifest } from '@/lib/runManifest'
+import { resolveRunConnectionId, runConnectionUnavailableMessage } from '@/lib/runConnection'
 import { RunReportModal } from '@/components/pipeline/RunReportModal'
 import type { RunManifest } from '@/types/workspace'
 
@@ -38,6 +39,8 @@ export function JobsPanel() {
   const pipelineId = usePipelineStore((s) => s.pipelineId)
   const pipelineNodes = usePipelineStore((s) => s.nodes)
   const navigate = useFileStore((s) => s.navigate)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const connections = useConnectionStore((s) => s.connections)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const confirmDialog = useDialogStore((s) => s.confirm)
@@ -71,13 +74,15 @@ export function JobsPanel() {
     })
   }, [activeRun])
   const activeRunHasSshSteps = !activeRunIsDnxOnly && activeRun?.connectionId && activeRun.connectionId !== LOCAL_CONNECTION_ID
+  const activeRunConnectionId = activeRun ? resolveRunConnectionId(activeRun, activeConnectionId, connections) : null
+  const activeRunQueueConnectionId = activeRunHasSshSteps ? activeRunConnectionId : null
 
   const openReport = async () => {
     if (!activeRun) return
     setReporting(true)
     try {
       const scripts = activeRun.snapshot
-        ? await window.api.pipeline.generateScriptsDry(activeRun.connectionId, activeRun.snapshot, activeRun.workDir).catch(() => [])
+        ? await window.api.pipeline.generateScriptsDry(activeRunConnectionId ?? activeRun.connectionId, activeRun.snapshot, activeRun.workDir).catch(() => [])
         : []
       setReportPreview(buildRunManifest(activeRun, activeRun.snapshot, activeRun.workspace ?? null, { scripts }))
     } finally {
@@ -105,6 +110,16 @@ export function JobsPanel() {
     if (!activeRun?.workDir) return
     await navigator.clipboard.writeText(activeRun.workDir)
     window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'success', message: 'Copied run folder path' } }))
+  }
+
+  const openRunFolder = async () => {
+    if (!activeRun?.workDir) return
+    if (!activeRunConnectionId) {
+      window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'error', message: runConnectionUnavailableMessage(activeRun) } }))
+      return
+    }
+    setActiveConnection(activeRunConnectionId)
+    await navigate(activeRun.workDir, { connectionId: activeRunConnectionId })
   }
 
   const retryFromNode = async (nodeId: string) => {
@@ -214,10 +229,7 @@ export function JobsPanel() {
             variant="ghost"
             size="sm"
             icon={<FolderOpen size={12} />}
-            onClick={() => {
-              setActiveConnection(activeRun.connectionId)
-              void navigate(activeRun.workDir)
-            }}
+            onClick={() => void openRunFolder()}
             className="h-6 text-xs"
             title="Open run folder in the file explorer"
           >
@@ -308,7 +320,7 @@ export function JobsPanel() {
           )}
           <div className="flex-1 min-w-0 flex flex-col">
             <RunDetails run={activeRun} />
-            <QueueDetails run={activeRun} />
+            <QueueDetails run={activeRun} connectionId={activeRunQueueConnectionId} />
             <RunRecoveryCard
               run={activeRun}
               canRerun={activeRun.pipelineId === pipelineId}
@@ -328,7 +340,7 @@ export function JobsPanel() {
               const isTerminal =
                 !!ns && (ns.status === 'done' || ns.status === 'failed' || ns.status === 'cancelled')
               return isTerminal && ns ? (
-                <JobSummary runId={activeRun.runId} connectionId={activeRun.connectionId} ns={ns} />
+                <JobSummary run={activeRun} runId={activeRun.runId} connectionId={activeRunConnectionId} ns={ns} />
               ) : null
             })()}
             {selectedNodeId && activeRun.nodes[selectedNodeId]?.status === 'failed' && activeRun.pipelineId === pipelineId && (
@@ -343,8 +355,12 @@ export function JobsPanel() {
                 <span>DNAnexus jobs stream their logs on the platform.</span>
                 <span className="text-[10px]">Open the job in the DNAnexus web UI for real-time stdout/stderr.</span>
               </div>
-            ) : activeRun.connectionId && activeRun.connectionId !== LOCAL_CONNECTION_ID ? (
-              <LogViewer run={activeRun} connectionId={activeRun.connectionId} />
+            ) : activeRunHasSshSteps && activeRunConnectionId ? (
+              <LogViewer run={activeRun} connectionId={activeRunConnectionId} />
+            ) : activeRunHasSshSteps ? (
+              <div className="h-full flex items-center justify-center text-xs text-text-muted">
+                {runConnectionUnavailableMessage(activeRun)}
+              </div>
             ) : (
               <div className="h-full flex items-center justify-center text-xs text-text-muted">
                 Connect to view logs.

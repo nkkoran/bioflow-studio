@@ -43,6 +43,25 @@ describe('analysisOptions', () => {
     expect(enabledPorts).toContain('keep')
   })
 
+  it('creates a dynamic PLINK --read-freq input port when enabled', () => {
+    const tool = toolOrThrow('plink2.assoc')
+    const base: ToolNodeData = {
+      toolId: tool.id,
+      label: 'Assoc',
+      paramValues: {},
+      status: 'idle',
+    }
+    const options = normalizeAnalysisOptions(tool, base).map((option) =>
+      option.optionId === 'read-freq'
+        ? { ...option, enabled: true, source: { kind: 'upstream-file' as const, portId: 'read-freq' } }
+        : option,
+    )
+    const ports = getActiveToolInputs(tool, { ...base, analysisOptions: options }).map((port) => port.id)
+
+    expect(getAnalysisOptionDefs(tool).find((def) => def.id === 'read-freq')?.filePortId).toBe('read-freq')
+    expect(ports).toContain('read-freq')
+  })
+
   it('migrates legacy connected PLINK flag blocks into analysis options', () => {
     const tool = toolOrThrow('plink2.assoc')
     const legacy: ToolNodeData = {

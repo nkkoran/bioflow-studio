@@ -531,7 +531,7 @@ export function AnalysisOptionsPanel({
         if (count > 0) setDisconnectNotice({ count, portId })
       }
     }
-    patchOption(def.id, { enabled })
+    patchOption(def.id, def.kind === 'switch' && enabled ? { enabled, value: true } : { enabled })
   }
 
   const addCustomOption = () => {
@@ -625,7 +625,8 @@ export function AnalysisOptionsPanel({
                 key={def.id}
                 type="button"
                 onClick={() => {
-                  patchOption(def.id, { enabled: true })
+                  const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: false, value: def.defaultValue }
+                  toggleOption(def, option, true)
                   if (def.advanced || def.group === 'Advanced') setAdvancedOpen(true)
                 }}
                 className="rounded border border-border bg-bg-secondary px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
@@ -647,7 +648,7 @@ export function AnalysisOptionsPanel({
                     key={def.id}
                     type="button"
                     onClick={() => {
-                      patchOption(def.id, { ...option, enabled: true })
+                      toggleOption(def, option, true)
                       setSearch('')
                     }}
                     className="flex items-start justify-between gap-3 rounded border border-transparent px-2 py-1.5 text-left hover:border-border hover:bg-bg-secondary"

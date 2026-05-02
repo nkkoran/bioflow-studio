@@ -126,6 +126,126 @@ describe('ScriptGenerator', () => {
     expect(generated.script).toContain('--keep /data/keep.txt')
   })
 
+  it('does not emit PLINK iid-only modifiers from stale false-valued switch state', () => {
+    const tool = getTool('plink2.assoc')
+    if (!tool) throw new Error('missing tool')
+    const paramValues = {
+      glm: 'hide-covar',
+      'pheno-name': 'trait',
+      'pheno-iid-only': true,
+      'covar-name': 'age sex PC1',
+      'covar-iid-only': true,
+      one: true,
+    }
+    const analysisOptions = normalizeAnalysisOptions(tool, { paramValues }).map((option) => {
+      if (option.optionId === 'pheno-iid-only' || option.optionId === 'covar-iid-only') {
+        return { ...option, enabled: true, value: false }
+      }
+      if (option.optionId === 'covar') return { ...option, enabled: true }
+      if (option.optionId === 'one') return { ...option, enabled: true, value: false }
+      return option
+    })
+    const flagBlocks = ensureFlagBlocks('plink2.assoc', undefined, paramValues).map((block) => (
+      block.flagId === 'pheno-iid-only' || block.flagId === 'covar-iid-only'
+        ? { ...block, enabled: true, value: false }
+        : block
+    ))
+    const nodeData: ToolNodeData = {
+      toolId: 'plink2.assoc',
+      label: 'Assoc',
+      paramValues,
+      flagBlocks,
+      analysisOptions,
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'assoc',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        {
+          input: { kind: 'single', path: '/data/cohort.pgen' },
+          pheno: { kind: 'single', path: '/data/pheno.tsv' },
+          covar: { kind: 'single', path: '/data/covar.tsv' },
+        },
+        { output: { kind: 'single', path: '/work/assoc.tsv' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.script).toContain('--pheno /data/pheno.tsv')
+    expect(generated.script).toContain('--covar /data/covar.tsv')
+    expect(generated.script).not.toContain('--pheno iid-only')
+    expect(generated.script).not.toContain('--covar iid-only')
+    expect(generated.script).toContain('--1')
+  })
+
+  it('emits PLINK --read-freq from a dynamic split-aware input port', () => {
+    const tool = getTool('plink2.assoc')
+    if (!tool) throw new Error('missing tool')
+    const options = normalizeAnalysisOptions(tool, { paramValues: {} }).map((option) =>
+      option.optionId === 'read-freq'
+        ? { ...option, enabled: true, source: { kind: 'upstream-file' as const, portId: 'read-freq' } }
+        : option,
+    )
+    const nodeData: ToolNodeData = {
+      toolId: 'plink2.assoc',
+      label: 'Assoc',
+      paramValues: {},
+      analysisOptions: options,
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'assoc',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        {
+          input: { kind: 'single', path: '/data/cohort.pgen' },
+          pheno: { kind: 'single', path: '/data/pheno.tsv' },
+          'read-freq': { kind: 'single', path: '/data/freq.tsv' },
+        },
+        { output: { kind: 'single', path: '/work/assoc.tsv' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.script).toContain('--read-freq /data/freq.tsv')
+  })
+
+  it('lets custom shell nodes write the declared output file themselves', () => {
+    const tool = getTool('custom.shell')
+    if (!tool) throw new Error('missing tool')
+    const nodeData: ToolNodeData = {
+      toolId: 'custom.shell',
+      label: 'Custom',
+      paramValues: { script: 'awk \'{print $1}\' "$INPUT" > "$OUTPUT"' },
+      outputContract: { mode: 'script-writes-output', requireNonEmpty: true },
+      status: 'idle',
+    }
+
+    const generated = generateToolScript({
+      nodeId: 'custom',
+      tool,
+      nodeData,
+      axisPlan: singleAxisPlan(
+        { input: { kind: 'single', path: '/data/input.tsv' } },
+        { output: { kind: 'single', path: '/local/out.tsv' } },
+      ),
+      outputDir: '/work',
+      logDir: '/logs',
+    })
+
+    expect(generated.script).toContain('The script is responsible for writing the final result to $OUTPUT')
+    expect(generated.script).toContain('> "$OUTPUT"')
+    expect(generated.script).not.toContain('} > "$OUTPUT"')
+    expect(generated.script).toContain('test -s "$OUTPUT"')
+  })
+
   it('renders multi-phenotype PLINK association as a Slurm array', () => {
     const tool = getTool('plink2.assoc')
     if (!tool) throw new Error('missing tool')

@@ -25,9 +25,12 @@ import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useUIStore } from '@/stores/uiStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useDataCartStore } from '@/stores/dataCartStore'
 import type { RemoteFileEntry, SortField, SortDirection } from '@/types/files'
+import type { DataArtifact, DataArtifactRole } from '@/types/pipeline'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { classifyPreview } from '@/lib/filePreviewClassifier'
+import { artifactFromEntry, basename, collectProtectedInputPaths, isLargeGeneticPath, stripKnownPlinkExtension } from '@/lib/dataArtifacts'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
@@ -50,6 +53,19 @@ const SORT_OPTIONS: { label: string; field: SortField; direction: SortDirection 
   { label: 'Extension', field: 'extension', direction: 'asc' },
 ]
 
+const DATA_ROLE_OPTIONS: Array<{ value: DataArtifactRole; label: string }> = [
+  { value: 'genotypes', label: 'Genotypes' },
+  { value: 'phenotype', label: 'Phenotype' },
+  { value: 'covariates', label: 'Covariates' },
+  { value: 'keep', label: 'Keep samples' },
+  { value: 'extract', label: 'Extract SNPs' },
+  { value: 'read-freq', label: 'Read freq' },
+  { value: 'summary-stats', label: 'Summary stats' },
+  { value: 'other', label: 'Other' },
+]
+
+const SPLIT_ROLES = new Set<DataArtifactRole>(['genotypes', 'read-freq'])
+
 interface ExplorerTab {
   id: string
   label: string
@@ -68,6 +84,7 @@ export function FileExplorer() {
     sortField,
     sortDirection,
     selectedPaths,
+    cwdConnectionId,
     navigate,
     refresh,
     addBookmark,
@@ -86,10 +103,20 @@ export function FileExplorer() {
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
+  const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
   const devMode = useSettingsStore((s) => s.devMode)
   const fileExplorerViewMode = useSettingsStore((s) => s.settings.fileExplorerViewMode)
   const confirmDialog = useDialogStore((s) => s.confirm)
   const promptDialog = useDialogStore((s) => s.prompt)
+  const dataCartItems = useDataCartStore((s) => s.items)
+  const dataCartOpen = useDataCartStore((s) => s.open)
+  const setDataCartOpen = useDataCartStore((s) => s.setOpen)
+  const addDataCartItems = useDataCartStore((s) => s.addItems)
+  const removeDataCartItem = useDataCartStore((s) => s.removeItem)
+  const clearDataCart = useDataCartStore((s) => s.clear)
+  const updateDataCartRole = useDataCartStore((s) => s.updateRole)
+  const updateDataCartAxis = useDataCartStore((s) => s.updateAxis)
+  const setDataCartSidecarStatuses = useDataCartStore((s) => s.setSidecarStatuses)
 
   const dnxAuthStatus = useDnxStore((s) => s.authStatus)
   const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
@@ -97,6 +124,8 @@ export function FileExplorer() {
 
   const [origin, setOrigin] = useState<'fs' | 'dnx'>('fs')
   const [searchQuery, setSearchQuery] = useState('')
+  const [deepSearchResults, setDeepSearchResults] = useState<RemoteFileEntry[] | null>(null)
+  const [searchingDeep, setSearchingDeep] = useState(false)
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
   const [sortDropdownOpen, setSortDropdownOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -106,6 +135,7 @@ export function FileExplorer() {
   const [tabs, setTabs] = useState<ExplorerTab[]>([])
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
+  const [marquee, setMarquee] = useState<{ startX: number; startY: number; x: number; y: number; active: boolean } | null>(null)
   const currentExplorerLabel = useMemo(() => {
     if (origin === 'dnx') return 'DNAnexus'
     if (activeConnectionId === LOCAL_CONNECTION_ID) return 'Local'
@@ -146,31 +176,33 @@ export function FileExplorer() {
   // Navigate to home directory on connect
   useEffect(() => {
     if (isConnected && activeConnectionId) {
+      if (cwdConnectionId === activeConnectionId) return
       const conn = connections[activeConnectionId]
       if (conn?.config.defaultDirectory) {
-        navigate(conn.config.defaultDirectory)
+        navigate(conn.config.defaultDirectory, { connectionId: activeConnectionId })
       } else if (conn?.isLocal) {
         // Local connection: get homedir via local API
-        window.api.local.homedir().then((home) => navigate(home)).catch(() => navigate('/'))
+        window.api.local.homedir().then((home) => navigate(home, { connectionId: activeConnectionId })).catch(() => navigate('/', { connectionId: activeConnectionId }))
       } else {
         // Remote: resolve ~ via SSH exec
         window.api.ssh.exec(activeConnectionId, 'echo $HOME').then((result) => {
           const homePath = result.stdout.trim() || '/home'
-          navigate(homePath)
+          navigate(homePath, { connectionId: activeConnectionId })
         }).catch(() => {
-          navigate('/home')
+          navigate('/home', { connectionId: activeConnectionId })
         })
       }
     }
-  }, [activeConnectionId, isConnected]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeConnectionId, cwdConnectionId, isConnected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sort entries: directories first, then by sort field
+  const visibleEntries = deepSearchResults ?? entries
   const sortedEntries = useMemo(() => {
     const filtered = searchQuery
-      ? entries.filter((e) =>
-          e.name.toLowerCase().includes(searchQuery.toLowerCase()),
+      ? visibleEntries.filter((e) =>
+          e.name.toLowerCase().includes(searchQuery.toLowerCase()) || e.path.toLowerCase().includes(searchQuery.toLowerCase()),
         )
-      : entries
+      : visibleEntries
 
     return [...filtered].sort((a, b) => {
       // Directories always first
@@ -190,7 +222,7 @@ export function FileExplorer() {
           return 0
       }
     })
-  }, [entries, sortField, sortDirection, searchQuery])
+  }, [visibleEntries, sortField, sortDirection, searchQuery])
 
   const handleSelect = useCallback(
     (entry: RemoteFileEntry, event: React.MouseEvent) => {
@@ -219,9 +251,48 @@ export function FileExplorer() {
     [clearSelection, deselectFile, lastSelectedPath, selectFile, selectedPaths, sortedEntries],
   )
 
+  const applyMarqueeSelection = useCallback((box: { startX: number; startY: number; x: number; y: number }) => {
+    const left = Math.min(box.startX, box.x)
+    const right = Math.max(box.startX, box.x)
+    const top = Math.min(box.startY, box.y)
+    const bottom = Math.max(box.startY, box.y)
+    const matches: string[] = []
+    document.querySelectorAll<HTMLElement>('[data-file-path]').forEach((element) => {
+      const rect = element.getBoundingClientRect()
+      if (rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom) {
+        const path = element.dataset.filePath
+        if (path) matches.push(path)
+      }
+    })
+    clearSelection()
+    for (const path of matches) selectFile(path)
+  }, [clearSelection, selectFile])
+
+  const startMarquee = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('[data-file-path]')) return
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    setMarquee({ startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, active: true })
+  }, [])
+
+  const updateMarquee = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    setMarquee((current) => {
+      if (!current?.active) return current
+      const next = { ...current, x: event.clientX, y: event.clientY }
+      applyMarqueeSelection(next)
+      return next
+    })
+  }, [applyMarqueeSelection])
+
+  const finishMarquee = useCallback(() => {
+    setMarquee(null)
+  }, [])
+
   const handleNavigate = useCallback(
     (path: string) => {
       setSearchQuery('')
+      setDeepSearchResults(null)
       navigate(path)
     },
     [navigate],
@@ -281,9 +352,135 @@ export function FileExplorer() {
   const isCurrentBookmarked = bookmarks.includes(cwd)
   const canUploadLocal = Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
   const selectedEntries = useMemo(() => (
-    selectedPaths.map((path) => entries.find((entry) => entry.path === path)).filter((entry): entry is RemoteFileEntry => Boolean(entry))
-  ), [entries, selectedPaths])
+    selectedPaths.map((path) => visibleEntries.find((entry) => entry.path === path)).filter((entry): entry is RemoteFileEntry => Boolean(entry))
+  ), [selectedPaths, visibleEntries])
   const canManageCurrentFolder = Boolean(activeConnectionId && origin === 'fs')
+
+  const stageSelectedToCart = useCallback(() => {
+    if (selectedEntries.length === 0) return
+    const itemOrigin = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
+    addDataCartItems(selectedEntries.map((entry) => artifactFromEntry(entry, itemOrigin)))
+    setUploadMessage(`Staged ${selectedEntries.length} item${selectedEntries.length === 1 ? '' : 's'} in the data cart`)
+  }, [activeConnectionId, addDataCartItems, selectedEntries])
+
+  const addDataCartToCanvas = useCallback(() => {
+    if (dataCartItems.length === 0) return
+    const offset = Date.now() % 80
+    const groups = new Map<string, { role: DataArtifactRole; artifacts: DataArtifact[] }>()
+    for (const item of dataCartItems) {
+      const role = item.role ?? 'other'
+      const key = `${role}:${item.origin}`
+      const group = groups.get(key) ?? { role, artifacts: [] }
+      group.artifacts.push(item)
+      groups.set(key, group)
+    }
+    let created = 0
+    for (const { role, artifacts } of groups.values()) {
+      const rawFileArtifacts = artifacts.filter((item) => item.path)
+      const fileArtifacts = SPLIT_ROLES.has(role)
+        ? collapsePlinkFilesetArtifacts(rawFileArtifacts)
+        : rawFileArtifacts
+      if (fileArtifacts.length === 0) continue
+      const originLabel = fileArtifacts[0].origin
+      const source = originLabel === 'local' ? 'local' : 'remote'
+      const roleLabel = DATA_ROLE_OPTIONS.find((option) => option.value === role)?.label ?? 'Files'
+      if (fileArtifacts.length > 1 && SPLIT_ROLES.has(role)) {
+        const entriesForSplit = fileArtifacts.map((artifact) => ({
+          name: artifact.label,
+          path: artifact.path!,
+          isDirectory: artifact.kind === 'directory',
+          size: artifact.size ?? 0,
+          modified: artifact.modified ?? Date.now(),
+          permissions: '',
+          extension: artifact.label.includes('.') ? artifact.label.split('.').pop() ?? '' : '',
+        } satisfies RemoteFileEntry))
+        const splitGuess = inferManualSplitKeys(entriesForSplit)
+        const types = [...new Set(fileArtifacts.map((artifact) => artifact.fileType))]
+        addFileNode(
+          { x: 120 + offset + created * 28, y: 140 + offset + created * 28 },
+          {
+            isInput: true,
+            label: `${roleLabel} (${fileArtifacts.length})`,
+            path: '',
+            fileType: types.length === 1 ? types[0] : 'any',
+            source,
+            origin: originLabel,
+            split: {
+              axis: fileArtifacts[0].axis || splitGuess.axis,
+              items: fileArtifacts.map((artifact, index) => ({
+                key: splitGuess.keys[index] ?? artifact.label,
+                rawKey: splitGuess.rawKeys[index] ?? splitGuess.keys[index] ?? artifact.label,
+                path: artifact.path!,
+              })),
+              pattern: { kind: 'manual' },
+            },
+          },
+        )
+        created += 1
+        continue
+      }
+      for (const artifact of fileArtifacts) {
+        addFileNode(
+          { x: 120 + offset + created * 28, y: 140 + offset + created * 28 },
+          {
+            isInput: true,
+            label: role === 'other' ? artifact.label : `${roleLabel}: ${artifact.label}`,
+            path: artifact.path ?? '',
+            pathKind: artifact.kind === 'directory' ? 'directory' : 'file',
+            fileType: artifact.fileType,
+            source,
+            origin: artifact.origin,
+          },
+        )
+        created += 1
+      }
+    }
+    if (created > 0) {
+      setUploadMessage(`Added ${created} data node${created === 1 ? '' : 's'} from the cart`)
+      clearDataCart()
+    }
+  }, [addFileNode, clearDataCart, dataCartItems])
+
+  const runDeepSearch = useCallback(async () => {
+    if (!activeConnectionId || !searchQuery.trim() || origin !== 'fs') return
+    setSearchingDeep(true)
+    try {
+      const results = activeConnectionId === LOCAL_CONNECTION_ID
+        ? await window.api.local.search(cwd, searchQuery.trim(), { maxResults: 200, maxDepth: 5 })
+        : await window.api.sftp.search(activeConnectionId, cwd, searchQuery.trim(), { maxResults: 200, maxDepth: 5 })
+      setDeepSearchResults(results)
+      setUploadMessage(`Found ${results.length} matching path${results.length === 1 ? '' : 's'} under ${cwd}`)
+    } catch (err) {
+      setUploadMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSearchingDeep(false)
+      window.setTimeout(() => setUploadMessage(null), 4000)
+    }
+  }, [activeConnectionId, cwd, origin, searchQuery])
+
+  useEffect(() => {
+    if (!activeConnectionId || dataCartItems.length === 0) return
+    const pending = dataCartItems.filter((item) => item.origin === (activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh') && item.sidecars?.some((sidecar) => !sidecar.status || sidecar.status === 'unknown'))
+    if (pending.length === 0) return
+    let cancelled = false
+    async function checkSidecars() {
+      for (const item of pending) {
+        const paths = item.sidecars?.map((sidecar) => sidecar.path) ?? []
+        if (paths.length === 0) continue
+        try {
+          const rows = activeConnectionId === LOCAL_CONNECTION_ID
+            ? await window.api.local.statMany(paths)
+            : await window.api.sftp.statMany(activeConnectionId!, paths)
+          if (cancelled) return
+          setDataCartSidecarStatuses(item.id, Object.fromEntries(rows.map((row) => [row.path, row.ok ? 'present' : 'missing'])))
+        } catch {
+          if (!cancelled) setDataCartSidecarStatuses(item.id, Object.fromEntries(paths.map((path) => [path, 'unknown'])))
+        }
+      }
+    }
+    void checkSidecars()
+    return () => { cancelled = true }
+  }, [activeConnectionId, dataCartItems, setDataCartSidecarStatuses])
 
   const uploadLocalFile = useCallback(async () => {
     if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || uploading || uploadPickerOpen) return
@@ -332,7 +529,7 @@ export function FileExplorer() {
     setActiveTabId(tab.id)
     setOrigin(tab.origin === 'dnx' && dnxReady ? 'dnx' : 'fs')
     if (tab.connectionId && tab.connectionId !== activeConnectionId) setActiveConnection(tab.connectionId)
-    if (tab.cwd) navigate(tab.cwd)
+    if (tab.cwd) navigate(tab.cwd, { connectionId: tab.connectionId ?? undefined })
   }, [activeConnectionId, dnxReady, navigate, setActiveConnection, tabs])
 
   const addExplorerTab = useCallback(() => {
@@ -455,7 +652,12 @@ export function FileExplorer() {
       return
     }
     const fileEntries = selectedEntries.filter((entry) => !entry.isDirectory)
-    const entriesForSplit = fileEntries.length > 0 ? fileEntries : selectedEntries
+    const entriesForSplitRaw = fileEntries.length > 0 ? fileEntries : selectedEntries
+    const entriesForSplit = collapsePlinkFileEntries(entriesForSplitRaw)
+    if (entriesForSplit.length === 1) {
+      addEntryToCanvas(entriesForSplit[0])
+      return
+    }
     const types = [...new Set(entriesForSplit.map((entry) => entry.isDirectory ? 'any' : inferFileType(entry.name)))]
     const splitGuess = inferManualSplitKeys(entriesForSplit)
     addFileNode(
@@ -469,7 +671,7 @@ export function FileExplorer() {
         origin: originLabel,
           split: {
             axis: splitGuess.axis,
-          items: entriesForSplit.map((entry, index) => ({ key: splitGuess.keys[index] ?? entry.name, path: entry.path })),
+          items: entriesForSplit.map((entry, index) => ({ key: splitGuess.keys[index] ?? entry.name, rawKey: splitGuess.rawKeys[index] ?? entry.name, path: entry.path })),
           pattern: { kind: 'manual' },
         },
       },
@@ -500,12 +702,24 @@ export function FileExplorer() {
 
   const deleteEntry = useCallback(async (entry: RemoteFileEntry) => {
     if (!activeConnectionId || origin !== 'fs') return
+    const protectedInputs = new Set(collectProtectedInputPaths(exportSnapshot()))
+    if (protectedInputs.has(entry.path)) {
+      setUploadMessage('That path is currently used as a pipeline input, so BioFlow will not delete it from the explorer.')
+      window.setTimeout(() => setUploadMessage(null), 5000)
+      return
+    }
+    const folderPrefix = entry.path.replace(/\/+$/, '') + '/'
+    if (entry.isDirectory && [...protectedInputs].some((path) => path.startsWith(folderPrefix))) {
+      setUploadMessage('That folder contains a current pipeline input or PLINK sidecar, so BioFlow will not delete it from the explorer.')
+      window.setTimeout(() => setUploadMessage(null), 5000)
+      return
+    }
     const confirmed = await confirmDialog({
       title: entry.isDirectory ? 'Delete folder' : 'Delete file',
       message: `Delete ${entry.path}?`,
       detail: entry.isDirectory
         ? 'This deletes the folder and everything inside it. Pipeline input files are never deleted by cleanup; use this only for files you intentionally selected here.'
-        : likelyLargeBioFile(entry.name, entry.size)
+        : likelyLargeBioFile(entry.name, entry.size) || isLargeGeneticPath(entry.path)
           ? 'This looks like a genetic data file. Delete only if you are certain it is a disposable copy.'
           : 'This only deletes the selected file from the file explorer.',
       confirmLabel: 'Delete',
@@ -523,7 +737,7 @@ export function FileExplorer() {
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, clearSelection, confirmDialog, handleCloseContextMenu, origin, refresh])
+  }, [activeConnectionId, clearSelection, confirmDialog, exportSnapshot, handleCloseContextMenu, origin, refresh])
 
   const createFileInFolder = useCallback(async (dirPath: string) => {
     if (!activeConnectionId || origin !== 'fs') return
@@ -799,6 +1013,14 @@ export function FileExplorer() {
           </Tooltip>
         )}
 
+        {selectedEntries.length > 0 && (
+          <Tooltip content="Stage selected files in the data cart before adding them to the pipeline">
+            <Button variant="ghost" size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={stageSelectedToCart}>
+              <span className="text-xs">Stage</span>
+            </Button>
+          </Tooltip>
+        )}
+
         {/* Sort dropdown */}
         <div className="relative ml-auto">
           <Button
@@ -887,13 +1109,84 @@ export function FileExplorer() {
             placeholder="Search..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void runDeepSearch()
+              if (e.key === 'Escape') setDeepSearchResults(null)
+            }}
             className="w-full bg-transparent text-xs text-text-primary placeholder:text-text-muted outline-none"
           />
+          {deepSearchResults && (
+            <button type="button" onClick={() => setDeepSearchResults(null)} className="rounded px-1 text-[10px] text-text-muted hover:bg-bg-hover hover:text-text-primary">
+              local
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void runDeepSearch()}
+            disabled={!searchQuery.trim() || searchingDeep}
+            className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-secondary hover:text-text-primary disabled:opacity-40"
+            title="Search inside folders from the current location"
+          >
+            {searchingDeep ? '...' : 'deep'}
+          </button>
         </div>
       </div>
 
+      {dataCartItems.length > 0 && (
+        <div className="border-b border-border bg-bg-secondary/60">
+          <button
+            type="button"
+            onClick={() => setDataCartOpen(!dataCartOpen)}
+            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-hover"
+          >
+            {dataCartOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            <FilePlus2 className="h-3 w-3" />
+            Data cart ({dataCartItems.length})
+            <span className="ml-auto text-[10px] text-text-muted">stage, label, add</span>
+          </button>
+          {dataCartOpen && (
+            <div className="flex max-h-64 flex-col gap-1 overflow-y-auto px-2 pb-2">
+              {dataCartItems.map((item) => (
+                <DataCartRow
+                  key={item.id}
+                  item={item}
+                  onRole={(role) => updateDataCartRole(item.id, role)}
+                  onAxis={(axis) => updateDataCartAxis(item.id, axis)}
+                  onRemove={() => removeDataCartItem(item.id)}
+                />
+              ))}
+              <div className="mt-1 flex items-center gap-1">
+                <Button variant="primary" size="sm" className="h-7 px-2 text-[11px]" onClick={addDataCartToCanvas}>
+                  Add to canvas
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={clearDataCart}>
+                  Clear
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* File list */}
-      <div className="flex-1 overflow-y-auto">
+      <div
+        className="relative flex-1 overflow-y-auto"
+        onPointerDown={startMarquee}
+        onPointerMove={updateMarquee}
+        onPointerUp={finishMarquee}
+        onPointerCancel={finishMarquee}
+      >
+        {marquee?.active && (
+          <div
+            className="pointer-events-none fixed z-[120] rounded border border-accent bg-accent/15"
+            style={{
+              left: Math.min(marquee.startX, marquee.x),
+              top: Math.min(marquee.startY, marquee.y),
+              width: Math.abs(marquee.x - marquee.startX),
+              height: Math.abs(marquee.y - marquee.startY),
+            }}
+          />
+        )}
         {loading && (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-5 w-5 animate-spin text-text-muted" />
@@ -992,6 +1285,7 @@ function FileIconNode({
   return (
     <Tooltip content={entry.path} side="right" delay={500}>
       <div
+        data-file-path={entry.path}
         className={classNames(
           'flex h-[108px] w-[92px] cursor-pointer flex-col items-center gap-1.5 rounded-md px-1.5 py-2 text-center transition-colors',
           isSelected
@@ -1037,6 +1331,108 @@ function FileIconNode({
   )
 }
 
+function DataCartRow({
+  item,
+  onRole,
+  onAxis,
+  onRemove,
+}: {
+  item: DataArtifact
+  onRole: (role: DataArtifactRole) => void
+  onAxis: (axis: string) => void
+  onRemove: () => void
+}) {
+  const missingSidecars = item.sidecars?.filter((sidecar) => sidecar.status === 'missing') ?? []
+  const presentSidecars = item.sidecars?.filter((sidecar) => sidecar.status === 'present') ?? []
+  return (
+    <div className="rounded-md border border-border-light bg-bg-primary px-2 py-1.5">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[11px] font-medium text-text-primary" title={item.path}>{item.label}</div>
+          <div className="truncate text-[10px] text-text-muted">{item.kind} · {item.fileType}</div>
+        </div>
+        <button type="button" onClick={onRemove} className="rounded p-0.5 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Remove from cart">
+          <Trash2 size={12} />
+        </button>
+      </div>
+      <div className="mt-1.5 grid grid-cols-[1fr_68px] gap-1">
+        <select
+          value={item.role ?? 'other'}
+          onChange={(event) => onRole(event.target.value as DataArtifactRole)}
+          className="h-6 min-w-0 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
+        >
+          {DATA_ROLE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <input
+          value={item.axis ?? ''}
+          onChange={(event) => onAxis(event.target.value)}
+          placeholder="axis"
+          className="h-6 min-w-0 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
+        />
+      </div>
+      {item.sidecars && item.sidecars.length > 0 && (
+        <div className={classNames(
+          'mt-1 rounded px-1.5 py-1 text-[10px]',
+          missingSidecars.length > 0 ? 'bg-warning/10 text-warning' : 'bg-success/10 text-success',
+        )}>
+          {missingSidecars.length > 0
+            ? `Missing sidecar${missingSidecars.length === 1 ? '' : 's'}: ${missingSidecars.map((sidecar) => basename(sidecar.path)).join(', ')}`
+            : presentSidecars.length === item.sidecars.length
+              ? 'PLINK sidecars found'
+              : 'Checking PLINK sidecars'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function collapsePlinkFilesetArtifacts(items: DataArtifact[]): DataArtifact[] {
+  const byPrefix = new Map<string, DataArtifact[]>()
+  const passthrough: DataArtifact[] = []
+  for (const item of items) {
+    if (!item.path) continue
+    const parsed = stripKnownPlinkExtension(item.path)
+    if (!parsed.family) {
+      passthrough.push(item)
+      continue
+    }
+    const key = `${item.origin}:${parsed.family}:${parsed.prefix}`
+    byPrefix.set(key, [...(byPrefix.get(key) ?? []), item])
+  }
+  const collapsed = [...byPrefix.values()].map((group) => (
+    group.find((item) => /\.pgen$/i.test(item.path ?? '')) ??
+    group.find((item) => /\.bed$/i.test(item.path ?? '')) ??
+    group[0]
+  ))
+  return [...passthrough, ...collapsed]
+}
+
+function collapsePlinkFileEntries(entries: RemoteFileEntry[]): RemoteFileEntry[] {
+  const byPrefix = new Map<string, RemoteFileEntry[]>()
+  const passthrough: RemoteFileEntry[] = []
+  for (const entry of entries) {
+    if (entry.isDirectory) {
+      passthrough.push(entry)
+      continue
+    }
+    const parsed = stripKnownPlinkExtension(entry.path)
+    if (!parsed.family) {
+      passthrough.push(entry)
+      continue
+    }
+    const key = `${parsed.family}:${parsed.prefix}`
+    byPrefix.set(key, [...(byPrefix.get(key) ?? []), entry])
+  }
+  const collapsed = [...byPrefix.values()].map((group) => (
+    group.find((entry) => /\.pgen$/i.test(entry.path)) ??
+    group.find((entry) => /\.bed$/i.test(entry.path)) ??
+    group[0]
+  ))
+  return [...passthrough, ...collapsed]
+}
+
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_\-./~:]+$/.test(value)) return value
   return `'${value.replace(/'/g, `'"'"'`)}'`
@@ -1076,19 +1472,20 @@ function fileEntryMatchesAccept(accept: string[] | undefined, entry: RemoteFileE
   return false
 }
 
-function inferManualSplitKeys(entries: RemoteFileEntry[]): { axis: string; keys: string[] } {
+function inferManualSplitKeys(entries: RemoteFileEntry[]): { axis: string; keys: string[]; rawKeys: string[] } {
   const chrKeys = entries.map((entry) => {
     const match = entry.name.match(/(?:^|[^A-Za-z0-9])(?:chr|chrom|chromosome)[._-]?([0-9]+|x|y|xy|m|mt)(?=$|[^A-Za-z0-9])/i)
-    return match?.[1] ? normalizeSplitKey(match[1]) : null
+    return match?.[1] ? { key: normalizeSplitKey(match[1]), rawKey: match[1] } : null
   })
-  if (chrKeys.every(Boolean) && new Set(chrKeys).size === chrKeys.length) {
-    return { axis: 'chrom', keys: chrKeys as string[] }
+  if (chrKeys.every(Boolean) && new Set(chrKeys.map((item) => item?.key)).size === chrKeys.length) {
+    return { axis: 'chrom', keys: chrKeys.map((item) => item!.key), rawKeys: chrKeys.map((item) => item!.rawKey) }
   }
   const numericKeys = entries.map((entry) => entry.name.match(/(\d+)/)?.[1] ?? null)
-  if (numericKeys.every(Boolean) && new Set(numericKeys).size === numericKeys.length) {
-    return { axis: 'item', keys: numericKeys.map((key) => normalizeSplitKey(key ?? '')) }
+  const normalizedNumeric = numericKeys.map((key) => key ? normalizeSplitKey(key) : null)
+  if (numericKeys.every(Boolean) && new Set(normalizedNumeric).size === numericKeys.length) {
+    return { axis: 'item', keys: normalizedNumeric as string[], rawKeys: numericKeys as string[] }
   }
-  return { axis: 'file', keys: entries.map((entry) => entry.name) }
+  return { axis: 'file', keys: entries.map((entry) => entry.name), rawKeys: entries.map((entry) => entry.name) }
 }
 
 function normalizeSplitKey(key: string): string {

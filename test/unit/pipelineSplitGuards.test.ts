@@ -58,4 +58,76 @@ describe('pipeline split guards', () => {
       getTool,
     })).toThrow(AxisPlanError)
   })
+
+  it('does not let local output sinks become remote execution paths', () => {
+    const snap = snapshot([
+      {
+        id: 'view',
+        type: 'tool',
+        position: { x: 0, y: 0 },
+        data: { toolId: 'bcftools.view', label: 'View', paramValues: {}, status: 'idle' },
+      },
+      {
+        id: 'local_out',
+        type: 'file',
+        position: { x: 1, y: 0 },
+        data: {
+          label: 'Local result',
+          path: '/Users/me/CAD.tsv',
+          source: 'local',
+          origin: 'local',
+          fileType: 'vcf',
+          isInput: false,
+        },
+      },
+    ], [
+      { id: 'edge_out', source: 'view', target: 'local_out', sourceHandle: 'output', targetHandle: 'input' },
+    ])
+
+    const plans = planAxes(snap, {
+      outputRoot: '/scratch/bioflow/outputs',
+      getTool,
+      nodeSlug: () => 'view',
+    })
+
+    const output = plans.get('view')?.outputs.output
+    expect(output?.kind).toBe('single')
+    expect(output?.path).toBe('/scratch/bioflow/outputs/view/view.output.vcf.gz')
+  })
+
+  it('uses explicit transfer destination folders without appending the node slug', () => {
+    const snap = snapshot([
+      {
+        id: 'view',
+        type: 'tool',
+        position: { x: 0, y: 0 },
+        data: { toolId: 'bcftools.view', label: 'View', paramValues: {}, status: 'idle' },
+      },
+      {
+        id: 'download',
+        type: 'transfer',
+        position: { x: 1, y: 0 },
+        data: {
+          label: 'Download result',
+          from: 'ssh',
+          to: 'local',
+          localFolder: '/Users/me/BioFlow',
+          outputName: 'cad.tsv',
+          status: 'idle',
+        },
+      },
+    ], [
+      { id: 'edge_transfer', source: 'view', target: 'download', sourceHandle: 'output', targetHandle: 'input' },
+    ])
+
+    const plans = planAxes(snap, {
+      outputRoot: '/scratch/bioflow/outputs',
+      getTool,
+      nodeSlug: (id) => id,
+    })
+
+    const output = plans.get('download')?.outputs.output
+    expect(output?.kind).toBe('single')
+    expect(output?.path).toBe('/Users/me/BioFlow/cad.tsv')
+  })
 })

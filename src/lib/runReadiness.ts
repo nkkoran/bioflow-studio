@@ -115,7 +115,7 @@ function workflowCategory(issue: WorkflowReadinessIssue): RunReadinessIssue['cat
 }
 
 function validationAction(issue: ValidationIssueLike): RunReadinessIssue['action'] {
-  if (issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER') return 'insert-transfer'
+  if (issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER' || issue.code === 'LOCAL_OUTPUT_NEEDS_TRANSFER') return 'insert-transfer'
   if (issue.code === 'GENOME_BUILD_MISMATCH') return 'insert-liftover'
   if (issue.code === 'DNX_NO_PROJECT' || issue.code === 'DNX_NOT_AUTHENTICATED') return 'open-settings'
   if (issue.nodeId) return 'select-node'

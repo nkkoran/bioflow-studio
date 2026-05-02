@@ -34,6 +34,8 @@ interface Window {
     sftp: {
       ls: (id: string, remotePath: string, opts?: { force?: boolean }) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (id: string, remotePath: string) => Promise<import('./types/files').FileStat>
+      statMany: (id: string, remotePaths: string[]) => Promise<Array<{ path: string; ok: boolean; stat?: import('./types/files').FileStat; error?: string }>>
+      search: (id: string, rootPath: string, query: string, opts?: { maxResults?: number; maxDepth?: number }) => Promise<import('./types/files').RemoteFileEntry[]>
       read: (id: string, remotePath: string, offset?: number, length?: number) => Promise<string>
       readBase64: (id: string, remotePath: string, offset?: number, length?: number) => Promise<string>
       head: (id: string, remotePath: string, lines: number) => Promise<string>
@@ -91,6 +93,8 @@ interface Window {
     local: {
       ls: (dirPath: string) => Promise<import('./types/files').RemoteFileEntry[]>
       stat: (filePath: string) => Promise<import('./types/files').FileStat>
+      statMany: (filePaths: string[]) => Promise<Array<{ path: string; ok: boolean; stat?: import('./types/files').FileStat; error?: string }>>
+      search: (rootPath: string, query: string, opts?: { maxResults?: number; maxDepth?: number }) => Promise<import('./types/files').RemoteFileEntry[]>
       read: (filePath: string, offset?: number, length?: number) => Promise<string>
       readBase64: (filePath: string, offset?: number, length?: number) => Promise<string>
       head: (filePath: string, lines: number) => Promise<string>
@@ -115,7 +119,7 @@ interface Window {
       rerunNode: (runId: string, nodeId: string, snapshot: import('./types/pipeline').PipelineSnapshot) => Promise<void>
       listRuns: () => Promise<import('./types/pipeline').RunState[]>
       getRun: (runId: string) => Promise<import('./types/pipeline').RunState | null>
-      listOutputs: (runId: string, nodeId: string) => Promise<Array<{ name: string; path: string; size: number; modified: number }>>
+      listOutputs: (runId: string, nodeId: string, connectionId?: string) => Promise<Array<{ name: string; path: string; size: number; modified: number; origin: 'local' | 'ssh' | 'dnx' }>>
       generateScriptsDry: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string) => Promise<import('./types/pipeline').DryRunScript[]>
       planTransfersDry: (snapshot: import('./types/pipeline').PipelineSnapshot) => Promise<import('./types/pipeline').TransferPlan[]>
       onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: import('./types/pipeline').RunStatus | 'idle'; jobId?: string; error?: string; node?: import('./types/pipeline').NodeRunState }) => void) => () => void

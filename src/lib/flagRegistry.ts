@@ -161,6 +161,22 @@ function plinkCommonVariantFilterDefs(): ToolFlagDef[] {
   ]
 }
 
+function plinkCommonFrequencyInputDefs(): ToolFlagDef[] {
+  return [
+    {
+      id: 'read-freq',
+      flag: '--read-freq',
+      label: 'Allele frequency file',
+      group: 'Input',
+      kind: 'fileInput',
+      sourcePortId: 'read-freq',
+      defaultEnabled: false,
+      defaultValue: source('upstream-file', undefined, 'read-freq'),
+      description: 'Supply precomputed allele frequencies. For split genotype runs, connect a matching split set so each task receives the frequency file with the same key.',
+    },
+  ]
+}
+
 function plinkCommonNumericVariantFilterDefs(): ToolFlagDef[] {
   return [
     { id: 'max-maf', flag: '--max-maf', label: 'Max MAF', group: 'Filters', kind: 'value', defaultEnabled: false, defaultValue: 0.5, paramName: 'max-maf' },
@@ -194,6 +210,7 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
     { id: 'geno', flag: '--geno', label: 'Max missing genotype rate', group: 'Filters', kind: 'value', defaultEnabled: true, defaultValue: 0.05, paramName: 'geno' },
     { id: 'hwe', flag: '--hwe', label: 'HWE p-value', group: 'Filters', kind: 'value', defaultEnabled: true, defaultValue: 1e-6, paramName: 'hwe' },
     ...plinkCommonSampleFilterDefs(),
+    ...plinkCommonFrequencyInputDefs(),
     ...plinkCommonVariantFilterDefs(),
     { id: 'condition', flag: '--condition', label: 'Condition on variant ID', group: 'Advanced', kind: 'value', defaultEnabled: false, paramName: 'condition' },
     { id: 'condition-list', flag: '--condition-list', label: 'Condition list file', group: 'Advanced', kind: 'fileInput', defaultEnabled: false, defaultValue: source('path', ''), paramName: 'condition-list' },
@@ -209,6 +226,7 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
     { id: 'mind', flag: '--mind', label: 'Max missing per sample', group: 'Filters', kind: 'value', defaultEnabled: true, defaultValue: 0.02, paramName: 'mind' },
     { id: 'hwe', flag: '--hwe', label: 'HWE p-value', group: 'Filters', kind: 'value', defaultEnabled: true, defaultValue: 1e-6, paramName: 'hwe' },
     ...plinkCommonSampleFilterDefs(),
+    ...plinkCommonFrequencyInputDefs(),
     ...plinkCommonVariantFilterDefs(),
     { id: 'make-bed', flag: '--make-bed', label: 'Output BED format', group: 'Output', kind: 'toggle', defaultEnabled: true, defaultValue: true, paramName: 'make-bed' },
     ...plinkTroubleshootingDefs(),
@@ -222,6 +240,7 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
     { id: 'clump-snp-field', flag: '--clump-snp-field', label: 'Variant ID column', group: 'Input', kind: 'columnRef', sourcePortId: 'clump', defaultEnabled: true, defaultValue: source('literal', 'ID', 'clump'), paramName: 'clump-snp-field', requiredValue: true },
     { id: 'clump-field', flag: '--clump-field', label: 'P-value column', group: 'Input', kind: 'columnRef', sourcePortId: 'clump', defaultEnabled: true, defaultValue: source('literal', 'P', 'clump'), paramName: 'clump-field', requiredValue: true },
     ...plinkCommonSampleFilterDefs(),
+    ...plinkCommonFrequencyInputDefs(),
     ...plinkCommonVariantFilterDefs(),
     { id: 'clump-a1-field', flag: '--clump-a1-field', label: 'Effect allele column', group: 'Input', kind: 'columnRef', sourcePortId: 'clump', defaultEnabled: false, defaultValue: source('literal', 'A1', 'clump'), paramName: 'clump-a1-field' },
     { id: 'clump-test-field', flag: '--clump-test-field', label: 'Test column', group: 'Input', kind: 'columnRef', sourcePortId: 'clump', defaultEnabled: false, defaultValue: source('literal', 'TEST', 'clump'), paramName: 'clump-test-field' },
@@ -236,6 +255,7 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
     { id: 'score-col-nums', flag: '--score-col-nums', label: 'Score columns', group: 'Input', kind: 'list', defaultEnabled: true, defaultValue: '1 2 3', paramName: 'score-col-nums' },
     { id: 'extract', flag: '--extract', label: 'Extract ranges', group: 'Filters', kind: 'fileInput', sourcePortId: 'extract', defaultEnabled: true, defaultValue: source('upstream-file', undefined, 'extract') },
     ...plinkCommonSampleFilterDefs(),
+    ...plinkCommonFrequencyInputDefs(),
     ...plinkCommonNumericVariantFilterDefs(),
     { id: 'header', flag: 'header', label: 'Score file has header', group: 'Advanced', kind: 'toggle', defaultEnabled: true, defaultValue: true, paramName: 'header' },
     { id: 'center', flag: 'center', label: 'Center scores', group: 'Advanced', kind: 'toggle', defaultEnabled: false, defaultValue: false, paramName: 'center' },
@@ -251,6 +271,7 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
     { id: 'geno', flag: '--geno', label: 'Max missing genotype', group: 'Filters', kind: 'value', defaultEnabled: true, defaultValue: 0.02, paramName: 'geno' },
     { id: 'hwe', flag: '--hwe', label: 'HWE p-value', group: 'Filters', kind: 'value', defaultEnabled: false, defaultValue: 1e-6, paramName: 'hwe' },
     ...plinkCommonSampleFilterDefs(),
+    ...plinkCommonFrequencyInputDefs(),
     ...plinkCommonVariantFilterDefs(),
     ...plinkTroubleshootingDefs(),
   ],
@@ -315,6 +336,7 @@ const FLAG_DESCRIPTIONS: Record<string, string> = {
   'neg9-pheno-really-missing': 'Confirm that -9 should be treated as missing phenotype data.',
   'no-input-missing-phenotype': 'Treat -9 as a real numeric phenotype value.',
   'input-missing-phenotype': 'Custom phenotype missing-value token for PLINK input.',
+  'read-freq': 'Allele frequency file passed to PLINK2 --read-freq.',
   extract: 'Variant or range file used to filter prior to scoring.',
   pca: 'Number of principal components to compute.',
 }
@@ -431,7 +453,7 @@ export function buildDefaultFlagBlocks(toolId: string, paramValues: Record<strin
   const covered = new Set(defs.map((def) => def.paramName).filter(Boolean))
   const blocks = defs.map((def) => {
     const raw = def.paramName ? paramValues[def.paramName] : undefined
-    const hasRaw = raw !== undefined && raw !== null && raw !== ''
+    const hasRaw = raw !== undefined && raw !== null && raw !== '' && (def.kind !== 'toggle' || raw !== false)
     return {
       id: flagId(def.id),
       flagId: def.id,
@@ -527,10 +549,13 @@ export function flagBlocksToParamValues(
       delete next[def.paramName]
       continue
     }
+    if (def.kind === 'toggle') {
+      next[def.paramName] = true
+      continue
+    }
     const value = paramValueFromBlockValue(block.value)
     if (value === undefined || value === null || value === '') {
-      if (def.kind === 'toggle') next[def.paramName] = true
-      else delete next[def.paramName]
+      delete next[def.paramName]
       continue
     }
     next[def.paramName] = value

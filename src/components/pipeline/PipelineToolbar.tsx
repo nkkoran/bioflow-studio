@@ -5,9 +5,8 @@
  * Also shows the editable pipeline name and a dirty-indicator dot.
  *
  * On Run: validates the pipeline. If there are errors a blocking modal is
- * shown (fix required). If there are only warnings the modal offers "Run
- * anyway". If everything is clean, or only informational notes are present,
- * the run starts immediately.
+ * shown (fix required). Otherwise a run-review modal summarizes files,
+ * scripts, transfers, split alignment, and cleanup before submission.
  */
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Save, FolderOpen, FilePlus2, Undo2, Redo2, Play, Download, Square, AlertTriangle, XCircle, FileCode2, LayoutTemplate, CheckSquare, CheckCircle2, Info, Loader2, ListChecks } from 'lucide-react'
@@ -29,7 +28,7 @@ import {
   nodeDataWithAnalysisOptionEnabled,
   snapshotWithAnalysisOptionEnabled,
 } from '@/lib/plinkQuickFix'
-import type { MergeNodeData, PipelineSnapshot, ToolNodeData, TransferPlan } from '@/types/pipeline'
+import type { MergeNodeData, PipelineSnapshot, RunReview, ToolNodeData, TransferPlan } from '@/types/pipeline'
 import { ScriptPreviewModal } from './ScriptPreviewModal'
 import { instantiateTemplate, PIPELINE_TEMPLATES } from '@/lib/pipelineTemplates'
 import { Dialog } from '@/components/ui/Dialog'
@@ -42,13 +41,16 @@ import type { ClusterModuleSuggestion } from '@/types/ssh'
 import { useWorkflowReadinessStore } from '@/stores/readinessStore'
 import type { DryRunScript } from '@/types/pipeline'
 import { buildWorkflowGuide, type WorkflowGuideStep } from '@/lib/workflowGuide'
+import { buildRunReview } from '@/lib/runReview'
 
 // ── Run-confirmation modal ──────────────────────────────────────────────────
 
 interface ConfirmDialogProps {
   result: ValidationResult
+  review?: RunReview | null
+  snapshot: PipelineSnapshot
   /** Called when the user confirms they want to run despite warnings. */
-  onRunAnyway: () => void
+  onRunAnyway: (snapshot: PipelineSnapshot) => void
   onQuickFix?: (issue: ValidationIssue) => void
   onCreateRemoteFolder?: (issue: ValidationIssue) => void
   onApplyModule?: (issue: ValidationIssue, moduleName: string) => void
@@ -56,10 +58,18 @@ interface ConfirmDialogProps {
   onClose: () => void
 }
 
-function RunConfirmDialog({ result, onRunAnyway, onQuickFix, onCreateRemoteFolder, onApplyModule, onSelectNode, onClose }: ConfirmDialogProps) {
+function RunConfirmDialog({ result, review, snapshot, onRunAnyway, onQuickFix, onCreateRemoteFolder, onApplyModule, onSelectNode, onClose }: ConfirmDialogProps) {
   const hasErrors = result.errorCount > 0
   const hasWarnings = result.warningCount > 0
   const isClean = !hasErrors && !hasWarnings
+  const [deleteIntermediates, setDeleteIntermediates] = useState(false)
+  const submitSnapshot = useMemo(() => ({
+    ...snapshot,
+    execution: {
+      ...(snapshot.execution ?? {}),
+      fileLifecyclePolicy: deleteIntermediates ? 'delete-intermediates-on-success' as const : 'keep-all' as const,
+    },
+  }), [deleteIntermediates, snapshot])
 
   const headerBg = hasErrors ? 'bg-error/10 border-error/30' : hasWarnings ? 'bg-warning/10 border-warning/30' : 'bg-success/10 border-success/30'
   const headerText = hasErrors ? 'text-error' : hasWarnings ? 'text-warning' : 'text-success'
@@ -81,12 +91,21 @@ function RunConfirmDialog({ result, onRunAnyway, onQuickFix, onCreateRemoteFolde
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="w-[480px] max-h-[80vh] flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl overflow-hidden">
+      <div className="w-[680px] max-h-[86vh] flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className={`flex items-center gap-2.5 px-4 py-3 border-b ${headerBg}`}>
           <HeaderIcon size={16} className={headerText} />
           <span className={`text-sm font-medium ${headerText}`}>{title}</span>
         </div>
+
+        {review && (
+          <div className="grid grid-cols-4 gap-2 border-b border-border bg-bg-secondary px-4 py-3">
+            <RunReviewStat label="Nodes" value={String(review.nodeCount)} />
+            <RunReviewStat label="Arrays" value={String(review.arrayNodeCount)} />
+            <RunReviewStat label="Transfers" value={String(review.transferPlans.length)} />
+            <RunReviewStat label="Cleanup" value={deleteIntermediates ? 'Explicit delete' : 'Keep all'} tone={deleteIntermediates ? 'warning' : 'muted'} />
+          </div>
+        )}
 
         {/* Issue list */}
         <div className="flex-1 overflow-y-auto py-1 min-h-0">
@@ -109,6 +128,13 @@ function RunConfirmDialog({ result, onRunAnyway, onQuickFix, onCreateRemoteFolde
           {result.issues.length === 0 && (
             <div className="px-4 py-6 text-sm text-text-secondary">All blocking checks are clear.</div>
           )}
+          {review && (
+            <RunReviewDetails
+              review={review}
+              deleteIntermediates={deleteIntermediates}
+              setDeleteIntermediates={setDeleteIntermediates}
+            />
+          )}
         </div>
 
         {/* Footer */}
@@ -126,7 +152,7 @@ function RunConfirmDialog({ result, onRunAnyway, onQuickFix, onCreateRemoteFolde
               <Button variant="secondary" size="sm" onClick={onClose}>
                 Go back
               </Button>
-              <Button variant="primary" size="sm" onClick={onRunAnyway}>
+              <Button variant="primary" size="sm" onClick={() => onRunAnyway(submitSnapshot)}>
                 <Play size={11} className="mr-1" />
                 {isClean ? 'Run' : 'Run anyway'}
               </Button>
@@ -196,9 +222,97 @@ function ModalIssueRow({
   )
 }
 
+function RunReviewStat({ label, value, tone = 'muted' }: { label: string; value: string; tone?: 'muted' | 'warning' }) {
+  return (
+    <div className="rounded-md border border-border bg-bg-primary px-2 py-1.5">
+      <div className="text-[9px] uppercase tracking-wide text-text-muted">{label}</div>
+      <div className={classNames('mt-0.5 truncate text-xs font-medium', tone === 'warning' ? 'text-warning' : 'text-text-primary')}>{value}</div>
+    </div>
+  )
+}
+
+function RunReviewDetails({
+  review,
+  deleteIntermediates,
+  setDeleteIntermediates,
+}: {
+  review: RunReview
+  deleteIntermediates: boolean
+  setDeleteIntermediates: (value: boolean) => void
+}) {
+  const mismatches = review.axisReports.filter((report) => report.status === 'mismatch')
+  return (
+    <div className="border-t border-border-light px-4 py-3">
+      <div className="mb-2 text-[10px] uppercase tracking-wider text-text-muted">Run review</div>
+      {review.transferPlans.length > 0 && (
+        <div className="mb-2 rounded-md border border-border bg-bg-tertiary/50 p-2">
+          <div className="text-xs font-medium text-text-primary">Planned transfers</div>
+          <div className="mt-1 flex flex-col gap-1">
+            {review.transferPlans.slice(0, 5).map((plan) => (
+              <div key={plan.id} className="truncate text-[10px] text-text-muted">
+                {plan.route}: {plan.source.path} {'->'} {plan.target.path}
+              </div>
+            ))}
+            {review.transferPlans.length > 5 && <div className="text-[10px] text-text-muted">+{review.transferPlans.length - 5} more</div>}
+          </div>
+        </div>
+      )}
+      {review.axisReports.length > 0 && (
+        <div className={classNames(
+          'mb-2 rounded-md border p-2',
+          mismatches.length > 0 ? 'border-warning/30 bg-warning/10' : 'border-success/30 bg-success/10',
+        )}>
+          <div className={classNames('text-xs font-medium', mismatches.length > 0 ? 'text-warning' : 'text-success')}>
+            Split alignment
+          </div>
+          <div className="mt-1 flex flex-col gap-1">
+            {review.axisReports.map((report) => (
+              <div key={report.nodeId} className="text-[10px] text-text-secondary">
+                {report.nodeId}: {report.message}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {review.scriptSummaries.length > 0 && (
+        <div className="mb-2 rounded-md border border-border bg-bg-tertiary/50 p-2">
+          <div className="text-xs font-medium text-text-primary">Generated commands</div>
+          <div className="mt-1 grid grid-cols-2 gap-1">
+            {review.scriptSummaries.slice(0, 8).map((script) => (
+              <div key={script.nodeId} className="truncate rounded bg-bg-primary px-2 py-1 text-[10px] text-text-muted">
+                {script.label}: {script.mode}{script.arraySize ? ` (${script.arraySize} tasks)` : ''}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="rounded-md border border-border bg-bg-tertiary/50 p-2">
+        <label className="flex items-start gap-2 text-xs text-text-primary">
+          <input
+            type="checkbox"
+            checked={deleteIntermediates}
+            onChange={(event) => setDeleteIntermediates(event.target.checked)}
+            className="mt-0.5 accent-accent"
+          />
+          <span>
+            Delete generated intermediate outputs after the run succeeds
+            <span className="mt-0.5 block text-[10px] leading-snug text-text-muted">
+              Off by default. BioFlow protects all file-node inputs and PLINK sidecars; only generated outputs explicitly marked as intermediate are eligible.
+            </span>
+          </span>
+        </label>
+        {review.cleanupPlan.warnings.map((warning) => (
+          <div key={warning} className="mt-1 text-[10px] text-warning">{warning}</div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function canInsertTransferQuickFix(issue: ValidationIssue): boolean {
   return Boolean(issue.edgeId) && (
     issue.code === 'BACKEND_MISMATCH_NEEDS_TRANSFER'
+    || issue.code === 'LOCAL_OUTPUT_NEEDS_TRANSFER'
     || issue.code === 'DNX_UPLOAD_ADVISORY'
     || issue.code === 'IMPLICIT_TRANSFER_PLANNED'
   )
@@ -331,6 +445,7 @@ type ReadinessCategory = typeof READINESS_GROUPS[number]
 interface RunCheckResult {
   validation: ValidationResult
   readiness: RunReadinessReport
+  transferPlans: TransferPlan[]
 }
 
 function groupIssues(issues: ValidationIssue[]): Record<ReadinessCategory, ValidationIssue[]> {
@@ -579,7 +694,7 @@ export function PipelineToolbar() {
   const [runStatus, setRunStatus] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [scriptPreview, setScriptPreview] = useState<DryRunScript[] | null>(null)
-  const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot; readiness?: RunReadinessReport | null } | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{ result: ValidationResult; snapshot: PipelineSnapshot; readiness?: RunReadinessReport | null; review?: RunReview | null } | null>(null)
   const [doctorDialog, setDoctorDialog] = useState<ClusterDoctorReport | null>(null)
   const [checkReport, setCheckReport] = useState<ValidationResult | null>(null)
   const [checkReadinessReport, setCheckReadinessReport] = useState<RunReadinessReport | null>(null)
@@ -709,6 +824,7 @@ export function PipelineToolbar() {
     return {
       validation: validationFromRunReadiness(readiness),
       readiness,
+      transferPlans,
     }
   }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, skipPreRunDoctorCheck])
 
@@ -906,22 +1022,45 @@ export function PipelineToolbar() {
         setRunStatus(null)
       }
 
-      // Checks done — clear running before any modal or handoff to submitRun.
-      setRunning(false)
-
-      if (result.validation.errorCount > 0 || result.validation.warningCount > 0) {
-        setConfirmDialog({ result: result.validation, snapshot, readiness: result.readiness })
-        return
+      let scripts: DryRunScript[] = []
+      if (result.validation.errorCount === 0) {
+        try {
+          setRunStatus('Preparing run review...')
+          scripts = await window.api.pipeline.generateScriptsDry(activeConnectionId, snapshot)
+        } catch (err: any) {
+          result = {
+            ...result,
+            validation: appendValidationIssues(result.validation, [{
+              severity: 'warning',
+              code: 'SCRIPT_PREVIEW_UNAVAILABLE',
+              message: 'BioFlow could not generate the script preview for this run review.',
+              suggestion: err?.message ?? String(err),
+            }]),
+          }
+        } finally {
+          setRunStatus(null)
+        }
       }
 
-      // No issues → run immediately.
-      await submitRun(snapshot, result.readiness)
+      const reviewSnapshot: PipelineSnapshot = {
+        ...snapshot,
+        execution: { ...(snapshot.execution ?? {}), fileLifecyclePolicy: 'keep-all' },
+      }
+      const review = buildRunReview({
+        snapshot: reviewSnapshot,
+        validation: result.validation,
+        readiness: result.readiness,
+        transferPlans: result.transferPlans,
+        scripts,
+      })
+      setRunning(false)
+      setConfirmDialog({ result: result.validation, snapshot: reviewSnapshot, readiness: result.readiness, review })
     } catch (err: any) {
       console.error('[PipelineToolbar] handleRun threw:', err)
       flashMessage(err?.message ?? String(err), true)
       setRunning(false)
     }
-  }, [activeConnectionId, exportSnapshot, flashMessage, runChecks, skipPreRunFileCheck, submitRun])
+  }, [activeConnectionId, exportSnapshot, flashMessage, runChecks, skipPreRunFileCheck])
 
   const handlePreviewScripts = useCallback(async () => {
     const snapshot = exportSnapshot()
@@ -1495,16 +1634,17 @@ export function PipelineToolbar() {
       {confirmDialog && (
         <RunConfirmDialog
           result={confirmDialog.result}
+          review={confirmDialog.review}
+          snapshot={confirmDialog.snapshot}
           onQuickFix={applyValidationQuickFix}
           onCreateRemoteFolder={(issue) => void createRemoteFolderQuickFix(issue)}
           onApplyModule={applyModuleSuggestion}
           onSelectNode={selectValidationIssueNode}
           onClose={() => setConfirmDialog(null)}
-          onRunAnyway={async () => {
-            const snapshot = confirmDialog.snapshot
+          onRunAnyway={async (snapshotToRun) => {
             const readiness = confirmDialog.readiness
             setConfirmDialog(null)
-            await submitRun(snapshot, readiness)
+            await submitRun(snapshotToRun, readiness)
           }}
         />
       )}

@@ -1,4 +1,5 @@
 import type { FileNodeData, FileType, PipelineSnapshot, ToolNodeData, TransferNodeData, TransformNodeData } from '@/types/pipeline'
+import type { FileOrigin } from '@/constants/connections'
 import type { PathSettings } from '@/stores/settingsStore'
 import { getTool } from '@/lib/toolRegistry'
 import { joinRemotePath, pathBasename, pathDirname, trimTrailingSlash } from '@/lib/remotePath'
@@ -43,7 +44,8 @@ export function computeNodeOutputPreview(
 
   if (node.type === 'transfer') {
     const data = node.data as TransferNodeData
-    const outputDir = previewOutputDir(data.sshFolder || data.dnxFolder, outputRoot, slug)
+    const targetFolder = data.to === 'local' ? data.localFolder : data.to === 'dnx' ? data.dnxFolder : data.sshFolder
+    const outputDir = previewTransferOutputDir(targetFolder, outputRoot, slug, data.to)
     const name = data.outputName?.trim() || `${slug}.output`
     return `${outputDir}/${name}`
   }
@@ -77,7 +79,19 @@ function connectedOutputSink(snapshot: PipelineSnapshot, nodeId: string, portId:
   const sink = snapshot.nodes.find((candidate) => candidate.id === edge.target)
   if (!sink || sink.type !== 'file') return null
   const data = sink.data as FileNodeData
-  return data.isInput ? null : data
+  if (data.isInput) return null
+  return fileOrigin(data) === sourceOutputOrigin(snapshot.nodes.find((candidate) => candidate.id === nodeId)) ? data : null
+}
+
+function fileOrigin(data: FileNodeData): FileOrigin {
+  return data.artifactRef?.origin ?? data.origin ?? (data.source === 'local' ? 'local' : 'ssh')
+}
+
+function sourceOutputOrigin(node: PipelineSnapshot['nodes'][number] | undefined): FileOrigin {
+  if (node?.type === 'tool') return (node.data as ToolNodeData).backend === 'dnx' ? 'dnx' : 'ssh'
+  if (node?.type === 'transfer') return (node.data as TransferNodeData).to
+  if (node?.type === 'file') return fileOrigin(node.data as FileNodeData)
+  return 'ssh'
 }
 
 function sinkPath(sink: FileNodeData, fallbackDir: string, fallbackPath: string): string {
@@ -88,6 +102,17 @@ function sinkPath(sink: FileNodeData, fallbackDir: string, fallbackPath: string)
 
 function previewOutputDir(override: string | undefined, outputRoot: string, slug: string): string {
   if (override?.trim()) return joinRemotePath(trimTrailingSlash(override.trim()), slug)
+  return joinRemotePath(outputRoot, slug)
+}
+
+function previewTransferOutputDir(
+  targetFolder: string | undefined,
+  outputRoot: string,
+  slug: string,
+  targetOrigin: TransferNodeData['to'],
+): string {
+  const raw = targetFolder?.trim() || (targetOrigin === 'local' ? '~/BioFlow/transfers' : '')
+  if (raw) return trimTrailingSlash(raw)
   return joinRemotePath(outputRoot, slug)
 }
 

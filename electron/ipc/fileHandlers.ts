@@ -1,5 +1,6 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { SftpPool } from '../ssh/SftpPool'
+import type { RemoteFileEntry } from '../ssh/types'
 
 function broadcastTransferProgress(payload: {
   connectionId: string
@@ -22,6 +23,47 @@ export function registerFileHandlers(): void {
 
   ipcMain.handle('sftp:stat', async (_event, connectionId: string, remotePath: string) => {
     return pool.stat(connectionId, remotePath)
+  })
+
+  ipcMain.handle('sftp:stat-many', async (_event, connectionId: string, remotePaths: string[]) => {
+    const rows = []
+    for (const path of remotePaths.slice(0, 200)) {
+      try {
+        rows.push({ path, ok: true, stat: await pool.stat(connectionId, path) })
+      } catch (err) {
+        rows.push({ path, ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+    return rows
+  })
+
+  ipcMain.handle('sftp:search', async (_event, connectionId: string, rootPath: string, query: string, opts?: { maxResults?: number; maxDepth?: number }) => {
+    const maxResults = Math.min(Math.max(opts?.maxResults ?? 100, 1), 500)
+    const maxDepth = Math.min(Math.max(opts?.maxDepth ?? 4, 0), 8)
+    const needle = query.trim().toLowerCase()
+    if (!needle) return []
+    const results: RemoteFileEntry[] = []
+    async function walk(dir: string, depth: number): Promise<void> {
+      if (results.length >= maxResults || depth > maxDepth) return
+      let entries: RemoteFileEntry[]
+      try {
+        entries = await pool.ls(connectionId, dir)
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (entry.name.toLowerCase().includes(needle) || entry.path.toLowerCase().includes(needle)) {
+          results.push(entry)
+          if (results.length >= maxResults) return
+        }
+      }
+      for (const entry of entries) {
+        if (results.length >= maxResults) return
+        if (entry.isDirectory) await walk(entry.path, depth + 1)
+      }
+    }
+    await walk(rootPath, 0)
+    return results
   })
 
   ipcMain.handle('sftp:read', async (_event, connectionId: string, remotePath: string, offset?: number, length?: number) => {

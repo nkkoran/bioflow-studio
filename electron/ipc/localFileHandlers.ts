@@ -11,6 +11,7 @@ import {
   copyFileSync,
   rmSync,
 } from 'fs'
+import type { Dirent } from 'fs'
 import { join, extname, basename } from 'path'
 import { homedir } from 'os'
 import { gunzipSync } from 'zlib'
@@ -89,6 +90,73 @@ export function registerLocalFileHandlers(): void {
       isDirectory: stats.isDirectory(),
       permissions: modeToPermissions(stats.mode),
     }
+  })
+
+  ipcMain.handle('local:stat-many', async (_event, filePaths: string[]) => {
+    const rows = []
+    for (const path of filePaths.slice(0, 500)) {
+      try {
+        const resolved = resolvePath(path)
+        const stats = statSync(resolved)
+        rows.push({
+          path,
+          ok: true,
+          stat: {
+            size: stats.size,
+            modified: stats.mtimeMs,
+            isDirectory: stats.isDirectory(),
+            permissions: modeToPermissions(stats.mode),
+          } satisfies FileStat,
+        })
+      } catch (err) {
+        rows.push({ path, ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+    return rows
+  })
+
+  ipcMain.handle('local:search', async (_event, rootPath: string, query: string, opts?: { maxResults?: number; maxDepth?: number }): Promise<RemoteFileEntry[]> => {
+    const maxResults = Math.min(Math.max(opts?.maxResults ?? 100, 1), 500)
+    const maxDepth = Math.min(Math.max(opts?.maxDepth ?? 4, 0), 8)
+    const needle = query.trim().toLowerCase()
+    if (!needle) return []
+    const results: RemoteFileEntry[] = []
+    function walk(dirPath: string, depth: number): void {
+      if (results.length >= maxResults || depth > maxDepth) return
+      let items: Dirent[]
+      try {
+        items = readdirSync(resolvePath(dirPath), { withFileTypes: true })
+      } catch {
+        return
+      }
+      const dirs: string[] = []
+      for (const item of items) {
+        if (item.name.startsWith('.')) continue
+        const fullPath = join(resolvePath(dirPath), item.name)
+        try {
+          const stats = statSync(fullPath)
+          const entry: RemoteFileEntry = {
+            name: item.name,
+            path: fullPath,
+            isDirectory: item.isDirectory(),
+            size: stats.size,
+            modified: stats.mtimeMs,
+            permissions: modeToPermissions(stats.mode),
+            extension: item.isDirectory() ? '' : extname(item.name).slice(1).toLowerCase(),
+          }
+          if (entry.name.toLowerCase().includes(needle) || entry.path.toLowerCase().includes(needle)) {
+            results.push(entry)
+            if (results.length >= maxResults) return
+          }
+          if (entry.isDirectory) dirs.push(entry.path)
+        } catch {
+          // Skip unreadable entries.
+        }
+      }
+      for (const dir of dirs) walk(dir, depth + 1)
+    }
+    walk(rootPath, 0)
+    return results
   })
 
   ipcMain.handle('local:read', async (_event, filePath: string, offset?: number, length?: number): Promise<string> => {

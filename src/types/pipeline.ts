@@ -54,6 +54,100 @@ export interface TransferPlan {
   warnings?: string[]
 }
 
+export type DataArtifactRole =
+  | 'genotypes'
+  | 'phenotype'
+  | 'covariates'
+  | 'keep'
+  | 'extract'
+  | 'read-freq'
+  | 'summary-stats'
+  | 'output'
+  | 'other'
+
+export type DataArtifactKind =
+  | 'single-file'
+  | 'plink-fileset'
+  | 'split-set'
+  | 'directory'
+
+export interface DataSidecarCheck {
+  path: string
+  role: 'plink-bed' | 'plink-bim' | 'plink-fam' | 'plink-pgen' | 'plink-pvar' | 'plink-psam' | 'index' | 'other'
+  required: boolean
+  status?: 'unknown' | 'present' | 'missing'
+}
+
+export interface DataArtifact {
+  id: string
+  label: string
+  kind: DataArtifactKind
+  role?: DataArtifactRole
+  origin: FileOrigin
+  path?: string
+  paths?: string[]
+  fileType: FileType
+  axis?: string
+  items?: Array<{ key: string; rawKey?: string; path: string }>
+  sidecars?: DataSidecarCheck[]
+  size?: number
+  modified?: number
+}
+
+export interface AxisAlignmentReport {
+  nodeId: string
+  status: 'ok' | 'single' | 'mismatch' | 'missing' | 'unknown'
+  controllingPortId?: string
+  axis?: string
+  rows: Array<{
+    portId: string
+    axis?: string
+    keys: string[]
+    missingKeys: string[]
+    extraKeys: string[]
+  }>
+  message: string
+}
+
+export interface CleanupPlan {
+  policy: NonNullable<PipelineSnapshot['execution']>['fileLifecyclePolicy']
+  explicitDeleteRequested: boolean
+  generatedIntermediatePaths: string[]
+  protectedInputPaths: string[]
+  warnings: string[]
+}
+
+export interface RunReview {
+  snapshotId: string
+  pipelineName: string
+  generatedAt: number
+  validation: {
+    errorCount: number
+    warningCount: number
+    infoCount: number
+  }
+  readiness?: RunReadinessReport | null
+  nodeCount: number
+  edgeCount: number
+  arrayNodeCount: number
+  transferPlans: TransferPlan[]
+  cleanupPlan: CleanupPlan
+  axisReports: AxisAlignmentReport[]
+  scriptSummaries: Array<{
+    nodeId: string
+    label: string
+    mode: DryRunScript['mode']
+    arraySize?: number
+    commandCount: number
+    outputPaths: string[]
+  }>
+}
+
+export interface OutputContract {
+  mode: 'capture-stdout' | 'script-writes-output'
+  requireNonEmpty?: boolean
+}
+
 /** A single parameter on a tool. */
 export interface ToolParam {
   name: string              // canonical param name (e.g., "maf")
@@ -237,6 +331,8 @@ export interface ToolNodeData {
   roleMappings?: Record<string, RoleMapping>
   outputMerge?: Record<string, { mode: 'fan-out' | 'auto-merge'; strategy?: MergeStrategy }>
   outputIntermediate?: Record<string, boolean>
+  /** Controls how custom shell nodes materialize their declared output file. */
+  outputContract?: OutputContract
   /** Reference/genome build for outputs when the tool preserves or changes coordinates. */
   genomeBuild?: GenomeBuild
   /** Optional module name to load instead of the registry default. */
@@ -290,7 +386,7 @@ export type SlurmOverride = NonNullable<ToolNodeData['slurmOverride']>
  */
 export interface FileNodeSplit {
   axis: string                  // e.g., "chrom"
-  items: Array<{ key: string; path: string }>
+  items: Array<{ key: string; rawKey?: string; path: string }>
   /** Exact folder that was scanned or dragged in to create this split. */
   folderPath?: string
   glob?: string                 // optional — original pattern, display only
@@ -570,5 +666,7 @@ export interface DryRunScript {
   summary?: string
   commands?: string[]
   outputPaths: string[]
+  /** Generated paths eligible for explicit cleanup; final outputs may differ when auto-merge is enabled. */
+  intermediatePaths?: string[]
   arraySize?: number
 }

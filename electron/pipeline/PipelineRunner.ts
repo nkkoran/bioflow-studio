@@ -28,6 +28,8 @@ import { generateToolScript, generateMergeScript, generateTransformScript, type 
 import { getTool } from '../../src/lib/toolRegistry'
 import { buildRunManifest, extractCommands } from '../../src/lib/runManifest'
 import { planPipelineTransfers } from '../../src/lib/transferPlanner'
+import { protectedPathsForFileData } from '../../src/lib/dataArtifacts'
+import { LOCAL_CONNECTION_ID } from '../../src/constants/connections'
 import type {
   PipelineSnapshot,
   RunState,
@@ -60,6 +62,16 @@ export interface StartOptions {
  */
 const DEFAULT_WORKDIR_SUBPATH_PARENT = 'bioflow'
 const MODULE_PREAMBLE = 'module --force purge && module load StdEnv/2023'
+
+type NodeOutputOrigin = 'local' | 'ssh' | 'dnx'
+
+interface ListedNodeOutput {
+  name: string
+  path: string
+  size: number
+  modified: number
+  origin: NodeOutputOrigin
+}
 
 interface RunPathSettings {
   scriptsSubfolder: string
@@ -369,6 +381,7 @@ export class PipelineRunner {
           commands: extractCommands(gen.script),
           script: gen.script,
           outputPaths: collectOutputPaths(plan.outputs),
+          intermediatePaths: this.collectIntermediatePathsForNode(node, plan),
           arraySize: gen.arraySize,
         })
       } else if (node.type === 'merge') {
@@ -398,6 +411,7 @@ export class PipelineRunner {
           commands: extractCommands(gen.script),
           script: gen.script,
           outputPaths: [gen.outputPath],
+          intermediatePaths: this.collectIntermediatePathsForNode(node, plan),
         })
       } else if (node.type === 'transform') {
         const transformData = node.data as TransformNodeData
@@ -418,6 +432,7 @@ export class PipelineRunner {
           commands: extractCommands(gen.script),
           script: gen.script,
           outputPaths: collectOutputPaths(plan.outputs),
+          intermediatePaths: this.collectIntermediatePathsForNode(node, plan),
           arraySize: gen.arraySize,
         })
       } else {
@@ -679,33 +694,78 @@ export class PipelineRunner {
   }
 
   /**
-   * SFTP-list the output directory for one node in a run. Returns an empty
-   * array if the node hasn't recorded an outputDir yet (not submitted) or the
-   * dir doesn't exist. Intended for the Jobs panel summary card.
+   * List the output directory for one node in a run. Remote outputs go through
+   * SFTP; local transfer outputs use the local filesystem so the results view
+   * does not accidentally probe local paths through SSH.
    */
   async listNodeOutputs(
     runId: string,
     nodeId: string,
-  ): Promise<Array<{ name: string; path: string; size: number; modified: number }>> {
+    connectionIdOverride?: string,
+  ): Promise<ListedNodeOutput[]> {
     const run = this.runs.get(runId)
     if (!run) return []
     const ns = run.nodes[nodeId]
     if (!ns?.outputDir && !ns?.outputPaths?.length) return []
-    const snapshotNode = run.snapshot?.nodes.find((node) => node.id === nodeId)
-    if (snapshotNode && (this.nodeRunsOnDnx(snapshotNode) || (snapshotNode.type === 'transfer' && (snapshotNode.data as TransferNodeData).to === 'dnx'))) {
+    const outputOrigin = run.snapshot
+      ? this.nodeOutputBackend(run.snapshot, nodeId) ?? (run.connectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')
+      : (run.connectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')
+
+    if (outputOrigin === 'dnx') {
       return (ns.outputPaths ?? []).map((path) => ({
         name: pathBasename(path),
         path,
         size: 0,
         modified: 0,
+        origin: 'dnx',
       }))
     }
-    const byPath = new Map<string, { name: string; path: string; size: number; modified: number }>()
+
+    if (outputOrigin === 'local') {
+      const localOutputs: ListedNodeOutput[] = []
+      for (const rawPath of ns.outputPaths ?? []) {
+        const path = expandLocalHome(rawPath)
+        try {
+          const stat = await fsPromises.stat(path)
+          if (!stat.isDirectory()) {
+            localOutputs.push({
+              name: pathBasename(path),
+              path,
+              size: stat.size,
+              modified: stat.mtimeMs,
+              origin: 'local',
+            })
+          }
+        } catch {
+          localOutputs.push({
+            name: pathBasename(path),
+            path,
+            size: 0,
+            modified: 0,
+            origin: 'local',
+          })
+        }
+      }
+      return localOutputs
+    }
+
+    const connectionId = connectionIdOverride || run.connectionId
+    if (!this.ssh.getClient(connectionId)) {
+      return (ns.outputPaths ?? []).map((path) => ({
+        name: pathBasename(path),
+        path,
+        size: 0,
+        modified: 0,
+        origin: 'ssh',
+      }))
+    }
+
+    const byPath = new Map<string, ListedNodeOutput>()
     try {
       if (ns.outputDir) {
-        const entries = await this.sftp.ls(run.connectionId, ns.outputDir)
+        const entries = await this.sftp.ls(connectionId, ns.outputDir)
         for (const e of entries.filter((entry) => !entry.isDirectory)) {
-          byPath.set(e.path, { name: e.name, path: e.path, size: e.size, modified: e.modified })
+          byPath.set(e.path, { name: e.name, path: e.path, size: e.size, modified: e.modified, origin: 'ssh' })
         }
       }
     } catch (err: any) {
@@ -715,9 +775,9 @@ export class PipelineRunner {
     for (const path of ns.outputPaths ?? []) {
       if (byPath.has(path)) continue
       try {
-        const stat = await this.sftp.stat(run.connectionId, path)
+        const stat = await this.sftp.stat(connectionId, path)
         if (!stat.isDirectory) {
-          byPath.set(path, { name: pathBasename(path), path, size: stat.size, modified: stat.modified })
+          byPath.set(path, { name: pathBasename(path), path, size: stat.size, modified: stat.modified, origin: 'ssh' })
         }
       } catch (err: any) {
         const msg = String(err?.message ?? err)
@@ -1723,57 +1783,63 @@ export class PipelineRunner {
       if (node.type !== 'file') continue
       const data = node.data as FileNodeData
       if (!data.isInput) continue
-      const splitItems = (data.split as { items?: Array<{ path?: unknown }> } | undefined)?.items
-      if (Array.isArray(splitItems)) {
-        for (const item of splitItems) if (typeof item.path === 'string') protectedInputs.add(item.path)
-      }
-      if (data.path) protectedInputs.add(data.path)
+      for (const path of protectedPathsForFileData(data, { includeSidecars: true })) protectedInputs.add(path)
     }
+
+    for (const node of snapshot.nodes) {
+      const plan = plans.get(node.id)
+      if (!plan || (node.type !== 'tool' && node.type !== 'transform' && node.type !== 'merge')) continue
+      for (const path of this.collectIntermediatePathsForNode(node, plan)) seen.add(path)
+    }
+
+    return [...seen].filter((path) => !protectedInputs.has(path))
+  }
+
+  private collectIntermediatePathsForNode(
+    node: PipelineSnapshot['nodes'][number],
+    plan: AxisPlan,
+  ): string[] {
+    const seen = new Set<string>()
     const addValuePaths = (value: AxisPlan['outputs'][string] | undefined) => {
       if (!value) return
       if (value.kind === 'single') seen.add(value.path)
       else for (const path of value.paths) seen.add(path)
     }
 
-    for (const node of snapshot.nodes) {
-      const plan = plans.get(node.id)
-      if (!plan || (node.type !== 'tool' && node.type !== 'transform' && node.type !== 'merge')) continue
-
-      if (node.type === 'tool') {
-        const data = node.data as ToolNodeData
-        const tool = getTool(data.toolId)
-        if (!tool) continue
-        for (const port of tool.outputs) {
-          const flagged = data.outputIntermediate?.[port.id] ?? false
-          if (!flagged) continue
+    if (node.type === 'tool') {
+      const data = node.data as ToolNodeData
+      const tool = getTool(data.toolId)
+      if (!tool) return []
+      for (const port of tool.outputs) {
+        const flagged = data.outputIntermediate?.[port.id] ?? false
+        if (!flagged) continue
+        const implicit = plan.implicitMerges?.[port.id]
+        if (implicit) {
+          for (const path of implicit.input.paths) seen.add(path)
+        } else {
           addValuePaths(plan.outputs[port.id])
-          const implicit = plan.implicitMerges?.[port.id]
-          if (implicit) {
-            for (const path of implicit.input.paths) seen.add(path)
-          }
         }
-        continue
       }
-
-      if (node.type === 'transform') {
-        const data = node.data as TransformNodeData
-        if (data.outputIntermediate?.output) {
-          addValuePaths(plan.outputs.output)
-          const implicit = plan.implicitMerges?.output
-          if (implicit) {
-            for (const path of implicit.input.paths) seen.add(path)
-          }
-        }
-        continue
-      }
-
-      const data = node.data as MergeNodeData
-      if (data.outputIntermediate?.output) {
-        addValuePaths(plan.outputs.output)
-      }
+      return [...seen]
     }
 
-    return [...seen].filter((path) => !protectedInputs.has(path))
+    if (node.type === 'transform') {
+      const data = node.data as TransformNodeData
+      if (!data.outputIntermediate?.output) return []
+      const implicit = plan.implicitMerges?.output
+      if (implicit) {
+        for (const path of implicit.input.paths) seen.add(path)
+      } else {
+        addValuePaths(plan.outputs.output)
+      }
+      return [...seen]
+    }
+
+    if (node.type === 'merge') {
+      const data = node.data as MergeNodeData
+      if (data.outputIntermediate?.output) addValuePaths(plan.outputs.output)
+    }
+    return [...seen]
   }
 
   private async runLoginNode(

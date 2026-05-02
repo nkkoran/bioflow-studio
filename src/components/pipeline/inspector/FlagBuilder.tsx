@@ -110,6 +110,9 @@ function buildPreviewCommand(
     if (tool.id === 'plink2.assoc' && ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno'].includes(def.id)) {
       continue
     }
+    if (tool.id === 'plink2.assoc' && ['pheno-iid-only', 'covar-iid-only'].includes(def.id)) {
+      continue
+    }
     if (tool.id === 'plink2.score' && ['score-col-nums', 'header', 'center', 'variance-standardize', 'no-mean-imputation'].includes(def.id)) {
       continue
     }
@@ -146,7 +149,12 @@ function buildPreviewCommand(
       const file = source.kind === 'upstream-file'
         ? connectedInputPath(snapshot, nodeId, def.sourcePortId ?? source.portId ?? 'input') ?? `<${def.sourcePortId ?? source.portId ?? 'input'}>`
         : source.value?.trim() || `<${def.label.toLowerCase()}>`
-      parts.push(`${renderedFlag} ${quotePreview(file)}`)
+      const flag = tool.id === 'plink2.assoc' && def.id === 'pheno' && previewSwitchBlockEnabled(byFlagId.get('pheno-iid-only'))
+        ? `${renderedFlag} iid-only`
+        : tool.id === 'plink2.assoc' && def.id === 'covar' && previewSwitchBlockEnabled(byFlagId.get('covar-iid-only'))
+          ? `${renderedFlag} iid-only`
+          : renderedFlag
+      parts.push(`${flag} ${quotePreview(file)}`)
       continue
     }
     if (block.flagId === CUSTOM_FLAG_ID && block.customInputKind === 'file') {
@@ -167,6 +175,10 @@ function buildPreviewCommand(
 
   parts.push('--out <output-prefix>')
   return parts.join(' \\\n  ')
+}
+
+function previewSwitchBlockEnabled(block: ToolFlagBlock | undefined): boolean {
+  return Boolean(block?.enabled) && block?.value !== false
 }
 
 function docsChip(def: ToolFlagDef) {
@@ -621,7 +633,9 @@ export function FlagBuilder({
           id: `${flagIdValue}_${Math.random().toString(36).slice(2, 10)}`,
           flagId: flagIdValue,
           enabled: true,
-          value: structuredClone(getFlagDef(tool.id, flagIdValue)?.defaultValue),
+          value: getFlagDef(tool.id, flagIdValue)?.kind === 'toggle'
+            ? true
+            : structuredClone(getFlagDef(tool.id, flagIdValue)?.defaultValue),
         } satisfies ToolFlagBlock
     if (typeof index === 'number') {
       const next = [...activeBlocks]
@@ -807,7 +821,13 @@ export function FlagBuilder({
                       <input
                         type="checkbox"
                         checked={block.enabled}
-                        onChange={(event) => applyBlocks(updateBlock(activeBlocks, block.id, { enabled: event.target.checked }))}
+                        onChange={(event) => applyBlocks(updateBlock(
+                          activeBlocks,
+                          block.id,
+                          def.kind === 'toggle' && event.target.checked
+                            ? { enabled: true, value: true }
+                            : { enabled: event.target.checked },
+                        ))}
                         className="accent-accent"
                       />
                       Enabled

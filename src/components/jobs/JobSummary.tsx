@@ -8,19 +8,22 @@
  */
 import { useEffect, useState } from 'react'
 import { FileText, AlertCircle, Eye, FolderOpen, Copy } from 'lucide-react'
-import type { NodeRunState } from '@/types/pipeline'
+import type { NodeRunState, RunState } from '@/types/pipeline'
 import { inferFileType } from '@/lib/fileTypeInference'
 import { isTabularFile, pathDirname } from '@/lib/utils'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { useFileStore } from '@/stores/fileStore'
-import { useConnectionStore } from '@/stores/connectionStore'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { DnxJobStatus } from '@/types/dnx'
+import type { FileOrigin } from '@/constants/connections'
+import { runConnectionUnavailableMessage } from '@/lib/runConnection'
 
 interface Props {
+  run: RunState
   runId: string
-  connectionId: string
+  connectionId: string | null
   ns: NodeRunState
 }
 
@@ -29,9 +32,10 @@ interface OutputEntry {
   path: string
   size: number
   modified: number
+  origin: FileOrigin
 }
 
-export function JobSummary({ runId, connectionId, ns }: Props) {
+export function JobSummary({ run, runId, connectionId, ns }: Props) {
   const [outputs, setOutputs] = useState<OutputEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
@@ -41,6 +45,7 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
   const clearSelection = useFileStore((s) => s.clearSelection)
   const selectFile = useFileStore((s) => s.selectFile)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
+  const connectLocal = useConnectionStore((s) => s.connectLocal)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const devMode = useSettingsStore((s) => s.devMode)
 
@@ -50,7 +55,7 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
     setError(null)
     void (async () => {
       try {
-        const list = await window.api.pipeline.listOutputs(runId, ns.nodeId)
+        const list = await window.api.pipeline.listOutputs(runId, ns.nodeId, connectionId ?? undefined)
         if (cancelled) return
         setOutputs(list.sort((a, b) => b.modified - a.modified))
       } catch (err: any) {
@@ -60,7 +65,7 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
     })()
     return () => { cancelled = true }
     // Re-fetch when the node or its terminal state changes.
-  }, [runId, ns.nodeId, ns.status, ns.finishedAt])
+  }, [connectionId, runId, ns.nodeId, ns.status, ns.finishedAt])
 
   useEffect(() => {
     if (!devMode || !ns.jobId?.startsWith('job-') || !window.api?.dnx) {
@@ -81,19 +86,42 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
       ? formatDuration(ns.finishedAt - ns.startedAt)
       : null
 
-  const handlePreview = (entry: OutputEntry) => {
+  const handlePreview = async (entry: OutputEntry) => {
     const path = entry.path
     if (!path) return
+    if (entry.origin === 'dnx') {
+      setActionMessage('DNAnexus outputs are listed here, but local preview is not available yet.')
+      return
+    }
+    if (entry.origin === 'local') await connectLocal(pathDirname(path))
+    else if (connectionId) setActiveConnection(connectionId)
+    else {
+      setActionMessage(runConnectionUnavailableMessage(run))
+      return
+    }
     openPreview(path, entry.name)
     setBottomPanelMode('data')
   }
 
-  const handleLocatePath = async (path: string, label: string) => {
+  const handleLocatePath = async (path: string, label: string, origin: FileOrigin = 'ssh') => {
     if (!path) return
+    if (origin === 'dnx') {
+      setActionMessage('DNAnexus outputs are listed here, but cannot be opened in the SSH file explorer.')
+      return
+    }
     setActionMessage(null)
     try {
-      setActiveConnection(connectionId)
-      await navigate(pathDirname(path))
+      if (origin === 'local') {
+        await connectLocal(pathDirname(path))
+        await navigate(pathDirname(path), { connectionId: LOCAL_CONNECTION_ID })
+      } else {
+        if (!connectionId) {
+          setActionMessage(runConnectionUnavailableMessage(run))
+          return
+        }
+        setActiveConnection(connectionId)
+        await navigate(pathDirname(path), { connectionId })
+      }
       clearSelection()
       selectFile(path)
       setActionMessage(`Selected ${label} in the file explorer.`)
@@ -105,7 +133,7 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
   const handleLocate = async (entry: OutputEntry) => {
     const path = entry.path
     if (!path) return
-    await handleLocatePath(path, entry.name)
+    await handleLocatePath(path, entry.name, entry.origin)
   }
 
   const handleCopyPathValue = async (path: string) => {
@@ -173,6 +201,26 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
         </div>
       )}
 
+      {ns.childJobs && ns.childJobs.length > 0 && (
+        <div className="mt-2 rounded border border-border-light bg-bg-primary px-2 py-1.5">
+          <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Related jobs</div>
+          <div className="flex flex-col gap-1">
+            {ns.childJobs.map((job) => (
+              <div key={`${job.kind}-${job.jobId}`} className="flex items-center gap-2 text-[10px] text-text-secondary">
+                <span className="rounded bg-bg-tertiary px-1.5 py-0.5">{job.kind === 'auto-merge' ? 'auto merge' : job.kind}</span>
+                <span className="font-mono text-text-primary">{job.jobId}</span>
+                {job.label && <span className="truncate">{job.label}</span>}
+                {job.stdoutPath && (
+                  <button className="ml-auto text-accent hover:underline" onClick={() => void handleCopyPathValue(job.stdoutPath!)}>
+                    copy log
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Files table */}
       <div className="mt-2">
         <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Files created</div>
@@ -206,7 +254,7 @@ export function JobSummary({ runId, connectionId, ns }: Props) {
                     <td className="px-2 py-0.5">
                       <div className="flex justify-end gap-1">
                         {isTabularFile(extensionFor(f.name)) && (
-                          <IconAction title="Preview in Data tab" onClick={() => handlePreview(f)}>
+                          <IconAction title="Preview in Data tab" onClick={() => void handlePreview(f)}>
                             <Eye size={10} />
                           </IconAction>
                         )}

@@ -4,6 +4,7 @@ import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStor
 
 interface FileStore {
   cwd: string
+  cwdConnectionId: string | null
   entries: RemoteFileEntry[]
   loading: boolean
   error: string | null
@@ -12,7 +13,7 @@ interface FileStore {
   sortDirection: SortDirection
   selectedPaths: string[]
 
-  navigate: (path: string) => Promise<void>
+  navigate: (path: string, opts?: { connectionId?: string; force?: boolean }) => Promise<void>
   refresh: () => Promise<void>
   addBookmark: (path: string) => void
   removeBookmark: (path: string) => void
@@ -26,21 +27,26 @@ interface FileStore {
 /**
  * Route file operations through either local or SFTP based on connection type.
  */
-async function listDirectory(path: string, opts: { force?: boolean } = {}): Promise<RemoteFileEntry[]> {
-  const { activeConnectionId } = useConnectionStore.getState()
-  if (!activeConnectionId) throw new Error('Not connected')
+async function listDirectory(path: string, opts: { force?: boolean; connectionId?: string } = {}): Promise<RemoteFileEntry[]> {
+  const { activeConnectionId, connections } = useConnectionStore.getState()
+  const connectionId = opts.connectionId ?? activeConnectionId
+  if (!connectionId) throw new Error('Not connected')
+  const connection = connections[connectionId]
+  if (connectionId !== LOCAL_CONNECTION_ID && connection?.status !== 'connected') {
+    throw new Error(`Connection is ${connection?.status ?? 'not available'}; reconnect before browsing files.`)
+  }
 
-  const request = activeConnectionId === LOCAL_CONNECTION_ID
+  const request = connectionId === LOCAL_CONNECTION_ID
     ? window.api.local.ls(path)
-    : window.api.sftp.ls(activeConnectionId, path, opts)
+    : window.api.sftp.ls(connectionId, path, opts)
 
   const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
     window.setTimeout(() => {
       reject(new Error('Directory listing timed out. Please retry or narrow the folder/search.'))
-    }, activeConnectionId === LOCAL_CONNECTION_ID ? 15000 : 60000)
+    }, connectionId === LOCAL_CONNECTION_ID ? 15000 : 60000)
   })
 
-  if (activeConnectionId === LOCAL_CONNECTION_ID) {
+  if (connectionId === LOCAL_CONNECTION_ID) {
     return Promise.race([request, timeout])
   } else {
     return Promise.race([request, timeout])
@@ -101,8 +107,11 @@ function persistFileExplorerPreferences(bookmarks: string[], sortField: SortFiel
   })
 }
 
+let navigationSeq = 0
+
 export const useFileStore = create<FileStore>((set, get) => ({
   cwd: '~',
+  cwdConnectionId: null,
   entries: [],
   loading: false,
   error: null,
@@ -111,24 +120,31 @@ export const useFileStore = create<FileStore>((set, get) => ({
   sortDirection: 'asc',
   selectedPaths: [],
 
-  navigate: async (path) => {
-    set({ loading: true, error: null, selectedPaths: [] })
+  navigate: async (path, opts = {}) => {
+    const connectionId = opts.connectionId ?? useConnectionStore.getState().activeConnectionId
+    const seq = ++navigationSeq
+    set({ loading: true, error: null, selectedPaths: [], cwdConnectionId: connectionId ?? null })
     try {
-      const entries = await listDirectory(path)
-      set({ cwd: path, entries, loading: false })
+      const entries = await listDirectory(path, opts)
+      if (seq !== navigationSeq) return
+      set({ cwd: path, entries, loading: false, cwdConnectionId: connectionId ?? null })
     } catch (err: unknown) {
+      if (seq !== navigationSeq) return
       const message = err instanceof Error ? err.message : 'Failed to list directory'
       set({ error: message, loading: false })
     }
   },
 
   refresh: async () => {
-    const { cwd } = get()
+    const { cwd, cwdConnectionId } = get()
+    const seq = ++navigationSeq
     set({ loading: true, error: null })
     try {
-      const entries = await listDirectory(cwd, { force: true })
+      const entries = await listDirectory(cwd, { force: true, connectionId: cwdConnectionId ?? undefined })
+      if (seq !== navigationSeq) return
       set({ entries, loading: false })
     } catch (err: unknown) {
+      if (seq !== navigationSeq) return
       const message = err instanceof Error ? err.message : 'Failed to list directory'
       set({ error: message, loading: false })
     }

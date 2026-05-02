@@ -108,7 +108,9 @@ function transferTargetArtifact(data: TransferNodeData, fileType: FileType): Art
   const folder = data.to === 'dnx' ? data.dnxFolder : data.to === 'ssh' ? data.sshFolder : data.localFolder
   return {
     origin: data.to,
-    path: data.outputName ? `${folder || ''}/${data.outputName}`.replace(/\/+/g, '/') : folder || data.label,
+    path: data.outputName
+      ? (folder ? `${folder}/${data.outputName}`.replace(/\/+/g, '/') : data.outputName)
+      : folder || data.label,
     projectId: data.dnxProjectId,
     fileType,
   }

@@ -22,6 +22,8 @@
     "src/types/**/*.ts",
     "src/lib/analysisOptions.ts",
     "src/lib/annovarCatalog.ts",
+    "src/lib/dataArtifacts.ts",
+    "src/lib/fileTypeInference.ts",
     "src/lib/flagRegistry.ts",
     "src/lib/resourceLearning.ts",
     "src/lib/runReadiness.ts",

@@ -99,4 +99,29 @@ describe('plinkQuickFix', () => {
     expect(patchedData.analysisOptions?.find((option) => option.optionId === 'keep')?.enabled).toBe(true)
     expect(getActiveToolInputs(tool, patchedData, { connectedPortIds: ['input', 'pheno', 'keep'] }).map((port) => port.id)).toContain('keep')
   })
+
+  it('can disable an enabled PLINK switch quick fix', () => {
+    const tool = getTool('plink2.assoc')
+    if (!tool) throw new Error('missing plink2.assoc tool')
+    const paramValues = {
+      glm: 'hide-covar',
+      'pheno-name': 'cad_mi',
+      'pheno-iid-only': true,
+    }
+    const nodeData: ToolNodeData = {
+      toolId: 'plink2.assoc',
+      label: 'Assoc',
+      paramValues,
+      flagBlocks: ensureFlagBlocks('plink2.assoc', undefined, paramValues),
+      analysisOptions: normalizeAnalysisOptions(tool, { paramValues }),
+      status: 'idle',
+    }
+
+    const patch = nodeDataWithAnalysisOptionEnabled(nodeData, 'pheno-iid-only', false)
+    const patchedData: ToolNodeData = { ...nodeData, ...patch }
+
+    expect(patchedData.paramValues?.['pheno-iid-only']).toBeUndefined()
+    expect(patchedData.flagBlocks?.find((block) => block.flagId === 'pheno-iid-only')?.enabled).toBe(false)
+    expect(patchedData.analysisOptions?.find((option) => option.optionId === 'pheno-iid-only')?.enabled).toBe(false)
+  })
 })

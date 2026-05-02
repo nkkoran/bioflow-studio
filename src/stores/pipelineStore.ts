@@ -169,6 +169,7 @@ function migrateToolNodeData(data: ToolNodeData, connectedPortIds: Iterable<stri
       : data.paramValues,
     outputMerge: data.outputMerge ?? defaultOutputMerge(data.toolId),
     outputIntermediate: data.outputIntermediate,
+    outputContract: data.outputContract ?? (data.toolId === 'custom.shell' ? { mode: 'capture-stdout', requireNonEmpty: true } : undefined),
   }
   if (!toolUsesFlagBuilder(data.toolId)) return next
   const flagBlocks = ensureFlagBlocks(data.toolId, data.flagBlocks, data.paramValues)
@@ -194,9 +195,10 @@ function migrateFileNodeData(data: FileNodeData): FileNodeData {
   const rawItems = (data.split as { items?: unknown }).items
   const items = Array.isArray(rawItems)
     ? rawItems.map((item, index) => {
-      const row = item as { key?: unknown; path?: unknown }
+      const row = item as { key?: unknown; rawKey?: unknown; path?: unknown }
       return {
         key: typeof row.key === 'string' && row.key.trim() ? row.key : String(index + 1),
+        rawKey: typeof row.rawKey === 'string' && row.rawKey.trim() ? row.rawKey : undefined,
         path: typeof row.path === 'string' ? row.path : '',
       }
     })
@@ -262,6 +264,36 @@ function transferBackendLabel(value: 'local' | 'ssh' | 'dnx'): string {
   if (value === 'dnx') return 'DNAnexus'
   if (value === 'local') return 'Local'
   return 'Rorqual'
+}
+
+function transferDestinationFromFileNode(
+  node: BioflowNode,
+  to: TransferNodeData['to'],
+): Partial<TransferNodeData> {
+  if (node.type !== 'file') return {}
+  const data = node.data as FileNodeData
+  if (data.isInput) return {}
+  const legacyPath = data.path?.trim() ?? ''
+  const folder = data.outputDir?.trim() || pathDirname(legacyPath)
+  const outputName = data.outputFilename?.trim() || pathBasename(legacyPath)
+  return {
+    ...(to === 'local' && folder ? { localFolder: folder } : {}),
+    ...(to === 'ssh' && folder ? { sshFolder: folder } : {}),
+    ...(to === 'dnx' && folder ? { dnxFolder: folder } : {}),
+    ...(outputName ? { outputName } : {}),
+  }
+}
+
+function pathBasename(path: string): string {
+  if (!path) return ''
+  return path.replace(/\/+$/, '').split('/').pop() ?? ''
+}
+
+function pathDirname(path: string): string {
+  const normalized = path.replace(/\/+$/, '')
+  const idx = normalized.lastIndexOf('/')
+  if (idx <= 0) return ''
+  return normalized.slice(0, idx)
 }
 
 function inferNodeBackend(node: BioflowNode, direction: 'input' | 'output'): 'local' | 'ssh' | 'dnx' | null {
@@ -393,6 +425,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         backend: tool.backends?.includes('dnx') && (tool.backends?.length ?? 0) === 1 ? 'dnx' : 'ssh',
         outputMerge: defaultOutputMerge(toolId),
         outputIntermediate: defaultOutputIntermediate(toolId),
+        outputContract: toolId === 'custom.shell' ? { mode: 'capture-stdout', requireNonEmpty: true } : undefined,
         status: 'idle',
       },
     }
@@ -579,21 +612,23 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
     const to = inferNodeBackend(targetNode, 'input')
     if (!from || !to || from === to) return null
 
-    const transferId = makeId('transfer')
-    const transferNode: BioflowNode = {
-      id: transferId,
-      type: 'transfer',
+	    const transferId = makeId('transfer')
+	    const destination = transferDestinationFromFileNode(targetNode, to)
+	    const transferNode: BioflowNode = {
+	      id: transferId,
+	      type: 'transfer',
       position: {
         x: (sourceNode.position.x + targetNode.position.x) / 2,
         y: (sourceNode.position.y + targetNode.position.y) / 2,
       },
       data: {
-        label: `${transferBackendLabel(from)} -> ${transferBackendLabel(to)}`,
-        from,
-        to,
-        status: 'idle',
-      },
-    }
+	        label: `${transferBackendLabel(from)} -> ${transferBackendLabel(to)}`,
+	        from,
+	        to,
+	        ...destination,
+	        status: 'idle',
+	      },
+	    }
 
     set((current) => ({
       nodes: [...current.nodes, transferNode],

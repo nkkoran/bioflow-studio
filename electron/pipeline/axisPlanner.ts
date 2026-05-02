@@ -16,6 +16,7 @@ import type {
   FileType,
   MergeStrategy,
 } from '../../src/types/pipeline'
+import type { FileOrigin } from '../../src/constants/connections'
 import { topoSort } from './topoSort'
 import { getActiveToolInputs, normalizeAnalysisOptions } from '../../src/lib/analysisOptions'
 
@@ -159,7 +160,18 @@ function connectedOutputSink(
   if (!target || target.type !== 'file') return null
   const data = target.data as FileNodeData
   if (data.isInput) return null
+  if (fileOrigin(data) !== sourceOutputOrigin(snapshot.nodes.find((n) => n.id === nodeId))) return null
   return data
+}
+
+function fileOrigin(data: FileNodeData): FileOrigin {
+  return data.artifactRef?.origin ?? data.origin ?? (data.source === 'local' ? 'local' : 'ssh')
+}
+
+function sourceOutputOrigin(node: PipelineSnapshot['nodes'][number] | undefined): FileOrigin {
+  if (node?.type === 'tool') return (node.data as ToolNodeData).backend === 'dnx' ? 'dnx' : 'ssh'
+  if (node?.type === 'file') return fileOrigin(node.data as FileNodeData)
+  return 'ssh'
 }
 
 function resolveSinkPath(sink: FileNodeData | null, fallbackDir: string, fallbackPath: string, homeDir?: string): string {
@@ -172,6 +184,20 @@ function resolveSinkPath(sink: FileNodeData | null, fallbackDir: string, fallbac
     homeDir && rawFolder.startsWith('~/') ? `${homeDir}/${rawFolder.slice(2)}` :
     rawFolder
   return `${folder}/${filename}`
+}
+
+function resolveTransferOutputDir(
+  targetFolder: string | undefined,
+  outputRoot: string,
+  slug: string,
+  targetOrigin: TransferNodeData['to'],
+  homeDir?: string,
+): string {
+  const raw = (targetFolder?.trim() || (targetOrigin === 'local' ? '~/BioFlow/transfers' : '')).replace(/\/+$/, '')
+  if (!raw) return `${outputRoot}/${slug}`
+  if (targetOrigin !== 'local' && homeDir && raw === '~') return homeDir
+  if (targetOrigin !== 'local' && homeDir && raw.startsWith('~/')) return `${homeDir}/${raw.slice(2)}`
+  return raw
 }
 
 function pathDirname(path: string): string {
@@ -461,8 +487,8 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
       const targetFolder =
         data.to === 'dnx' ? data.dnxFolder
         : data.to === 'ssh' ? data.sshFolder
-        : data.localFolder || '~/BioFlow/transfers'
-      const outputDir = resolveNodeOutputDir(targetFolder, outputRoot, slug, ctx.homeDir)
+        : data.localFolder
+      const outputDir = resolveTransferOutputDir(targetFolder, outputRoot, slug, data.to, ctx.homeDir)
       const nameFor = (index: number, sourcePath: string) => {
         const explicit = data.outputName?.trim()
         if (!explicit) return pathBasename(sourcePath) || `${slug}.${index + 1}`

@@ -102,6 +102,9 @@ export function NodeRunList({ run }: Props) {
                 />
               </div>
             ) : null}
+            {ns.isArray && (
+              <ArrayTaskStrip size={ns.arraySize ?? 0} status={ns.status} />
+            )}
           </div>
           <div className="text-[10px] text-text-muted font-mono shrink-0">
             {formatDuration(ns)}
@@ -109,6 +112,25 @@ export function NodeRunList({ run }: Props) {
         </button>
         )
       })}
+    </div>
+  )
+}
+
+function ArrayTaskStrip({ size, status }: { size: number; status: NodeRunState['status'] }) {
+  const count = Math.min(Math.max(size, 1), 32)
+  const title = `${size || '?'} Slurm array task${size === 1 ? '' : 's'} tracked as one job by Slurm`
+  const color = status === 'done'
+    ? 'bg-success/70'
+    : status === 'failed'
+      ? 'bg-error/70'
+      : status === 'running'
+        ? 'bg-warning/70'
+        : 'bg-text-muted/40'
+  return (
+    <div className="mt-1 flex items-center gap-0.5" title={title}>
+      {Array.from({ length: count }).map((_, index) => (
+        <span key={index} className={`h-1.5 flex-1 rounded-sm ${color}`} />
+      ))}
     </div>
   )
 }

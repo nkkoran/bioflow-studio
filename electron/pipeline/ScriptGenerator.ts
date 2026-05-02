@@ -348,6 +348,7 @@ function renderCustomShellScript(opts: {
 }): string[] {
   const { nodeData, axisPlan, outputDir, slug, isArray } = opts
   const script = String(nodeData.paramValues?.script ?? '').trim()
+  const outputContract = nodeData.outputContract ?? { mode: 'capture-stdout', requireNonEmpty: true }
   const input = axisPlan.inputs.input
   const inputPaths =
     !input ? []
@@ -370,11 +371,25 @@ function renderCustomShellScript(opts: {
   lines.push('set -- "${INPUTS[@]}"')
   lines.push('')
   lines.push('# Use $INPUT for the first connected file, "${INPUTS[@]}" for all inputs,')
-  lines.push('# and $OUTPUT for the node output file. Stdout is saved to $OUTPUT.')
+  lines.push('# and $OUTPUT for the node output file.')
   if (output) {
-    lines.push('{')
-    lines.push(script || ':')
-    lines.push(`} > "$OUTPUT"`)
+    if (outputContract.mode === 'script-writes-output') {
+      lines.push('# The script is responsible for writing the final result to $OUTPUT.')
+      lines.push(script || ':')
+      if (outputContract.requireNonEmpty !== false) {
+        lines.push('test -s "$OUTPUT" || { echo "Custom shell node did not create a non-empty $OUTPUT file" >&2; exit 1; }')
+      } else {
+        lines.push('test -e "$OUTPUT" || { echo "Custom shell node did not create $OUTPUT" >&2; exit 1; }')
+      }
+    } else {
+      lines.push('# Stdout is captured to $OUTPUT.')
+      lines.push('{')
+      lines.push(script || ':')
+      lines.push(`} > "$OUTPUT"`)
+      if (outputContract.requireNonEmpty !== false) {
+        lines.push('test -s "$OUTPUT" || { echo "Custom shell node produced an empty $OUTPUT file" >&2; exit 1; }')
+      }
+    }
   } else {
     lines.push(script || ':')
   }
@@ -466,11 +481,11 @@ function renderPlinkPhewasScript(opts: {
     genoFlag, shellQuote(genoPrefix),
     '--pheno',
   ]
-  if (booleanParam(nodeData, 'pheno-iid-only', false)) commonArgs.push('iid-only')
+  if (plinkIidOnlyEnabled(nodeData, 'pheno-iid-only')) commonArgs.push('iid-only')
   commonArgs.push(shellQuote(phenoPath))
   if (covarPath) {
     commonArgs.push('--covar')
-    if (booleanParam(nodeData, 'covar-iid-only', false)) commonArgs.push('iid-only')
+    if (plinkIidOnlyEnabled(nodeData, 'covar-iid-only')) commonArgs.push('iid-only')
     commonArgs.push(shellQuote(covarPath))
   }
   if (keepPath) commonArgs.push('--keep', shellQuote(keepPath))
@@ -865,6 +880,18 @@ function booleanParam(nodeData: ToolNodeData, name: string, fallback = false): b
   return value === undefined ? fallback : Boolean(value)
 }
 
+function switchStateEnabled(enabled: unknown, value: unknown): boolean {
+  return Boolean(enabled) && value !== false
+}
+
+function plinkIidOnlyEnabled(nodeData: ToolNodeData, flagId: 'pheno-iid-only' | 'covar-iid-only'): boolean {
+  const option = nodeData.analysisOptions?.find((candidate) => candidate.optionId === flagId)
+  if (option) return switchStateEnabled(option.enabled, option.value)
+  const block = nodeData.flagBlocks?.find((candidate) => candidate.flagId === flagId)
+  if (block) return switchStateEnabled(block.enabled, block.value)
+  return booleanParam(nodeData, flagId, false)
+}
+
 interface ArrayRuntime {
   arraySpec: string
   setupLines: string[]
@@ -1215,7 +1242,10 @@ function emitAnalysisOptions(
 }
 
 function analysisOptionEnabled(options: AnalysisOptionState[], id: string): boolean {
-  return options.some((option) => option.optionId === id || option.subOptions?.[id]?.enabled)
+  return options.some((option) => (
+    (option.optionId === id && switchStateEnabled(option.enabled, option.value))
+    || switchStateEnabled(option.subOptions?.[id]?.enabled, option.subOptions?.[id]?.value)
+  ))
 }
 
 function plinkAssocFileInputFlag(id: string, flag: string, options: AnalysisOptionState[]): string {
@@ -1321,8 +1351,10 @@ function emitFlagBlocks(
 }
 
 function plinkAssocFileInputFlagFromBlocks(id: string, flag: string, byId: Map<string, ToolFlagBlock>): string {
-  if (id === 'pheno' && byId.get('pheno-iid-only')?.enabled) return `${flag} iid-only`
-  if (id === 'covar' && byId.get('covar-iid-only')?.enabled) return `${flag} iid-only`
+  const phenoIidOnly = byId.get('pheno-iid-only')
+  const covarIidOnly = byId.get('covar-iid-only')
+  if (id === 'pheno' && switchStateEnabled(phenoIidOnly?.enabled, phenoIidOnly?.value)) return `${flag} iid-only`
+  if (id === 'covar' && switchStateEnabled(covarIidOnly?.enabled, covarIidOnly?.value)) return `${flag} iid-only`
   return flag
 }
 

@@ -110,6 +110,7 @@ async function detectFoldersInFolder(
 
   const items = folderEntries.map((entry) => ({
     key: captureKeyFromName(entry.name),
+    rawKey: rawKeyFromName(entry.name),
     path: `${entry.path.replace(/\/+$/, '')}/${fileName}`,
   }))
   return {
@@ -140,7 +141,7 @@ function detectOneNestedFilePerFolder(
       files.find((file) => file.name.includes(key)) ??
       files.find((file) => captureKeyFromName(file.name) === key) ??
       files[0]
-    items.push({ key, path: picked.path })
+    items.push({ key, rawKey: rawKeyFromName(listing.folder.name), path: picked.path })
   }
   return sortSplitRows(items)
 }
@@ -217,7 +218,7 @@ function bestVariableGroup(values: Array<{ name: string; path: string }>): { pre
       if (seenForValue.has(id)) continue
       seenForValue.add(id)
       const group = groups.get(id) ?? { prefix: candidate.prefix, suffix: candidate.suffix, items: [], score: 0 }
-      group.items.push({ key: normalizeSplitKey(candidate.key), path: value.path })
+      group.items.push({ key: normalizeSplitKey(candidate.key), rawKey: candidate.key, path: value.path })
       group.score += candidate.score
       groups.set(id, group)
     }
@@ -290,6 +291,10 @@ function chooseCommonNestedFile(
 function captureKeyFromName(name: string): string {
   const numeric = name.match(/(\d+)/)
   return numeric ? normalizeSplitKey(numeric[1]) : name
+}
+
+function rawKeyFromName(name: string): string {
+  return name.match(/(\d+)/)?.[1] ?? name
 }
 
 function normalizeSplitKey(key: string): string {

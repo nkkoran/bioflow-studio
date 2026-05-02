@@ -74,4 +74,40 @@ describe('pipelineStore', () => {
     expect(state.selectedNodeId).not.toBe(id)
     expect(state.nodes.find((node) => node.id === state.selectedNodeId)?.selected).toBe(true)
   })
+
+  it('preserves a local output destination when inserting a transfer quick-fix', () => {
+    usePipelineStore.getState().reset()
+
+    const toolId = usePipelineStore.getState().addToolNode('custom.shell', { x: 0, y: 0 })
+    const outputId = usePipelineStore.getState().addFileNode(
+      { x: 320, y: 0 },
+      {
+        label: 'CAD result',
+        path: '/Users/me/BioFlow/cad.tsv',
+        source: 'local',
+        origin: 'local',
+        fileType: 'tsv',
+        isInput: false,
+      },
+    )
+    usePipelineStore.getState().onConnect({
+      source: toolId,
+      sourceHandle: 'output',
+      target: outputId,
+      targetHandle: 'input',
+    })
+    const edgeId = usePipelineStore.getState().edges[0]?.id
+    expect(edgeId).toBeTruthy()
+
+    const transferId = usePipelineStore.getState().insertTransferNodeForEdge(edgeId!)
+    const transfer = usePipelineStore.getState().nodes.find((node) => node.id === transferId)
+
+    expect(transfer?.type).toBe('transfer')
+    expect(transfer?.data).toMatchObject({
+      from: 'ssh',
+      to: 'local',
+      localFolder: '/Users/me/BioFlow',
+      outputName: 'cad.tsv',
+    })
+  })
 })

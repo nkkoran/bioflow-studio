@@ -879,7 +879,7 @@ export class SshManager {
 
   getClient(id: string): Client | null {
     const conn = this.connections.get(id)
-    return conn ? conn.client : null
+    return conn && !conn.reconnecting ? conn.client : null
   }
 
   getLoginPolicy(id: string): Promise<LoginPolicy> {
@@ -957,6 +957,10 @@ export class SshManager {
         reject(new Error(`Connection ${id} not found`))
         return
       }
+      if (conn.reconnecting) {
+        reject(new Error(`Connection ${id} is reconnecting`))
+        return
+      }
 
       conn.client.exec(command, (err, stream) => {
         if (err) {
@@ -1021,6 +1025,7 @@ export class SshManager {
   ): { cancel: () => void } {
     const conn = this.connections.get(id)
     if (!conn) return { cancel: () => {} }
+    if (conn.reconnecting) return { cancel: () => {} }
 
     let active = true
     let streamRef: ClientChannel | null = null
@@ -1061,6 +1066,10 @@ export class SshManager {
       const conn = this.connections.get(id)
       if (!conn) {
         reject(new Error(`Connection ${id} not found`))
+        return
+      }
+      if (conn.reconnecting) {
+        reject(new Error(`Connection ${id} is reconnecting`))
         return
       }
 

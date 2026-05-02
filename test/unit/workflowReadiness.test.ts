@@ -349,6 +349,88 @@ describe('workflowReadiness', () => {
     }))
   })
 
+  it('does not suggest PLINK iid-only when phenotype input already has FID and IID', () => {
+    const snap = snapshot(
+      [
+        { id: 'geno', type: 'file', position: { x: 0, y: 0 }, data: { label: 'Genotypes', path: '/data/cohort.pgen', fileType: 'plink', isInput: true } },
+        { id: 'pheno', type: 'file', position: { x: 0, y: 1 }, data: { label: 'Phenotypes', path: '/data/pheno.tsv', fileType: 'tsv', isInput: true } },
+        {
+          id: 'assoc',
+          type: 'tool',
+          position: { x: 1, y: 1 },
+          data: {
+            toolId: 'plink2.assoc',
+            label: 'Assoc',
+            paramValues: { 'pheno-name': 'trait' },
+            status: 'idle',
+          },
+        },
+      ],
+      [
+        { id: 'e1', source: 'geno', sourceHandle: 'output', target: 'assoc', targetHandle: 'input' },
+        { id: 'e2', source: 'pheno', sourceHandle: 'output', target: 'assoc', targetHandle: 'pheno' },
+      ],
+    )
+    const report = evaluateWorkflowReadiness(snap, {
+      probes: {
+        '/data/cohort.pgen': fileProbe('/data/cohort.pgen', {
+          sidecars: { '.pvar': true, '.psam': true },
+          sampleIds: ['S001', 'S002'],
+        }),
+        '/data/pheno.tsv': fileProbe('/data/pheno.tsv', {
+          header: ['FID', 'IID', 'trait'],
+          delimiter: '\t',
+          previewRows: [['F1', 'S001', '12.4'], ['F1', 'S002', '15.1']],
+        }),
+      },
+    })
+
+    expect(report.issues.some((issue) => issue.code === 'PLINK_PHENO_IID_ONLY')).toBe(false)
+  })
+
+  it('blocks PLINK iid-only when the phenotype file has a FID column', () => {
+    const snap = snapshot(
+      [
+        { id: 'geno', type: 'file', position: { x: 0, y: 0 }, data: { label: 'Genotypes', path: '/data/cohort.pgen', fileType: 'plink', isInput: true } },
+        { id: 'pheno', type: 'file', position: { x: 0, y: 1 }, data: { label: 'Phenotypes', path: '/data/pheno.tsv', fileType: 'tsv', isInput: true } },
+        {
+          id: 'assoc',
+          type: 'tool',
+          position: { x: 1, y: 1 },
+          data: {
+            toolId: 'plink2.assoc',
+            label: 'Assoc',
+            paramValues: { 'pheno-name': 'trait', 'pheno-iid-only': true },
+            status: 'idle',
+          },
+        },
+      ],
+      [
+        { id: 'e1', source: 'geno', sourceHandle: 'output', target: 'assoc', targetHandle: 'input' },
+        { id: 'e2', source: 'pheno', sourceHandle: 'output', target: 'assoc', targetHandle: 'pheno' },
+      ],
+    )
+    const report = evaluateWorkflowReadiness(snap, {
+      probes: {
+        '/data/cohort.pgen': fileProbe('/data/cohort.pgen', {
+          sidecars: { '.pvar': true, '.psam': true },
+          sampleIds: ['S001', 'S002'],
+        }),
+        '/data/pheno.tsv': fileProbe('/data/pheno.tsv', {
+          header: ['FID', 'IID', 'trait'],
+          delimiter: '\t',
+          previewRows: [['F1', 'S001', '12.4'], ['F1', 'S002', '15.1']],
+        }),
+      },
+    })
+
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      code: 'PLINK_PHENO_IID_ONLY_WITH_FID',
+      severity: 'error',
+      details: expect.objectContaining({ quickFixFlagId: 'pheno-iid-only', quickFixValue: false }),
+    }))
+  })
+
   it('warns when UKB-scale PLINK GWAS resources are below the safety recommendation', () => {
     const snap = snapshot(
       [

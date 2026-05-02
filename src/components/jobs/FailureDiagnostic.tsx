@@ -40,7 +40,7 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
             : block.flagId === suggested.flagId,
         )
         if (existing) {
-          existing.enabled = true
+          existing.enabled = suggested.value !== false
           existing.value = suggested.value
           if (suggested.flagId === CUSTOM_FLAG_ID) {
             existing.customFlag = suggested.customFlag
@@ -58,7 +58,7 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
           : {
               id: `${suggested.flagId}_${Math.random().toString(36).slice(2, 10)}`,
               flagId: suggested.flagId,
-              enabled: true,
+              enabled: suggested.value !== false,
               value: suggested.value,
             }
         nextBlocks.push(block)
@@ -95,7 +95,7 @@ export function FailureDiagnostic({ nodeId, diagnostic, onRerun }: Props) {
       <div className="mb-2 text-[11px] text-text-secondary">{diagnostic.suggestion}</div>
       {diagnostic.fix && (
         <Button variant="secondary" size="sm" className="mb-2 h-6 text-xs" onClick={applyFix}>
-          {diagnostic.fix.kind === 'flags' ? 'Apply suggested flag and rerun' : 'Apply fix and rerun'}
+          {diagnostic.fix.kind === 'flags' ? 'Apply suggested flag change and rerun' : 'Apply fix and rerun'}
         </Button>
       )}
       <Button

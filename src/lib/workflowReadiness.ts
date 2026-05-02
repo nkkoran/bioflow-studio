@@ -522,6 +522,21 @@ function checkPlinkTableModifiers(
     const hasFid = lower.includes('fid') || lower.includes('family_id') || lower.includes('familyid')
     const hasIid = lower.includes('iid') || lower.includes('sample_id') || lower.includes('sampleid') || lower.includes('id')
     const flagId = `${portId}-iid-only`
+    if (hasFid && plinkFlagEnabled(tool, data, connectedPortIds, flagId)) {
+      pushIssue(issues, {
+        severity: 'error',
+        blocking: true,
+        category: 'IDs',
+        code: `PLINK_${portId.toUpperCase()}_IID_ONLY_WITH_FID`,
+        nodeId: node.id,
+        portId,
+        path: probe.path,
+        message: `The ${portId} file has a FID column, but --${portId} iid-only is enabled.`,
+        suggestion: `Disable the PLINK iid-only modifier for --${portId}; PLINK rejects iid-only when FID is present.`,
+        details: quickFixDetails(flagId, false, `Disable --${portId} iid-only`),
+      })
+      continue
+    }
     if (!hasFid && hasIid && !plinkFlagEnabled(tool, data, connectedPortIds, flagId)) {
       pushIssue(issues, {
         severity: 'warning',

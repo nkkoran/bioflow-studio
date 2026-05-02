@@ -368,6 +368,16 @@ function diagnoseTail(tail: string[], toolId?: string): FailureDiagnostic {
 }
 
 function diagnosePlinkTail(tail: string[], text: string): FailureDiagnostic | null {
+  const iidOnlyWithFid = text.match(/"--(pheno|covar) iid-only" file has a FID column/i)
+  if (iidOnlyWithFid) {
+    const portId = iidOnlyWithFid[1].toLowerCase()
+    return {
+      tail,
+      cause: `PLINK rejected --${portId} iid-only because the file has FID.`,
+      suggestion: `Disable the --${portId} iid-only modifier and rerun. That modifier is only for files with IID/sample IDs but no FID column.`,
+      fix: { kind: 'flags', blocks: [{ flagId: `${portId}-iid-only`, value: false }] },
+    }
+  }
   if (/ambiguous sex|missing sex|allow-no-sex/i.test(text)) {
     return {
       tail,

@@ -190,6 +190,10 @@ const api = {
       normalizeRemoteFileEntries(await ipcRenderer.invoke('sftp:ls', id, remotePath, opts)),
     stat: (id: string, remotePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('sftp:stat', id, remotePath),
+    statMany: (id: string, remotePaths: string[]): Promise<Array<{ path: string; ok: boolean; stat?: FileStat; error?: string }>> =>
+      ipcRenderer.invoke('sftp:stat-many', id, remotePaths),
+    search: async (id: string, rootPath: string, query: string, opts?: { maxResults?: number; maxDepth?: number }): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('sftp:search', id, rootPath, query, opts)),
     read: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
       ipcRenderer.invoke('sftp:read', id, remotePath, offset, length),
     readBase64: (id: string, remotePath: string, offset?: number, length?: number): Promise<string> =>
@@ -315,6 +319,10 @@ const api = {
       normalizeRemoteFileEntries(await ipcRenderer.invoke('local:ls', dirPath)),
     stat: (filePath: string): Promise<FileStat> =>
       ipcRenderer.invoke('local:stat', filePath),
+    statMany: (filePaths: string[]): Promise<Array<{ path: string; ok: boolean; stat?: FileStat; error?: string }>> =>
+      ipcRenderer.invoke('local:stat-many', filePaths),
+    search: async (rootPath: string, query: string, opts?: { maxResults?: number; maxDepth?: number }): Promise<RemoteFileEntry[]> =>
+      normalizeRemoteFileEntries(await ipcRenderer.invoke('local:search', rootPath, query, opts)),
     read: (filePath: string, offset?: number, length?: number): Promise<string> =>
       ipcRenderer.invoke('local:read', filePath, offset, length),
     readBase64: (filePath: string, offset?: number, length?: number): Promise<string> =>
@@ -359,8 +367,8 @@ const api = {
       ipcRenderer.invoke('pipeline:list-runs'),
     getRun: (runId: string): Promise<RunState | null> =>
       ipcRenderer.invoke('pipeline:get-run', runId),
-    listOutputs: (runId: string, nodeId: string): Promise<Array<{ name: string; path: string; size: number; modified: number }>> =>
-      ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId }),
+    listOutputs: (runId: string, nodeId: string, connectionId?: string): Promise<Array<{ name: string; path: string; size: number; modified: number; origin: 'local' | 'ssh' | 'dnx' }>> =>
+      ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId, connectionId }),
     generateScriptsDry: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<DryRunScript[]> =>
       ipcRenderer.invoke('pipeline:generate-scripts-dry', { connectionId, snapshot, workDir }),
     planTransfersDry: (snapshot: PipelineSnapshot): Promise<TransferPlan[]> =>

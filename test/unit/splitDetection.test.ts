@@ -83,8 +83,8 @@ describe('splitDetection', () => {
       file: 'geno.pgen',
     })
     expect(detected.items).toEqual([
-      { key: '1', path: '/data/plink/chr1/geno.pgen' },
-      { key: '2', path: '/data/plink/chr2/geno.pgen' },
+      { key: '1', rawKey: '1', path: '/data/plink/chr1/geno.pgen' },
+      { key: '2', rawKey: '2', path: '/data/plink/chr2/geno.pgen' },
     ])
   })
 })

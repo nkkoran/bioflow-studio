@@ -24,7 +24,10 @@ export function nodeDataWithAnalysisOptionEnabled(
   const subDef = parentDef?.subOptions?.find((sub) => sub.id === optionOrPortId)
   const flagId = topLevelDef?.id ?? subDef?.id ?? optionOrPortId
   const paramName = topLevelDef?.paramName ?? subDef?.paramName ?? getFlagDef(data.toolId, flagId)?.paramName
-  if (paramName) paramValues[paramName] = value
+  if (paramName) {
+    if (value === false) delete paramValues[paramName]
+    else paramValues[paramName] = value
+  }
 
   const currentOptions = normalizeAnalysisOptions(tool, data)
   const analysisOptions = currentOptions.map((option): AnalysisOptionState => {
@@ -38,8 +41,8 @@ export function nodeDataWithAnalysisOptionEnabled(
           ...(option.subOptions ?? {}),
           [subDef.id]: {
             ...(option.subOptions?.[subDef.id] ?? {}),
-            enabled: true,
-            value: subDef.kind === 'switch' ? true : value,
+            enabled: value !== false,
+            value: subDef.kind === 'switch' ? value !== false : value,
           },
         },
       }
@@ -83,11 +86,11 @@ function patchOption(
     }
   }
   if (def.kind === 'switch') {
-    return { ...option, enabled: true, value: true }
+    return { ...option, enabled: value !== false, value: value !== false }
   }
   return {
     ...option,
-    enabled: true,
+    enabled: value !== false,
     value: value === true && def.defaultValue !== undefined ? def.defaultValue : value,
   }
 }
@@ -97,13 +100,13 @@ function patchFlagBlocks(data: ToolNodeData, flagId: string, value: string | num
   if (blocks.length === 0 || !getFlagDef(data.toolId, flagId)) return data.flagBlocks
   const existing = blocks.find((block) => block.flagId === flagId)
   if (existing) {
-    existing.enabled = true
+    existing.enabled = value !== false
     existing.value = value
   } else {
     blocks.push({
       id: `${flagId}_quick_fix`,
       flagId,
-      enabled: true,
+      enabled: value !== false,
       value,
     })
   }

@@ -11,6 +11,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { classifyPreview } from '@/lib/filePreviewClassifier'
 import { pathBasename, pathDirname } from '@/lib/remotePath'
 import { buildRunManifest, renderRunManifestHtml, renderRunManifestMarkdown } from '@/lib/runManifest'
+import { resolveRunConnectionId, runConnectionUnavailableMessage } from '@/lib/runConnection'
 import { RunReportModal } from '@/components/pipeline/RunReportModal'
 import type { RunManifest } from '@/types/workspace'
 import { inferFileType } from '@/lib/fileTypeInference'
@@ -20,7 +21,10 @@ export function ResultsPanel() {
   const runs = useRunStore((s) => s.runs)
   const activeRunId = useRunStore((s) => s.activeRunId)
   const refreshRuns = useRunStore((s) => s.refreshRuns)
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const connections = useConnectionStore((s) => s.connections)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
+  const connectLocal = useConnectionStore((s) => s.connectLocal)
   const navigate = useFileStore((s) => s.navigate)
   const openFile = useDataPreviewStore((s) => s.openFile)
   const alertDialog = useDialogStore((s) => s.alert)
@@ -36,6 +40,7 @@ export function ResultsPanel() {
 
   const activeRun = activeRunId ? runs[activeRunId] : null
   const workspace = activeWorkspaceId ? workspaces.find((row) => row.id === activeWorkspaceId) ?? null : null
+  const activeRunConnectionId = activeRun ? resolveRunConnectionId(activeRun, activeConnectionId, connections) : null
 
   const results = useMemo(() => {
     if (!activeRun) return []
@@ -94,7 +99,7 @@ export function ResultsPanel() {
     setReporting(true)
     try {
       const scripts = activeRun.snapshot
-        ? await window.api.pipeline.generateScriptsDry(activeRun.connectionId, activeRun.snapshot, activeRun.workDir).catch(() => [])
+        ? await window.api.pipeline.generateScriptsDry(activeRunConnectionId ?? activeRun.connectionId, activeRun.snapshot, activeRun.workDir).catch(() => [])
         : []
       setReportPreview(buildRunManifest(activeRun, activeRun.snapshot, activeRun.workspace ?? workspace, { scripts }))
     } finally {
@@ -142,6 +147,53 @@ export function ResultsPanel() {
   const copyPath = async (path: string) => {
     await navigator.clipboard.writeText(path)
     window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'success', message: 'Copied path' } }))
+  }
+
+  const activateOutputOrigin = async (origin: FileOrigin, path: string) => {
+    if (!activeRun) return false
+    if (origin === 'dnx') {
+      window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'info', message: 'DNAnexus output browsing is not available in the file explorer yet' } }))
+      return false
+    }
+    if (origin === 'local') {
+      await connectLocal(pathDirname(path))
+      return true
+    }
+    if (!activeRunConnectionId) {
+      window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'error', message: runConnectionUnavailableMessage(activeRun) } }))
+      return false
+    }
+    setActiveConnection(activeRunConnectionId)
+    return true
+  }
+
+  const previewOutput = async (path: string, origin: FileOrigin) => {
+    const ready = await activateOutputOrigin(origin, path)
+    if (!ready) return
+    openFile(path, pathBasename(path), classifyPreview(path))
+  }
+
+  const openOutputFolder = async (path: string, origin: FileOrigin) => {
+    const ready = await activateOutputOrigin(origin, path)
+    if (!ready || !activeRun) return
+    await navigate(pathDirname(path), {
+      connectionId: origin === 'local' ? LOCAL_CONNECTION_ID : activeRunConnectionId ?? activeRun.connectionId,
+    })
+  }
+
+  const openRunFolder = async () => {
+    if (!activeRun) return
+    if (activeRun.connectionId === LOCAL_CONNECTION_ID) {
+      await connectLocal(activeRun.workDir)
+      await navigate(activeRun.workDir, { connectionId: LOCAL_CONNECTION_ID })
+      return
+    }
+    if (!activeRunConnectionId) {
+      window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'error', message: runConnectionUnavailableMessage(activeRun) } }))
+      return
+    }
+    setActiveConnection(activeRunConnectionId)
+    await navigate(activeRun.workDir, { connectionId: activeRunConnectionId })
   }
 
   if (!activeRun) {
@@ -235,10 +287,7 @@ export function ResultsPanel() {
                         size="sm"
                         icon={<Eye size={12} />}
                         className="h-6 text-xs"
-                        onClick={() => {
-                          setActiveConnection(activeRun.connectionId)
-                          openFile(path, pathBasename(path), classifyPreview(path))
-                        }}
+                        onClick={() => void previewOutput(path, entry.origin)}
                       >
                         Preview
                       </Button>
@@ -247,10 +296,7 @@ export function ResultsPanel() {
                         size="sm"
                         icon={<FolderOpen size={12} />}
                         className="h-6 text-xs"
-                        onClick={() => {
-                          setActiveConnection(activeRun.connectionId)
-                          void navigate(pathDirname(path))
-                        }}
+                        onClick={() => void openOutputFolder(path, entry.origin)}
                       >
                         Folder
                       </Button>
@@ -259,10 +305,7 @@ export function ResultsPanel() {
                         size="sm"
                         icon={<ExternalLink size={12} />}
                         className="h-6 text-xs"
-                        onClick={() => {
-                          setActiveConnection(activeRun.connectionId)
-                          void navigate(activeRun.workDir)
-                        }}
+                        onClick={() => void openRunFolder()}
                       >
                         Run folder
                       </Button>
@@ -297,6 +340,8 @@ function resultOrigin(
 ): FileOrigin {
   if (node?.type === 'tool' && node.data?.backend === 'dnx') return 'dnx'
   if (node?.type === 'transfer' && node.data?.to === 'dnx') return 'dnx'
+  if (node?.type === 'transfer' && node.data?.to === 'local') return 'local'
   if (node?.type === 'file' && node.data?.origin === 'dnx') return 'dnx'
+  if (node?.type === 'file' && node.data?.origin === 'local') return 'local'
   return connectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
 }
