@@ -101,7 +101,7 @@ function TabButton({
     >
       <span className="text-nowrap min-w-0">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className="bioflow-badge inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-warning/20 px-1 text-[9px] font-semibold text-warning">
+        <span className="bioflow-badge inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-warning/20 px-1 text-xs font-semibold text-warning">
           {badge}
         </span>
       )}

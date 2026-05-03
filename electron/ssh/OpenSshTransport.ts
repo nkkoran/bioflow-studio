@@ -40,6 +40,10 @@ interface SpawnResult {
   exitCode: number
 }
 
+interface OpenSshBaseArgOptions {
+  batchMode?: boolean
+}
+
 export interface PtyInvocation {
   command: string
   args: string[]
@@ -66,9 +70,10 @@ export class OpenSshTransport {
     const alias = bioflowOpenSshAlias(config)
     const controlPath = bioflowControlPath(config)
     const baseArgs = buildOpenSshBaseArgs(config, controlPath)
+    const checkArgs = buildOpenSshMasterCheckArgs(config, controlPath)
     debug('connect', `Using OpenSSH ControlPersist socket "${controlPath}" for ${config.username}@${config.host}:${config.port}`)
 
-    const check = await this.runLocalSsh([...baseArgs, '-O', 'check', config.host])
+    const check = await this.runLocalSsh(checkArgs, nonInteractiveOpenSshEnv())
     if (check.exitCode === 0) {
       debug('connect', `Reused existing OpenSSH ControlPersist master for ${config.host}`)
       return { alias, controlPath, reused: true }
@@ -80,7 +85,7 @@ export class OpenSshTransport {
       throw new Error(formatOpenSshFailure('Could not start OpenSSH ControlPersist master', start))
     }
 
-    const verify = await this.runLocalSsh([...baseArgs, '-O', 'check', config.host])
+    const verify = await this.runLocalSsh(checkArgs, nonInteractiveOpenSshEnv())
     if (verify.exitCode !== 0) {
       throw new Error(formatOpenSshFailure('OpenSSH ControlPersist master did not become available', verify))
     }
@@ -90,7 +95,7 @@ export class OpenSshTransport {
   }
 
   async disconnect(handle: OpenSshConnectionHandle): Promise<void> {
-    const result = await this.runLocalSsh([...buildOpenSshBaseArgs(handle.config, handle.controlPath), '-O', 'exit', handle.config.host])
+    const result = await this.runLocalSsh([...buildOpenSshBaseArgs(handle.config, handle.controlPath, { batchMode: true }), '-O', 'exit', handle.config.host], nonInteractiveOpenSshEnv())
     if (result.exitCode !== 0 && !/No such file|not running|Control socket connect/i.test(result.stderr.toString('utf8'))) {
       throw new Error(formatOpenSshFailure('Could not close OpenSSH ControlPersist master', result))
     }
@@ -115,10 +120,13 @@ export class OpenSshTransport {
     let child: ChildProcessWithoutNullStreams | null = null
     let active = true
 
-    this.withAskpass(handle.config, debug ?? (() => undefined), async (env) => {
+    const env = nonInteractiveOpenSshEnv()
+    debug?.('connect', 'Starting OpenSSH stream in non-interactive ControlPersist mode')
+    Promise.resolve().then(async () => {
       if (!active) return
+      await this.ensureMasterAvailable(handle, debug)
       await new Promise<void>((resolve) => {
-        child = spawn('ssh', this.remoteArgs(handle, command), { env })
+        child = spawn('ssh', this.remoteArgs(handle, command, { batchMode: true }), { env })
         child.stdout.on('data', (chunk: Buffer) => {
           if (active) onData(chunk.toString('utf8'), 'stdout')
         })
@@ -158,7 +166,7 @@ export class OpenSshTransport {
     const command = [
       `dir=${openSshShellQuote(remotePath)}`,
       '[ -d "$dir" ] || exit 2',
-      'find "$dir" -mindepth 1 -maxdepth 1 -printf \'%f\\0%p\\0%y\\0%s\\0%T@\\0%M\\0\'',
+      'find "$dir" -mindepth 1 -maxdepth 1 -printf \'%f\\0%p\\0%y\\0%Y\\0%s\\0%T@\\0%M\\0\'',
     ].join('; ')
     const result = await this.runRemoteBuffered(handle, command)
     assertRemoteSuccess('List remote directory', result)
@@ -215,25 +223,24 @@ export class OpenSshTransport {
 
   async upload(handle: OpenSshConnectionHandle, localPath: string, remotePath: string, onProgress?: OpenSshProgressCallback): Promise<void> {
     const total = await fs.stat(localPath).then((stat) => stat.size).catch(() => undefined)
-    const result = await this.withAskpass(handle.config, () => undefined, async (env) => {
-      return await new Promise<SpawnResult>((resolve, reject) => {
-        const child = spawn('ssh', this.remoteArgs(handle, `cat > ${openSshShellQuote(remotePath)}`), { env })
-        const stderr: Buffer[] = []
-        let transferred = 0
-        const input = createReadStream(localPath)
-        input.on('data', (chunk: Buffer) => {
-          transferred += chunk.length
-          onProgress?.(transferred, total)
-        })
-        input.on('error', reject)
-        child.stdin.on('error', reject)
-        child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
-        child.on('error', reject)
-        child.on('close', (code) => {
-          resolve({ stdout: Buffer.alloc(0), stderr: Buffer.concat(stderr), exitCode: code ?? 0 })
-        })
-        input.pipe(child.stdin)
+    await this.ensureMasterAvailable(handle)
+    const result = await new Promise<SpawnResult>((resolve, reject) => {
+      const child = spawn('ssh', this.remoteArgs(handle, `cat > ${openSshShellQuote(remotePath)}`, { batchMode: true }), { env: nonInteractiveOpenSshEnv() })
+      const stderr: Buffer[] = []
+      let transferred = 0
+      const input = createReadStream(localPath)
+      input.on('data', (chunk: Buffer) => {
+        transferred += chunk.length
+        onProgress?.(transferred, total)
       })
+      input.on('error', reject)
+      child.stdin.on('error', reject)
+      child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+      child.on('error', reject)
+      child.on('close', (code) => {
+        resolve({ stdout: Buffer.alloc(0), stderr: Buffer.concat(stderr), exitCode: code ?? 0 })
+      })
+      input.pipe(child.stdin)
     })
     assertRemoteSuccess('Upload remote file', result)
     onProgress?.(total ?? 0, total)
@@ -242,50 +249,59 @@ export class OpenSshTransport {
   async download(handle: OpenSshConnectionHandle, remotePath: string, localPath: string, onProgress?: OpenSshProgressCallback): Promise<void> {
     await fs.mkdir(parentDir(localPath), { recursive: true }).catch(() => undefined)
     const total = await this.stat(handle, remotePath).then((stat) => stat.size).catch(() => undefined)
-    const result = await this.withAskpass(handle.config, () => undefined, async (env) => {
-      return await new Promise<SpawnResult>((resolve, reject) => {
-        const child = spawn('ssh', this.remoteArgs(handle, `cat -- ${openSshShellQuote(remotePath)}`), { env })
-        const output = createWriteStream(localPath)
-        const stderr: Buffer[] = []
-        let transferred = 0
-        let exitCode: number | null = null
-        let outputFinished = false
-        const maybeResolve = () => {
-          if (exitCode === null || !outputFinished) return
-          resolve({ stdout: Buffer.alloc(0), stderr: Buffer.concat(stderr), exitCode })
-        }
-        child.stdout.on('data', (chunk: Buffer) => {
-          transferred += chunk.length
-          onProgress?.(transferred, total)
-        })
-        child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
-        child.on('error', reject)
-        output.on('error', reject)
-        output.on('finish', () => {
-          outputFinished = true
-          maybeResolve()
-        })
-        child.on('close', (code) => {
-          exitCode = code ?? 0
-          maybeResolve()
-        })
-        child.stdout.pipe(output)
+    await this.ensureMasterAvailable(handle)
+    const result = await new Promise<SpawnResult>((resolve, reject) => {
+      const child = spawn('ssh', this.remoteArgs(handle, `cat -- ${openSshShellQuote(remotePath)}`, { batchMode: true }), { env: nonInteractiveOpenSshEnv() })
+      const output = createWriteStream(localPath)
+      const stderr: Buffer[] = []
+      let transferred = 0
+      let exitCode: number | null = null
+      let outputFinished = false
+      const maybeResolve = () => {
+        if (exitCode === null || !outputFinished) return
+        resolve({ stdout: Buffer.alloc(0), stderr: Buffer.concat(stderr), exitCode })
+      }
+      child.stdout.on('data', (chunk: Buffer) => {
+        transferred += chunk.length
+        onProgress?.(transferred, total)
       })
+      child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+      child.on('error', reject)
+      output.on('error', reject)
+      output.on('finish', () => {
+        outputFinished = true
+        maybeResolve()
+      })
+      child.on('close', (code) => {
+        exitCode = code ?? 0
+        maybeResolve()
+      })
+      child.stdout.pipe(output)
     })
     assertRemoteSuccess('Download remote file', result)
     onProgress?.(total ?? 0, total)
   }
 
   private async runRemoteBuffered(handle: OpenSshConnectionHandle, command: string, debug?: OpenSshDebugSink): Promise<SpawnResult> {
-    return this.withAskpass(handle.config, debug ?? (() => undefined), (env) => this.spawnBuffered('ssh', this.remoteArgs(handle, command), { env }))
+    debug?.('connect', 'Running OpenSSH command in non-interactive ControlPersist mode')
+    await this.ensureMasterAvailable(handle, debug)
+    return this.spawnBuffered('ssh', this.remoteArgs(handle, command, { batchMode: true }), { env: nonInteractiveOpenSshEnv() })
   }
 
   private async runRemoteWithInput(handle: OpenSshConnectionHandle, command: string, input: Buffer): Promise<SpawnResult> {
-    return this.withAskpass(handle.config, () => undefined, (env) => this.spawnBuffered('ssh', this.remoteArgs(handle, command), { env }, input))
+    await this.ensureMasterAvailable(handle)
+    return this.spawnBuffered('ssh', this.remoteArgs(handle, command, { batchMode: true }), { env: nonInteractiveOpenSshEnv() }, input)
   }
 
-  private remoteArgs(handle: OpenSshConnectionHandle, command: string): string[] {
-    return [...buildOpenSshBaseArgs(handle.config, handle.controlPath), handle.config.host, '--', command]
+  private async ensureMasterAvailable(handle: OpenSshConnectionHandle, debug?: OpenSshDebugSink): Promise<void> {
+    const result = await this.runLocalSsh(buildOpenSshMasterCheckArgs(handle.config, handle.controlPath), nonInteractiveOpenSshEnv())
+    if (result.exitCode === 0) return
+    debug?.('error', 'OpenSSH ControlPersist master is not active; refusing background authentication.')
+    throw new Error(formatOpenSshInactiveFailure(result))
+  }
+
+  private remoteArgs(handle: OpenSshConnectionHandle, command: string, options?: OpenSshBaseArgOptions): string[] {
+    return [...buildOpenSshBaseArgs(handle.config, handle.controlPath, options), handle.config.host, '--', command]
   }
 
   private async runLocalSsh(args: string[], env?: NodeJS.ProcessEnv): Promise<SpawnResult> {
@@ -410,7 +426,7 @@ export function bioflowControlPath(config: Pick<ConnectionConfig, 'host' | 'port
   return resolvePath(controlDir, `bioflow-${digest}`)
 }
 
-export function buildOpenSshBaseArgs(config: ConnectionConfig, controlPath = bioflowControlPath(config)): string[] {
+export function buildOpenSshBaseArgs(config: ConnectionConfig, controlPath = bioflowControlPath(config), options: OpenSshBaseArgOptions = {}): string[] {
   const args = [
     '-F', '/dev/null',
     '-S', controlPath,
@@ -420,13 +436,24 @@ export function buildOpenSshBaseArgs(config: ConnectionConfig, controlPath = bio
     '-o', `ControlPersist=${Math.max(1, Math.round(config.controlPersistHours ?? 8))}h`,
     '-o', `ServerAliveInterval=${Math.max(15, Math.round(config.serverAliveIntervalSeconds ?? 60))}`,
     '-o', 'ServerAliveCountMax=6',
-    '-o', 'NumberOfPasswordPrompts=3',
+    '-o', `NumberOfPasswordPrompts=${options.batchMode ? 0 : 3}`,
     '-o', `PreferredAuthentications=${preferredAuthentications(config.authMethod)}`,
   ]
+  if (options.batchMode) {
+    args.push(
+      '-o', 'BatchMode=yes',
+      '-o', 'PasswordAuthentication=no',
+      '-o', 'KbdInteractiveAuthentication=no',
+    )
+  }
   if (config.authMethod === 'key' && config.privateKeyPath) {
     args.push('-i', expandPath(config.privateKeyPath), '-o', 'IdentitiesOnly=yes')
   }
   return args
+}
+
+export function buildOpenSshMasterCheckArgs(config: ConnectionConfig, controlPath = bioflowControlPath(config)): string[] {
+  return [...buildOpenSshBaseArgs(config, controlPath, { batchMode: true }), '-O', 'check', config.host]
 }
 
 export function buildOpenSshTerminalArgs(handle: OpenSshConnectionHandle): string[] {
@@ -593,18 +620,19 @@ export function openSshShellQuote(value: string): string {
 export function parseOpenSshFindOutput(buffer: Buffer): RemoteFileEntry[] {
   const fields = buffer.toString('utf8').split('\0')
   const entries: RemoteFileEntry[] = []
-  for (let i = 0; i + 5 < fields.length; i += 6) {
-    const [name, path, type, size, modified, permissions] = fields.slice(i, i + 6)
+  for (let i = 0; i + 6 < fields.length; i += 7) {
+    const [name, path, type, targetType, size, modified, permissions] = fields.slice(i, i + 7)
     if (!name || !path) continue
+    const isDirectory = type === 'd' || targetType === 'd'
     const dotIndex = name.lastIndexOf('.')
     entries.push({
       name,
       path,
-      isDirectory: type === 'd',
+      isDirectory,
       size: Number(size) || 0,
       modified: Math.round((Number(modified) || 0) * 1000),
-      permissions: permissions || (type === 'd' ? 'drwx------' : '-rw-------'),
-      extension: type !== 'd' && dotIndex > 0 ? name.slice(dotIndex + 1) : '',
+      permissions: permissions || (isDirectory ? 'drwx------' : '-rw-------'),
+      extension: !isDirectory && dotIndex > 0 ? name.slice(dotIndex + 1) : '',
     })
   }
   entries.sort((a, b) => {
@@ -823,6 +851,16 @@ function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()))
 }
 
+function nonInteractiveOpenSshEnv(): NodeJS.ProcessEnv {
+  const {
+    SSH_ASKPASS: _sshAskpass,
+    SSH_ASKPASS_REQUIRE: _sshAskpassRequire,
+    BIOFLOW_PROMPT_URL: _bioflowPromptUrl,
+    ...env
+  } = process.env
+  return env
+}
+
 function preferredAuthentications(authMethod: ConnectionConfig['authMethod']): string {
   if (authMethod === 'password') return 'password,keyboard-interactive'
   return 'publickey,keyboard-interactive,password'
@@ -862,6 +900,18 @@ function formatOpenSshFailure(action: string, result: SpawnResult): string {
   const stderr = result.stderr.toString('utf8').trim()
   const stdout = result.stdout.toString('utf8').trim()
   return `${action} failed via OpenSSH ControlPersist (exit ${result.exitCode}). ${stderr || stdout || 'No error output'}`
+}
+
+export function isOpenSshSessionInactiveError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes('OpenSSH ControlPersist session is not active')
+}
+
+function formatOpenSshInactiveFailure(result: SpawnResult): string {
+  const stderr = result.stderr.toString('utf8').trim()
+  const stdout = result.stdout.toString('utf8').trim()
+  const detail = stderr || stdout
+  return `OpenSSH ControlPersist session is not active. Reconnect before browsing files or running cluster operations.${detail ? ` ${detail}` : ''}`
 }
 
 function looksLikeChoicePrompt(text: string): boolean {

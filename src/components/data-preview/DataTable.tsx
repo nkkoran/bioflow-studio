@@ -1,18 +1,11 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  useReactTable,
-  getCoreRowModel,
-  flexRender,
-  createColumnHelper,
-  type ColumnDef,
-} from '@tanstack/react-table'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Columns3, Download, Filter, Maximize2, Plus, Search, Trash2, X } from 'lucide-react'
 
 import { Tooltip } from '@/components/ui/Tooltip'
+import { MenuSelect, type MenuSelectOption } from '@/components/ui/MenuSelect'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import type { TransformFilterOp, TransformFilterRule } from '@/types/pipeline'
-import { getColumnSummary } from './DelimiterDetector'
-import { ColumnSummary } from './ColumnSummary'
+import { classNames } from '@/lib/utils'
 
 interface DataTableProps {
   filePath: string
@@ -20,30 +13,53 @@ interface DataTableProps {
   rows: string[][]
   onAddFilteredToPipeline?: () => void
   onExportFilteredFile?: (filteredRows: string[][]) => void
+  onExpandPanel?: () => void
 }
 
-const columnHelper = createColumnHelper<string[]>()
-const EMPTY_FILTERS: TransformFilterRule[] = []
-const DEFAULT_VISIBLE_COLUMNS = 24
-const SUMMARY_SAMPLE_ROWS = 400
+type SortState = { column: string; dir: 'asc' | 'desc' } | undefined
+type ColumnKind = 'str' | 'int' | 'float' | 'bool'
 
-export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, onExportFilteredFile }: DataTableProps) {
+const DEFAULT_VISIBLE_COLUMNS = 24
+const DEFAULT_COLUMN_WIDTH = 150
+const PAGE_SIZE_OPTIONS = [50, 100, 500]
+const EMPTY_FILTERS: TransformFilterRule[] = []
+const JOIN_OPTIONS: Array<MenuSelectOption<'and' | 'or'>> = [
+  { value: 'and', label: 'AND' },
+  { value: 'or', label: 'OR' },
+]
+const FILTER_OPS: Array<MenuSelectOption<TransformFilterOp> & { needsValue: boolean }> = [
+  { value: 'contains', label: 'contains', needsValue: true },
+  { value: 'regex', label: 'matches regex', needsValue: true },
+  { value: 'equals', label: 'equals', needsValue: true },
+  { value: 'notEquals', label: 'does not equal', needsValue: true },
+  { value: 'gt', label: '>', needsValue: true },
+  { value: 'gte', label: '>=', needsValue: true },
+  { value: 'lt', label: '<', needsValue: true },
+  { value: 'lte', label: '<=', needsValue: true },
+  { value: 'notEmpty', label: 'is not empty', needsValue: false },
+]
+
+export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, onExportFilteredFile, onExpandPanel }: DataTableProps) {
   const parentRef = useRef<HTMLDivElement>(null)
-  const scrollFrameRef = useRef<number | null>(null)
+  const resizeRef = useRef<{ column: string; startX: number; startWidth: number } | null>(null)
   const visibleColumns = useDataPreviewStore((s) => s.visibleColumns[filePath])
   const setVisibleColumns = useDataPreviewStore((s) => s.setVisibleColumns)
   const filters = useDataPreviewStore((s) => s.filters[filePath] ?? EMPTY_FILTERS)
   const draftFilters = useDataPreviewStore((s) => s.draftFilters[filePath] ?? filters)
+  const setFilters = useDataPreviewStore((s) => s.setFilters)
   const setDraftFilters = useDataPreviewStore((s) => s.setDraftFilters)
-  const applyDraftFilters = useDataPreviewStore((s) => s.applyDraftFilters)
   const resetDraftFilters = useDataPreviewStore((s) => s.resetDraftFilters)
   const sort = useDataPreviewStore((s) => s.sort[filePath])
   const setSort = useDataPreviewStore((s) => s.setSort)
   const setScrollOffset = useDataPreviewStore((s) => s.setScrollOffset)
-  const [columnDraft, setColumnDraft] = useState('')
-  const [filterExpression, setFilterExpression] = useState('')
-  const hasDraftChanges = JSON.stringify(draftFilters) !== JSON.stringify(filters)
-  const deferredColumnDraft = useDeferredValue(columnDraft)
+  const [query, setQuery] = useState('')
+  const [columnsOpen, setColumnsOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [selectedRow, setSelectedRow] = useState<number | null>(null)
+  const [rowsPerPage, setRowsPerPage] = useState(100)
+  const [page, setPage] = useState(0)
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({})
+  const [dragColumn, setDragColumn] = useState<string | null>(null)
 
   const defaultVisible = useMemo(
     () => headers.length > DEFAULT_VISIBLE_COLUMNS ? headers.slice(0, DEFAULT_VISIBLE_COLUMNS) : headers,
@@ -51,367 +67,514 @@ export function DataTable({ filePath, headers, rows, onAddFilteredToPipeline, on
   )
   const visible = visibleColumns && visibleColumns.length > 0 ? visibleColumns : defaultVisible
   const visibleIndexes = useMemo(
-    () => headers.map((header, index) => ({ header, index })).filter(({ header }) => visible.includes(header)),
+    () => visible
+      .map((header) => ({ header, index: headers.indexOf(header) }))
+      .filter((entry) => entry.index >= 0),
     [headers, visible],
   )
+
+  const columnKinds = useMemo(() => {
+    const sample = rows.slice(0, 200)
+    return new Map(headers.map((header, index) => [header, inferColumnKind(sample.map((row) => row[index] ?? ''))]))
+  }, [headers, rows])
+
+  const activeFilters = useMemo(() => getUsableFilterRules(filters, headers), [filters, headers])
+  const usableDraftFilters = useMemo(() => getUsableFilterRules(draftFilters, headers), [draftFilters, headers])
+  const sortedRows = useMemo(() => filterAndSortRows(rows, headers, filters, sort), [filters, headers, rows, sort])
+  const searchedRows = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return sortedRows
+    return sortedRows.filter((row) => row.some((value) => String(value ?? '').toLowerCase().includes(needle)))
+  }, [query, sortedRows])
+
+  const pageCount = Math.max(1, Math.ceil(searchedRows.length / rowsPerPage))
+  const currentPage = Math.min(page, pageCount - 1)
+  const pageRows = useMemo(() => {
+    const start = currentPage * rowsPerPage
+    return searchedRows.slice(start, start + rowsPerPage)
+  }, [currentPage, rowsPerPage, searchedRows])
+  const rangeStart = searchedRows.length === 0 ? 0 : currentPage * rowsPerPage + 1
+  const rangeEnd = currentPage * rowsPerPage + pageRows.length
+
+  const filterSignature = useMemo(() => JSON.stringify(activeFilters), [activeFilters])
+
+  useEffect(() => {
+    setPage(0)
+    setSelectedRow(null)
+  }, [filterSignature, query, rowsPerPage, sort?.column, sort?.dir])
 
   useEffect(() => {
     const el = parentRef.current
     if (!el) return
     el.scrollTop = useDataPreviewStore.getState().scrollOffset[filePath] ?? 0
-    return () => {
-      if (scrollFrameRef.current !== null) {
-        cancelAnimationFrame(scrollFrameRef.current)
-      }
-    }
   }, [filePath, rows.length])
 
-  const appliedRows = useMemo(
-    () => filterAndSortRows(rows, headers, filters, sort),
-    [filters, headers, rows, sort],
-  )
-  const draftPreviewRows = useMemo(
-    () => filterAndSortRows(rows, headers, draftFilters, sort),
-    [draftFilters, headers, rows, sort],
-  )
-  const displayedRows = hasDraftChanges ? draftPreviewRows : appliedRows
-  const removedRows = rows.length - displayedRows.length
+  useEffect(() => {
+    function onMove(event: PointerEvent) {
+      const resize = resizeRef.current
+      if (!resize) return
+      const nextWidth = Math.max(72, resize.startWidth + event.clientX - resize.startX)
+      setColumnWidths((current) => ({ ...current, [resize.column]: nextWidth }))
+    }
+    function onUp() {
+      resizeRef.current = null
+    }
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    return () => {
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+    }
+  }, [])
 
-  const summaryRows = useMemo(
-    () => displayedRows.length > SUMMARY_SAMPLE_ROWS ? displayedRows.slice(0, SUMMARY_SAMPLE_ROWS) : displayedRows,
-    [displayedRows],
-  )
-
-  const columnSummaries = useMemo(() => new Map(
-    visibleIndexes.map(({ header, index }) => [header, getColumnSummary(summaryRows, index)]),
-  ), [summaryRows, visibleIndexes])
-
-  const availableColumns = useMemo(() => {
-    const needle = deferredColumnDraft.trim().toLowerCase()
-    return headers
-      .filter((header) => !visible.includes(header))
-      .filter((header) => needle.length === 0 || header.toLowerCase().includes(needle))
-      .sort((a, b) => {
-        const aStarts = a.toLowerCase().startsWith(needle)
-        const bStarts = b.toLowerCase().startsWith(needle)
-        if (aStarts !== bStarts) return aStarts ? -1 : 1
-        return a.localeCompare(b, undefined, { numeric: true })
-      })
-      .slice(0, 12)
-  }, [deferredColumnDraft, headers, visible])
-
-  const columns = useMemo<ColumnDef<string[], string>[]>(
-    () =>
-      visibleIndexes.map(({ header, index }) =>
-        columnHelper.accessor((row) => row[index], {
-          id: header,
-          header: () => {
-            const summary = columnSummaries.get(header)
-            const activeSort = sort?.column === header ? sort.dir : null
-            return (
-              <Tooltip
-                content={summary ? <ColumnSummary summary={summary} columnName={header} /> : header}
-                side="bottom"
-                delay={200}
-              >
-                <button
-                  className="block cursor-pointer truncate text-left hover:text-accent"
-                  onClick={() => {
-                    if (!activeSort) setSort(filePath, { column: header, dir: 'asc' })
-                    else if (activeSort === 'asc') setSort(filePath, { column: header, dir: 'desc' })
-                    else setSort(filePath, undefined)
-                  }}
-                >
-                  {header}{activeSort ? (activeSort === 'asc' ? ' ↑' : ' ↓') : ''}
-                </button>
-              </Tooltip>
-            )
-          },
-          cell: (info) => (
-            <span className="block truncate" title={info.getValue()}>
-              {info.getValue()}
-            </span>
-          ),
-          size: 150,
-          maxSize: 300,
-        }),
-      ),
-    [columnSummaries, filePath, setSort, sort, visibleIndexes],
-  )
-
-  const table = useReactTable({
-    data: displayedRows,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  })
-
-  const { rows: tableRows } = table.getRowModel()
-  const virtualizer = useVirtualizer({
-    count: tableRows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 28,
-    overscan: 18,
-  })
-
-  const addVisibleColumn = (column: string) => {
-    if (!column || visible.includes(column)) return
-    setVisibleColumns(filePath, [...visible, column])
-    setColumnDraft('')
+  const cycleSort = (header: string) => {
+    const next: SortState = sort?.column !== header
+      ? { column: header, dir: 'asc' }
+      : sort.dir === 'asc'
+        ? { column: header, dir: 'desc' }
+        : undefined
+    setSort(filePath, next)
   }
 
+  const toggleColumn = (header: string) => {
+    const next = visible.includes(header)
+      ? visible.filter((column) => column !== header)
+      : [...visible, header]
+    setVisibleColumns(filePath, next.length > 0 ? next : [header])
+  }
+
+  const autoFitColumn = (header: string) => {
+    const index = headers.indexOf(header)
+    const sample = rows.slice(0, 120).map((row) => row[index] ?? '')
+    const maxLength = Math.max(header.length, ...sample.map((value) => String(value).length))
+    setColumnWidths((current) => ({ ...current, [header]: Math.min(320, Math.max(96, maxLength * 8 + 28)) }))
+  }
+
+  const moveVisibleColumn = (source: string, target: string) => {
+    if (source === target) return
+    const next = [...visible]
+    const from = next.indexOf(source)
+    const to = next.indexOf(target)
+    if (from < 0 || to < 0) return
+    next.splice(from, 1)
+    next.splice(to, 0, source)
+    setVisibleColumns(filePath, next)
+  }
+
+  const updateDraftFilter = (ruleId: string, patch: Partial<TransformFilterRule>) => {
+    setDraftFilters(filePath, draftFilters.map((rule) => rule.id === ruleId ? { ...rule, ...patch } : rule))
+  }
+
+  const addFilter = () => {
+    setDraftFilters(filePath, [
+      ...draftFilters,
+      {
+        id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        column: headers[0] ?? '',
+        join: 'and',
+        op: 'contains',
+        value: '',
+      },
+    ])
+    setFiltersOpen(true)
+  }
+
+  const cancelFilterEdits = () => {
+    resetDraftFilters(filePath)
+    setFiltersOpen(false)
+  }
+
+  const applyFilterEdits = () => {
+    if (draftFilters.some((rule) => getFilterRuleIssue(rule, headers))) return
+    setFilters(filePath, usableDraftFilters)
+    setFiltersOpen(false)
+  }
+
+  const toggleFiltersOpen = () => {
+    if (filtersOpen) {
+      cancelFilterEdits()
+      return
+    }
+    resetDraftFilters(filePath)
+    setFiltersOpen(true)
+  }
+
+  const clearDraftFilters = () => {
+    setDraftFilters(filePath, [])
+  }
+
+  const removeDraftFilter = (ruleId: string) => {
+    setDraftFilters(filePath, draftFilters.filter((candidate) => candidate.id !== ruleId))
+  }
+
+  const filterIssues = useMemo(
+    () => draftFilters
+      .map((rule) => getFilterRuleIssue(rule, headers))
+      .filter((issue): issue is string => Boolean(issue)),
+    [draftFilters, headers],
+  )
+  const hasInvalidDraftFilters = filterIssues.length > 0
+
   return (
-    <div className="flex h-full w-full flex-col">
-      <div className="flex shrink-0 flex-col gap-2 bg-bg-secondary/80 px-3 py-2 shadow-sm">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-text-muted">Rows</div>
-            <div className="text-xs text-text-secondary">Build draft filters, then apply them when the result looks right.</div>
-          </div>
-          <button
-            onClick={() => setDraftFilters(filePath, [...draftFilters, newFilter(headers[0] ?? '', headers, rows)])}
-            className="h-7 rounded-md bg-accent/10 px-2 text-[11px] text-accent shadow-sm hover:bg-accent/15"
-          >
-            Add filter
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2 text-[10px] text-text-muted">
-          <button
-            onClick={() => applyDraftFilters(filePath)}
-            disabled={!hasDraftChanges}
-            className="rounded bg-accent/10 px-2 py-0.5 text-accent shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Apply
-          </button>
-          <button
-            onClick={() => resetDraftFilters(filePath)}
-            disabled={!hasDraftChanges}
-            className="rounded bg-bg-tertiary px-2 py-0.5 shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Revert draft
-          </button>
-          <button
-            onClick={() => onExportFilteredFile?.(appliedRows)}
-            disabled={appliedRows.length === 0 || hasDraftChanges}
-            className="rounded bg-bg-tertiary px-2 py-0.5 shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-            title={hasDraftChanges ? 'Apply the draft filters first, then export the applied result.' : undefined}
-          >
-            Export as file
-          </button>
-          <button
-            onClick={() => onAddFilteredToPipeline?.()}
-            disabled={filters.length === 0 || hasDraftChanges}
-            className="rounded bg-bg-tertiary px-2 py-0.5 shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-            title={hasDraftChanges ? 'Apply the draft filters first, then add the applied result to the pipeline.' : undefined}
-          >
-            Add to pipeline
-          </button>
-          {hasDraftChanges && <span>Previewing draft filters</span>}
-        </div>
-        <div className="rounded-md bg-bg-primary/60 px-2 py-1 text-[11px] text-text-muted shadow-inner">
-          {hasDraftChanges
-            ? `Rows: ${displayedRows.length} in draft preview · ${appliedRows.length} applied · ${rows.length} original`
-            : `Rows: ${rows.length} original · ${removedRows} removed · ${displayedRows.length} remaining`}
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            value={filterExpression}
-            onChange={(e) => setFilterExpression(e.target.value)}
-            placeholder='R-like filter, e.g. age > 50 & status == "case"'
-            className="bioflow-field h-7 flex-1 rounded-md px-2 text-xs text-text-primary placeholder:text-text-muted outline-none"
-          />
-          <button
-            onClick={() => {
-              const parsed = parseFilterExpression(filterExpression, headers)
-              if (!parsed) return
-              setDraftFilters(filePath, parsed)
-            }}
-            className="h-7 rounded-md bg-accent/10 px-2 text-[11px] text-accent shadow-sm hover:bg-accent/15"
-          >
-            Set draft
-          </button>
-        </div>
-
-        {draftFilters.length > 0 ? (
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] text-text-muted">
-                {draftFilters.length} draft filter{draftFilters.length === 1 ? '' : 's'}
-              </span>
-              <button
-                onClick={() => setDraftFilters(filePath, [])}
-                className="text-[10px] text-text-muted hover:text-error"
-              >
-                Clear all filters
-              </button>
-            </div>
-            {draftFilters.map((rule, index) => (
-              <FilterRuleRow
-                key={rule.id}
-                index={index}
-                headers={headers}
-                rows={rows}
-                rule={rule}
-                onChange={(next) => setDraftFilters(filePath, draftFilters.map((entry) => entry.id === rule.id ? next : entry))}
-                onRemove={() => setDraftFilters(filePath, draftFilters.filter((entry) => entry.id !== rule.id))}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-md bg-bg-primary/60 px-2 py-1.5 text-[11px] text-text-muted shadow-inner">
-            No filters active. Try expressions like <span className="font-mono text-text-secondary">age &gt; 50</span>, <span className="font-mono text-text-secondary">status equals case</span>, or combine rows with <span className="font-mono text-text-secondary">AND / OR</span>.
-          </div>
-        )}
-
-        <div className="pt-2">
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <div>
-              <div className="text-[10px] uppercase tracking-wide text-text-muted">Columns shown</div>
-              {visibleColumns === undefined && headers.length > DEFAULT_VISIBLE_COLUMNS && (
-                <div className="text-[10px] text-text-muted">
-                  Showing the first {DEFAULT_VISIBLE_COLUMNS} columns by default for smoother scrolling on wide tables.
-                </div>
-              )}
-            </div>
-            <div className="flex items-center gap-2 text-[10px]">
-              <button className="text-accent hover:underline" onClick={() => setVisibleColumns(filePath, headers)}>All</button>
-              <button
-                className="text-text-muted hover:text-text-primary"
-                onClick={() => setVisibleColumns(filePath, defaultVisible)}
-              >
-                First {defaultVisible.length}
-              </button>
-            </div>
-          </div>
-          <div className="flex items-start gap-2">
-            <ColumnAutocompleteInput
-              headers={headers}
-              value={columnDraft}
-              onChange={setColumnDraft}
-              exclude={visible}
-              placeholder="Type a column name to add…"
-              className="flex-1"
-            />
-            <button
-              onClick={() => addVisibleColumn(
-                headers.find((header) => header === columnDraft.trim()) ?? availableColumns[0] ?? '',
-              )}
-              disabled={availableColumns.length === 0}
-              className="h-8 rounded-md bg-bg-tertiary px-2 text-[11px] text-text-primary shadow-sm hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Add
+    <div className="flex h-full min-h-0 w-full flex-col bg-bg-primary">
+      <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 bg-bg-secondary/80 px-3 py-1">
+        <div className="min-w-0 flex flex-1 items-center gap-2">
+          <span className="text-nowrap text-xs text-text-muted">{basename(filePath)}</span>
+          <span className="bioflow-badge text-nowrap rounded bg-bg-tertiary px-1.5 py-0.5 text-xs text-text-muted">
+            {rows.length} x {headers.length}
+          </span>
+          {activeFilters.length > 0 && (
+            <button type="button" onClick={onAddFilteredToPipeline} className="interactive-row h-7 px-2 text-xs text-accent">
+              Add filtered to canvas
             </button>
-          </div>
-          <div className="mt-2 flex max-h-20 flex-wrap gap-1 overflow-y-auto">
-            {visible.map((header) => (
-              <button
-                key={header}
-                onClick={() => {
-                  const next = visible.filter((column) => column !== header)
-                  setVisibleColumns(filePath, next.length > 0 ? next : [header])
-                }}
-                className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-text-primary shadow-sm"
-                title={`Hide ${header}`}
-              >
-                {header} ×
-              </button>
-            ))}
-          </div>
+          )}
         </div>
+        <div className="bioflow-field flex h-7 min-w-[8rem] flex-[1_1_13rem] max-w-[18rem] items-center gap-1.5 rounded-md px-2">
+          <Search size={13} className="shrink-0 text-text-muted" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search rows"
+            className="min-w-0 flex-1 bg-transparent text-xs text-text-primary placeholder:text-text-muted outline-none"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              className="interactive-button flex h-5 w-5 shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
+              aria-label="Clear row search"
+              title="Clear row search"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+        {query && <span className="bioflow-badge rounded bg-accent/10 px-1.5 py-0.5 text-xs text-accent">{searchedRows.length} of {rows.length}</span>}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={toggleFiltersOpen}
+            className={classNames(
+              'interactive-row flex h-7 items-center gap-1.5 px-2 text-xs',
+              activeFilters.length > 0 ? 'bg-accent/10 text-accent' : 'text-text-muted hover:text-text-primary',
+            )}
+            title="Filter rows"
+          >
+            <Filter size={13} />
+            <span className="text-nowrap">Filters</span>
+            {activeFilters.length > 0 && <span className="bioflow-badge rounded bg-accent/15 px-1 text-xs">{activeFilters.length}</span>}
+          </button>
+          {filtersOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={cancelFilterEdits} />
+              <div className="surface-popover absolute right-0 top-full z-50 mt-1 flex w-[min(36rem,calc(100vw-var(--space-8)))] max-w-[36rem] flex-col gap-2 rounded-lg p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-medium uppercase tracking-wide text-text-muted">Row filters</div>
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={addFilter} className="interactive-row flex h-7 items-center gap-1 px-2 text-xs text-accent">
+                      <Plus size={12} />
+                      Add
+                    </button>
+                    {draftFilters.length > 0 && (
+                      <button type="button" onClick={clearDraftFilters} className="interactive-row h-7 px-2 text-xs text-text-muted">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {draftFilters.length === 0 ? (
+                  <div className="rounded-md bg-bg-tertiary/60 px-3 py-3 text-xs text-text-muted">
+                    No row filters. Add a rule to keep only matching rows in this preview.
+                  </div>
+                ) : (
+                  <div className="flex max-h-72 flex-col gap-1.5 overflow-y-auto">
+                    {draftFilters.map((rule, index) => {
+                      const op = FILTER_OPS.find((candidate) => candidate.value === rule.op) ?? FILTER_OPS[0]
+                      const issue = getFilterRuleIssue(rule, headers)
+                      return (
+                        <div
+                          key={rule.id}
+                          className={classNames(
+                            'grid grid-cols-[4.25rem_minmax(0,1fr)_minmax(7rem,0.8fr)_minmax(0,1fr)_1.75rem] items-center gap-1.5 rounded-md p-1',
+                            issue ? 'bg-warning/10' : 'bg-bg-primary/30',
+                          )}
+                        >
+                          {index === 0 ? (
+                            <div className="px-1 text-[11px] font-medium uppercase tracking-wide text-text-muted">Where</div>
+                          ) : (
+                            <MenuSelect<'and' | 'or'>
+                              value={rule.join ?? 'and'}
+                              options={JOIN_OPTIONS}
+                              onChange={(value) => updateDraftFilter(rule.id, { join: value === 'or' ? 'or' : 'and' })}
+                              placeholder="AND"
+                              menuClassName="w-20"
+                            />
+                          )}
+                          <MenuSelect
+                            value={rule.column}
+                            options={headers.map((header) => ({ value: header, label: header }))}
+                            onChange={(value) => updateDraftFilter(rule.id, { column: value })}
+                            placeholder="Column"
+                            menuClassName="w-56"
+                          />
+                          <MenuSelect<TransformFilterOp>
+                            value={rule.op}
+                            options={FILTER_OPS}
+                            onChange={(value) => {
+                              const nextOp = (value || 'contains') as TransformFilterOp
+                              const nextMeta = FILTER_OPS.find((candidate) => candidate.value === nextOp)
+                              updateDraftFilter(rule.id, { op: nextOp, value: nextMeta?.needsValue === false ? undefined : (rule.value ?? '') })
+                            }}
+                            placeholder="Operator"
+                            menuClassName="w-44"
+                          />
+                          {op.needsValue ? (
+                            <input
+                              value={rule.value ?? ''}
+                              placeholder="value"
+                              onChange={(event) => updateDraftFilter(rule.id, { value: event.target.value })}
+                              className="bioflow-field h-7 min-w-0 rounded-md px-2 text-xs text-text-primary outline-none"
+                            />
+                          ) : (
+                            <div className="text-nowrap px-2 text-xs text-text-muted">no value</div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeDraftFilter(rule.id)}
+                            className="interactive-button flex h-7 w-7 items-center justify-center text-text-muted hover:text-error"
+                            aria-label="Remove filter"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                          {issue && <div className="col-span-full px-1 text-[11px] text-warning">{issue}</div>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+                <div className="flex items-center justify-between gap-2 border-t border-border-subtle pt-2">
+                  <div className="min-w-0 text-[11px] text-text-muted">
+                    {hasInvalidDraftFilters ? filterIssues[0] : `${usableDraftFilters.length} rule${usableDraftFilters.length === 1 ? '' : 's'} ready`}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={cancelFilterEdits} className="interactive-row h-7 px-2 text-xs text-text-muted">
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={applyFilterEdits}
+                      disabled={hasInvalidDraftFilters}
+                      className="interactive-row h-7 px-2 text-xs text-accent disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="relative">
+          <button type="button" onClick={() => setColumnsOpen((open) => !open)} className="interactive-button flex h-7 w-7 items-center justify-center text-text-muted hover:text-text-primary" title="Column visibility">
+            <Columns3 size={14} />
+          </button>
+          {columnsOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setColumnsOpen(false)} />
+              <div className="surface-popover absolute right-0 top-full z-50 mt-1 flex max-h-80 w-64 flex-col rounded-lg p-2">
+                <div className="mb-2 flex items-center gap-2 text-xs">
+                  <button type="button" className="interactive-row h-7 px-2 text-accent" onClick={() => setVisibleColumns(filePath, headers)}>Show all</button>
+                  <button type="button" className="interactive-row h-7 px-2 text-text-muted" onClick={() => setVisibleColumns(filePath, defaultVisible)}>Default</button>
+                  <button type="button" className="interactive-row h-7 px-2 text-text-muted" onClick={() => setVisibleColumns(filePath, [headers[0]].filter(Boolean))}>First</button>
+                </div>
+                <div className="scroll-region flex flex-col gap-1">
+                  {headers.map((header) => (
+                    <label
+                      key={header}
+                      draggable={visible.includes(header)}
+                      onDragStart={() => setDragColumn(header)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={() => {
+                        if (dragColumn) moveVisibleColumn(dragColumn, header)
+                        setDragColumn(null)
+                      }}
+                      className="interactive-row flex h-7 items-center gap-2 px-2 text-xs text-text-secondary"
+                    >
+                      <input type="checkbox" checked={visible.includes(header)} onChange={() => toggleColumn(header)} className="h-3 w-3 accent-accent" />
+                      <span className="text-nowrap min-w-0 flex-1">{header}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => onExportFilteredFile?.(searchedRows)}
+          disabled={searchedRows.length === 0}
+          className="interactive-button flex h-7 w-7 items-center justify-center text-text-muted hover:text-text-primary disabled:opacity-40"
+          title="Export filtered and searched rows as CSV"
+        >
+          <Download size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={onExpandPanel}
+          className="interactive-button flex h-7 w-7 items-center justify-center text-text-muted hover:text-text-primary"
+          title="Expand to full panel"
+        >
+          <Maximize2 size={14} />
+        </button>
       </div>
 
       <div
         ref={parentRef}
-        className="flex-1 overflow-auto"
-        onScroll={(event) => {
-          const offset = event.currentTarget.scrollTop
-          if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current)
-          scrollFrameRef.current = requestAnimationFrame(() => {
-            setScrollOffset(filePath, offset)
-          })
-        }}
+        className="scroll-region overflow-auto"
+        onScroll={(event) => setScrollOffset(filePath, event.currentTarget.scrollTop)}
       >
-        <table className="w-full border-collapse text-left">
+        <table className="min-w-full border-collapse text-left text-xs">
           <thead className="sticky top-0 z-10 bg-bg-tertiary shadow-sm">
-            {table.getHeaderGroups().map((headerGroup) => (
-              <tr key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <th
-                    key={header.id}
-                    className="px-3 py-1.5 font-mono text-xs font-medium text-text-secondary"
-                    style={{ maxWidth: header.column.columnDef.maxSize }}
-                  >
-                    {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
+            <tr>
+              {visibleIndexes.map(({ header }) => {
+                const activeSort = sort?.column === header ? sort.dir : null
+                const width = columnWidths[header] ?? DEFAULT_COLUMN_WIDTH
+                return (
+                  <th key={header} className="group relative h-8 px-2 font-semibold text-text-primary" style={{ width, minWidth: width }}>
+                    <button type="button" onClick={() => cycleSort(header)} className="flex w-full items-center gap-1 text-left">
+                      <span className="text-nowrap min-w-0 flex-1">{header}</span>
+                      <span className={classNames('text-text-muted opacity-0 group-hover:opacity-100', activeSort && 'opacity-100 text-accent')}>
+                        {activeSort === 'asc' ? '↑' : activeSort === 'desc' ? '↓' : '↕'}
+                      </span>
+                      <span className="bioflow-badge rounded bg-bg-primary px-1 text-xs text-text-muted opacity-0 group-hover:opacity-100">
+                        {columnKinds.get(header) ?? 'str'}
+                      </span>
+                    </button>
+                    <span
+                      role="separator"
+                      aria-orientation="vertical"
+                      className="absolute right-0 top-1 h-6 w-1 cursor-col-resize"
+                      onPointerDown={(event) => {
+                        resizeRef.current = { column: header, startX: event.clientX, startWidth: width }
+                      }}
+                      onDoubleClick={() => autoFitColumn(header)}
+                    />
                   </th>
-                ))}
-              </tr>
-            ))}
+                )
+              })}
+            </tr>
           </thead>
           <tbody>
-            {virtualizer.getVirtualItems().length > 0 && (
-              <tr>
-                <td
-                  colSpan={Math.max(visibleIndexes.length, 1)}
-                  style={{ height: virtualizer.getVirtualItems()[0].start, padding: 0 }}
-                />
-              </tr>
-            )}
-            {virtualizer.getVirtualItems().map((virtualRow) => {
-              const row = tableRows[virtualRow.index]
-              const isEven = virtualRow.index % 2 === 0
+            {pageRows.map((row, rowIndex) => {
+              const absoluteIndex = currentPage * rowsPerPage + rowIndex
+              const selected = selectedRow === absoluteIndex
               return (
                 <tr
-                  key={row.id}
-                  className={`hover:bg-bg-hover ${isEven ? 'bg-bg-primary' : 'bg-bg-secondary'}`}
-                  style={{ height: 28 }}
+                  key={`${absoluteIndex}-${row.join('\u0001')}`}
+                  onClick={() => setSelectedRow((current) => current === absoluteIndex ? null : absoluteIndex)}
+                  className={classNames(
+                    'h-7 cursor-pointer',
+                    rowIndex % 2 === 0 ? 'bg-bg-primary' : 'bg-bg-secondary',
+                    selected && 'border-l-2 border-accent bg-bg-tertiary',
+                  )}
                 >
-                  {row.getVisibleCells().map((cell) => (
-                    <td
-                      key={cell.id}
-                      className="px-3 py-1 font-mono text-xs text-text-primary"
-                      style={{ maxWidth: cell.column.columnDef.maxSize }}
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
+                  {visibleIndexes.map(({ header, index }) => {
+                    const value = row[index] ?? ''
+                    const kind = columnKinds.get(header) ?? 'str'
+                    const missing = value === '' || value.toLowerCase?.() === 'null' || value.toLowerCase?.() === 'na'
+                    return (
+                      <td
+                        key={header}
+                        className={classNames(
+                          'text-nowrap px-2 py-1 text-text-primary',
+                          kind === 'int' || kind === 'float' ? 'text-right font-mono tabular-nums' : 'text-left',
+                          missing && 'italic text-text-muted',
+                        )}
+                        style={{ width: columnWidths[header] ?? DEFAULT_COLUMN_WIDTH, maxWidth: columnWidths[header] ?? DEFAULT_COLUMN_WIDTH }}
+                      >
+                        <Tooltip content={value || 'missing'} delay={500}>
+                          <span className="block truncate">{missing ? '—' : <HighlightedValue value={value} query={query} />}</span>
+                        </Tooltip>
+                      </td>
+                    )
+                  })}
                 </tr>
               )
             })}
-            {virtualizer.getVirtualItems().length > 0 && (
-              <tr>
-                <td
-                  colSpan={Math.max(visibleIndexes.length, 1)}
-                  style={{
-                    height: virtualizer.getTotalSize() - (virtualizer.getVirtualItems().at(-1)?.end ?? 0),
-                    padding: 0,
-                  }}
-                />
-              </tr>
-            )}
           </tbody>
         </table>
       </div>
 
-      <div className="shrink-0 bg-bg-secondary px-3 py-1.5 shadow-sm">
-        <span className="text-xs text-text-muted">
-          {hasDraftChanges
-            ? `Showing ${displayedRows.length} preview rows (${appliedRows.length} applied) · ${visibleIndexes.length} of ${headers.length} columns`
-            : `Showing ${displayedRows.length} of ${rows.length} rows · ${visibleIndexes.length} of ${headers.length} columns`}
+      <footer className="flex min-h-7 shrink-0 flex-wrap items-center gap-2 px-3 py-1 text-xs text-text-muted">
+        <span className="text-nowrap min-w-0 flex-1">
+          Showing {rangeStart}-{rangeEnd} of {searchedRows.length} rows{query ? ` (${rows.length} total)` : ''}
         </span>
-      </div>
+        {searchedRows.length > rowsPerPage && (
+          <div className="flex items-center gap-2">
+            <button type="button" className="interactive-row h-6 px-2" disabled={currentPage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>← Prev</button>
+            <span className="text-nowrap">Page {currentPage + 1} of {pageCount}</span>
+            <button type="button" className="interactive-row h-6 px-2" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>Next →</button>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-1">
+          <span>Rows per page</span>
+          <div className="flex rounded-md bg-bg-tertiary/70 p-0.5 shadow-sm">
+            {PAGE_SIZE_OPTIONS.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setRowsPerPage(option)}
+                className={classNames(
+                  'interactive-row h-5 px-1.5 text-xs',
+                  rowsPerPage === option ? 'bg-accent/10 text-accent' : 'text-text-muted',
+                )}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+        </div>
+      </footer>
     </div>
   )
 }
 
-function filterAndSortRows(
+function basename(path: string): string {
+  return path.split('/').filter(Boolean).at(-1) ?? path
+}
+
+function HighlightedValue({ value, query }: { value: string; query: string }) {
+  const needle = query.trim()
+  if (!needle) return <>{value}</>
+  const lower = value.toLowerCase()
+  const start = lower.indexOf(needle.toLowerCase())
+  if (start < 0) return <>{value}</>
+  return (
+    <>
+      {value.slice(0, start)}
+      <mark className="rounded bg-accent/20 text-text-primary">{value.slice(start, start + needle.length)}</mark>
+      {value.slice(start + needle.length)}
+    </>
+  )
+}
+
+function inferColumnKind(values: string[]): ColumnKind {
+  const sample = values.map((value) => String(value ?? '').trim()).filter(Boolean).slice(0, 80)
+  if (sample.length === 0) return 'str'
+  if (sample.every((value) => /^(true|false|0|1)$/i.test(value))) return 'bool'
+  if (sample.every((value) => /^-?\d+$/.test(value))) return 'int'
+  if (sample.every((value) => /^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value))) return 'float'
+  return 'str'
+}
+
+export function filterAndSortRows(
   rows: string[][],
   headers: string[],
   filters: TransformFilterRule[],
-  sort: { column: string; dir: 'asc' | 'desc' } | undefined,
+  sort: SortState,
 ): string[][] {
-  let next = filters.length > 0
-    ? rows.filter((row) => rowMatchesFilters(row, headers, filters))
-    : rows
+  const usableFilters = getUsableFilterRules(filters, headers)
+  let next = usableFilters.length > 0 ? rows.filter((row) => rowMatchesFilters(row, headers, usableFilters)) : rows
   if (!sort) return next
   const idx = headers.indexOf(sort.column)
   if (idx < 0) return next
@@ -427,298 +590,82 @@ function filterAndSortRows(
   })
 }
 
-const FILTER_OPS: Array<{ value: TransformFilterOp; label: string; needsValue: boolean }> = [
-  { value: 'contains', label: 'contains', needsValue: true },
-  { value: 'regex', label: 'matches regex', needsValue: true },
-  { value: 'equals', label: 'equals', needsValue: true },
-  { value: 'notEquals', label: 'does not equal', needsValue: true },
-  { value: 'gt', label: '>', needsValue: true },
-  { value: 'gte', label: '>=', needsValue: true },
-  { value: 'lt', label: '<', needsValue: true },
-  { value: 'lte', label: '<=', needsValue: true },
-  { value: 'notEmpty', label: 'is not empty', needsValue: false },
-]
-
-function newFilter(column: string, headers: string[], rows: string[][]): TransformFilterRule {
-  return {
-    id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    column,
-    join: 'and',
-    op: inferDefaultFilterOp(column, headers, rows),
-    value: '',
-  }
-}
-
-function FilterRuleRow({
-  index,
-  headers,
-  rows,
-  rule,
-  onChange,
-  onRemove,
-}: {
-  index: number
-  headers: string[]
-  rows: string[][]
-  rule: TransformFilterRule
-  onChange: (rule: TransformFilterRule) => void
-  onRemove: () => void
-}) {
-  const op = FILTER_OPS.find((candidate) => candidate.value === rule.op) ?? FILTER_OPS[0]
-  const active = rule.column && (op.needsValue === false || String(rule.value ?? '').trim() !== '')
-
-  return (
-    <div className={`flex flex-wrap items-center gap-1 rounded-md px-1 py-1 shadow-sm ${
-      active ? 'bg-accent/10' : 'bg-bg-primary/40'
-    }`}>
-      {index > 0 && (
-        <select
-          value={rule.join ?? 'and'}
-          onChange={(e) => onChange({ ...rule, join: e.target.value as 'and' | 'or' })}
-          className="bioflow-field h-7 rounded-md px-2 text-xs text-text-primary outline-none"
-        >
-          <option value="and">AND</option>
-          <option value="or">OR</option>
-        </select>
-      )}
-      <ColumnAutocompleteInput
-        headers={headers}
-        value={rule.column}
-        onChange={(column) => {
-          const opShouldFollowColumn = rule.op === 'contains' || rule.op === 'equals'
-          onChange({
-            ...rule,
-            column,
-            op: opShouldFollowColumn ? inferDefaultFilterOp(column, headers, rows) : rule.op,
-          })
-        }}
-        placeholder="Column name"
-        className="min-w-[180px] flex-[1.3]"
-      />
-      <select
-        value={rule.op}
-        onChange={(e) => {
-          const nextOp = e.target.value as TransformFilterOp
-          const nextMeta = FILTER_OPS.find((candidate) => candidate.value === nextOp)
-          onChange({ ...rule, op: nextOp, value: nextMeta?.needsValue === false ? undefined : (rule.value ?? '') })
-        }}
-        className="bioflow-field h-7 min-w-[130px] flex-1 rounded-md px-2 text-xs text-text-primary outline-none"
-      >
-        {FILTER_OPS.map((candidate) => <option key={candidate.value} value={candidate.value}>{candidate.label}</option>)}
-      </select>
-      {op.needsValue && (
-        <input
-          value={rule.value ?? ''}
-          onChange={(e) => onChange({ ...rule, value: e.target.value })}
-          placeholder="Value or regex"
-          className="bioflow-field h-7 min-w-[180px] flex-1 rounded-md px-2 text-xs text-text-primary placeholder:text-text-muted outline-none"
-        />
-      )}
-      <button
-        onClick={onRemove}
-        className="h-7 rounded-md px-2 text-[11px] text-text-muted hover:bg-error/10 hover:text-error"
-      >
-        Remove
-      </button>
-    </div>
-  )
-}
-
-function ColumnAutocompleteInput({
-  headers,
-  value,
-  onChange,
-  placeholder,
-  exclude = [],
-  className,
-}: {
-  headers: string[]
-  value: string
-  onChange: (value: string) => void
-  placeholder?: string
-  exclude?: string[]
-  className?: string
-}) {
-  const inputRef = useRef<HTMLInputElement>(null)
-  const [focused, setFocused] = useState(false)
-  const [activeIndex, setActiveIndex] = useState(0)
-  const deferredValue = useDeferredValue(value)
-
-  const suggestions = useMemo(() => {
-    const needle = deferredValue.trim().toLowerCase()
-    return headers
-      .filter((header) => !exclude.includes(header))
-      .filter((header) => needle.length === 0 || header.toLowerCase().includes(needle))
-      .sort((a, b) => {
-        const aStarts = a.toLowerCase().startsWith(needle)
-        const bStarts = b.toLowerCase().startsWith(needle)
-        if (aStarts !== bStarts) return aStarts ? -1 : 1
-        return a.localeCompare(b, undefined, { numeric: true })
-      })
-      .slice(0, 8)
-  }, [deferredValue, exclude, headers])
-
-  useEffect(() => {
-    setActiveIndex((current) => Math.min(current, Math.max(suggestions.length - 1, 0)))
-  }, [suggestions.length])
-
-  const applySuggestion = (column: string) => {
-    onChange(column)
-    setFocused(false)
-    window.setTimeout(() => inputRef.current?.focus(), 0)
-  }
-
-  return (
-    <div className={`relative ${className ?? ''}`}>
-      <input
-        ref={inputRef}
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        onFocus={() => setFocused(true)}
-        onBlur={() => window.setTimeout(() => setFocused(false), 120)}
-        onChange={(e) => {
-          onChange(e.target.value)
-          setActiveIndex(0)
-        }}
-        onKeyDown={(event) => {
-          if (suggestions.length === 0) return
-          if (event.key === 'ArrowDown') {
-            event.preventDefault()
-            setActiveIndex((current) => Math.min(current + 1, suggestions.length - 1))
-            return
-          }
-          if (event.key === 'ArrowUp') {
-            event.preventDefault()
-            setActiveIndex((current) => Math.max(current - 1, 0))
-            return
-          }
-          if (event.key === 'Enter' || event.key === 'Tab') {
-            const suggestion = suggestions[activeIndex] ?? suggestions[0]
-            if (!suggestion) return
-            event.preventDefault()
-            applySuggestion(suggestion)
-          }
-        }}
-        className="bioflow-field h-7 w-full rounded-md px-2 text-xs text-text-primary placeholder:text-text-muted outline-none"
-      />
-      {focused && suggestions.length > 0 && (
-        <div className="surface-popover absolute left-0 right-0 top-full z-30 mt-1 max-h-44 overflow-y-auto rounded-md py-1">
-          {suggestions.map((column, index) => (
-            <button
-              key={column}
-              type="button"
-              onMouseDown={(event) => {
-                event.preventDefault()
-                applySuggestion(column)
-              }}
-              className={`block w-full truncate px-2 py-1.5 text-left text-xs ${
-                index === activeIndex ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-              }`}
-            >
-              {column}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 export function rowMatchesFilters(row: string[], headers: string[], rules: TransformFilterRule[]): boolean {
-  if (rules.length === 0) return true
-  let result = rowMatchesRule(row, headers, rules[0])
-  for (const rule of rules.slice(1)) {
-    const current = rowMatchesRule(row, headers, rule)
-    result = (rule.join ?? 'and') === 'or' ? (result || current) : (result && current)
-  }
-  return result
+  const usableRules = getUsableFilterRules(rules, headers)
+  if (usableRules.length === 0) return true
+  return usableRules.reduce<boolean | null>((acc, rule, index) => {
+    const idx = headers.indexOf(rule.column)
+    const value = idx >= 0 ? row[idx] ?? '' : ''
+    const result = matchesRule(value, rule)
+    if (index === 0 || acc === null) return result
+    return (rule.join ?? 'and') === 'or' ? acc || result : acc && result
+  }, null) ?? true
 }
 
-export function rowMatchesRule(row: string[], headers: string[], rule: TransformFilterRule): boolean {
-  const idx = headers.indexOf(rule.column)
-  const raw = idx < 0 ? '' : String(row[idx] ?? '')
-  const value = String(rule.value ?? '')
+function matchesRule(value: string, rule: TransformFilterRule): boolean {
+  const rawNeedle = String(rule.value ?? '')
+  const numberValue = toFiniteNumber(value)
+  const numberNeedle = toFiniteNumber(rawNeedle)
   switch (rule.op) {
     case 'contains':
-      return raw.toLowerCase().includes(value.toLowerCase())
+      return value.toLowerCase().includes(rawNeedle.toLowerCase())
     case 'regex':
       try {
-        return new RegExp(value, 'i').test(raw)
+        return new RegExp(rawNeedle, 'i').test(value)
       } catch {
         return false
       }
     case 'equals':
-      return raw === value
+      return value === rawNeedle
     case 'notEquals':
-      return raw !== value
-    case 'notEmpty':
-      return raw.trim() !== ''
+      return value !== rawNeedle
     case 'gt':
+      if (numberValue === null || numberNeedle === null) return false
+      return numberValue > numberNeedle
     case 'gte':
+      if (numberValue === null || numberNeedle === null) return false
+      return numberValue >= numberNeedle
     case 'lt':
-    case 'lte': {
-      const a = Number(raw)
-      const b = Number(value)
-      if (Number.isNaN(a) || Number.isNaN(b)) return false
-      if (rule.op === 'gt') return a > b
-      if (rule.op === 'gte') return a >= b
-      if (rule.op === 'lt') return a < b
-      return a <= b
-    }
+      if (numberValue === null || numberNeedle === null) return false
+      return numberValue < numberNeedle
+    case 'lte':
+      if (numberValue === null || numberNeedle === null) return false
+      return numberValue <= numberNeedle
+    case 'notEmpty':
+      return value.trim().length > 0
     default:
       return true
   }
 }
 
-function inferDefaultFilterOp(column: string, headers: string[], rows: string[][]): TransformFilterOp {
-  const idx = headers.indexOf(column)
-  if (idx < 0) return 'contains'
-  const sample = rows
-    .map((row) => row[idx])
-    .filter((value) => value !== undefined && value !== '' && value !== 'NA' && value !== '.')
-    .slice(0, 40)
-  if (sample.length === 0) return 'contains'
-  const numeric = sample.filter((value) => !Number.isNaN(Number(value)))
-  return numeric.length / sample.length >= 0.8 ? 'equals' : 'contains'
+export function getUsableFilterRules(rules: TransformFilterRule[], headers: string[]): TransformFilterRule[] {
+  return rules.filter((rule) => !getFilterRuleIssue(rule, headers))
 }
 
-function parseFilterExpression(expression: string, headers: string[]): TransformFilterRule[] | null {
-  const source = expression.trim()
-  if (!source) return null
-  const tokens = source.split(/(\&\&|\|\||\&|\|)/).map((item) => item.trim()).filter(Boolean)
-  const rules: TransformFilterRule[] = []
-  let join: 'and' | 'or' = 'and'
-  for (const token of tokens) {
-    if (token === '&' || token === '&&') {
-      join = 'and'
-      continue
+export function getFilterRuleIssue(rule: TransformFilterRule, headers: string[]): string | null {
+  if (!rule.column || !headers.includes(rule.column)) return 'Choose a valid column.'
+  const op = FILTER_OPS.find((candidate) => candidate.value === rule.op)
+  if (!op) return 'Choose a valid operator.'
+  if (!op.needsValue) return null
+  const rawValue = String(rule.value ?? '')
+  if (rawValue.trim().length === 0) return 'Enter a filter value.'
+  if (rule.op === 'regex') {
+    try {
+      new RegExp(rawValue)
+    } catch {
+      return 'Fix the regular expression before applying.'
     }
-    if (token === '|' || token === '||') {
-      join = 'or'
-      continue
-    }
-    const match = token.match(/^([A-Za-z0-9_.-]+)\s*(==|!=|>=|<=|>|<|~=)\s*(.+)$/)
-    if (!match) continue
-    const [, columnRaw, operator, rhsRaw] = match
-    const column = headers.find((header) => header === columnRaw) ?? headers.find((header) => header.toLowerCase() === columnRaw.toLowerCase())
-    if (!column) continue
-    const value = rhsRaw.trim().replace(/^['"]|['"]$/g, '')
-    const op: TransformFilterOp =
-      operator === '==' ? 'equals'
-        : operator === '!=' ? 'notEquals'
-          : operator === '>' ? 'gt'
-            : operator === '>=' ? 'gte'
-              : operator === '<' ? 'lt'
-                : operator === '<=' ? 'lte'
-                  : 'contains'
-    rules.push({
-      id: `expr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      column,
-      join: rules.length === 0 ? 'and' : join,
-      op,
-      value,
-    })
   }
-  return rules.length > 0 ? rules : null
+  if (isNumericFilterOp(rule.op) && toFiniteNumber(rawValue) === null) return 'Enter a numeric value.'
+  return null
+}
+
+function isNumericFilterOp(op: TransformFilterOp): boolean {
+  return op === 'gt' || op === 'gte' || op === 'lt' || op === 'lte'
+}
+
+function toFiniteNumber(value: string): number | null {
+  if (String(value ?? '').trim().length === 0) return null
+  const next = Number(value)
+  return Number.isFinite(next) ? next : null
 }

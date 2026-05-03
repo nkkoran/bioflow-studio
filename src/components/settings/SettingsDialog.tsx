@@ -14,16 +14,10 @@ import { DnanexusSettingsPanel } from './DnanexusSettingsPanel'
 
 const SECTIONS = [
   'General',
-  'Interface',
-  'Appearance',
-  'Privacy',
-  'Setup',
-  'Run Checks',
-  'Execution',
+  'Run',
   'Paths',
   'Tools',
   'DNAnexus',
-  'Notifications',
   'Advanced',
 ] as const
 type Section = typeof SECTIONS[number]
@@ -162,169 +156,158 @@ export function SettingsDialog({
           {section === 'General' && (
             <div className="flex flex-col gap-3">
               <SectionHeader label="General" helpId="settings.general" />
-              <Input
-                label="Default partition"
-                value={settings.defaultPartition}
-                placeholder="Use connection partition"
-                onChange={(e) => text('settings:defaultPartition', e.target.value)}
-              />
-              <Input
-                label="Partition memory cap (GB)"
-                type="number"
-                min={1}
-                step={1}
-                value={settings.partitionMaxMemGB}
-                onChange={(e) => number('settings:partitionMaxMemGB', Number(e.target.value))}
-              />
-              <Checkbox
-                label="Open Jobs tab when a run starts"
-                checked={settings.autoOpenJobsTabOnRun}
-                onChange={(value) => toggle('settings:autoOpenJobsTabOnRun', value)}
-              />
-              <Checkbox
-                label="Autosave pipelines"
-                checked={settings.autosaveEnabled}
-                onChange={(value) => toggle('settings:autosaveEnabled', value)}
-              />
-              <Input
-                label="Autosave interval (seconds)"
-                type="number"
-                min={5}
-                step={1}
-                value={settings.autosaveIntervalSeconds}
-                disabled={!settings.autosaveEnabled}
-                onChange={(e) => number('settings:autosaveIntervalSeconds', Number(e.target.value))}
-              />
-            </div>
-          )}
-
-          {section === 'Interface' && (
-            <div className="flex flex-col gap-3">
-              <SectionHeader label="Interface" helpId="settings.general" />
-              <Checkbox
-                label="Show workflow guide in the toolbar"
-                checked={settings.workflowGuideEnabled}
-                onChange={(value) => toggle('settings:workflowGuideEnabled', value)}
-              />
-              <Checkbox
-                label="Use icon grid in file explorers"
-                checked={settings.fileExplorerViewMode === 'icons'}
-                onChange={(value) => text('settings:fileExplorerViewMode', value ? 'icons' : 'list')}
-              />
-              <Checkbox
-                label="Show genome build metadata on input files"
-                checked={settings.showInputGenomeBuild}
-                onChange={(value) => toggle('settings:showInputGenomeBuild', value)}
-              />
-              <div>
-                <label className="mb-1 block text-text-secondary text-xs font-medium">Split file explorer layout</label>
-                <select
-                  value={settings.splitExplorerBasePane}
-                  onChange={(e) => text('settings:splitExplorerBasePane', e.target.value)}
-                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
-                >
-                  <option value="left">Base path on left, current folder on right</option>
-                  <option value="right">Current folder on left, base path on right</option>
-                </select>
-              </div>
-            </div>
-          )}
-
-          {section === 'Appearance' && (
-            <div className="flex flex-col gap-3">
-              <SectionHeader label="Appearance" helpId="settings.general" />
-              <div>
-                <label className="mb-1 block text-text-secondary text-xs font-medium">Theme</label>
-                <select
+              <SettingsGroup title="Workspace">
+                <Checkbox
+                  label="Autosave pipelines"
+                  checked={settings.autosaveEnabled}
+                  onChange={(value) => toggle('settings:autosaveEnabled', value)}
+                />
+                <Input
+                  label="Autosave interval (seconds)"
+                  type="number"
+                  min={5}
+                  step={1}
+                  value={settings.autosaveIntervalSeconds}
+                  disabled={!settings.autosaveEnabled}
+                  onChange={(e) => number('settings:autosaveIntervalSeconds', Number(e.target.value))}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="secondary" size="sm" onClick={runStartupWizard}>
+                    Run startup wizard
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => void checkForUpdates()} disabled={checkingUpdates}>
+                    {checkingUpdates && <Loader2 size={12} className="mr-1 animate-spin" />}
+                    {checkingUpdates ? 'Checking...' : 'Check for updates'}
+                  </Button>
+                </div>
+              </SettingsGroup>
+              <SettingsGroup title="Interface">
+                <ChoiceGroup
+                  label="Theme"
                   value={theme}
-                  onChange={(e) => {
-                    const next = e.target.value === 'light' || e.target.value === 'simple' ? e.target.value : 'dark'
+                  options={[
+                    { value: 'dark', label: 'Dark' },
+                    { value: 'light', label: 'Light' },
+                    { value: 'simple', label: 'Simple' },
+                  ]}
+                  onChange={(value) => {
+                    const next = value === 'light' || value === 'simple' ? value : 'dark'
                     setTheme(next)
                     void window.api.store.set('settings:theme', next)
                   }}
-                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
-                >
-                  <option value="dark">Dark</option>
-                  <option value="light">Light</option>
-                  <option value="simple">Simple</option>
-                </select>
-              </div>
+                />
+                <Checkbox
+                  label="Show workflow guide in the toolbar"
+                  checked={settings.workflowGuideEnabled}
+                  onChange={(value) => toggle('settings:workflowGuideEnabled', value)}
+                />
+                <Checkbox
+                  label="Use icon grid in file explorers"
+                  checked={settings.fileExplorerViewMode === 'icons'}
+                  onChange={(value) => text('settings:fileExplorerViewMode', value ? 'icons' : 'list')}
+                />
+                <Checkbox
+                  label="Show genome build metadata on input files"
+                  checked={settings.showInputGenomeBuild}
+                  onChange={(value) => toggle('settings:showInputGenomeBuild', value)}
+                />
+                <ChoiceGroup
+                  label="Split file explorer layout"
+                  value={settings.splitExplorerBasePane}
+                  options={[
+                    { value: 'left', label: 'Base path left' },
+                    { value: 'right', label: 'Current folder left' },
+                  ]}
+                  onChange={(value) => text('settings:splitExplorerBasePane', value)}
+                />
+              </SettingsGroup>
+              <SettingsGroup title="Privacy and notifications">
+                <Checkbox
+                  label="Share anonymous usage telemetry"
+                  checked={settings.telemetryOptIn}
+                  onChange={(value) => toggle('settings:telemetryOptIn', value)}
+                />
+                <Checkbox
+                  label="Notify when a run finishes"
+                  checked={settings.notifyOnRunFinish}
+                  onChange={(value) => toggle('settings:notifyOnRunFinish', value)}
+                />
+                <Checkbox
+                  label="Notify when a run fails"
+                  checked={settings.notifyOnRunFail}
+                  onChange={(value) => toggle('settings:notifyOnRunFail', value)}
+                />
+                <Checkbox
+                  label="Play notification sound"
+                  checked={settings.notifySoundEnabled}
+                  onChange={(value) => toggle('settings:notifySoundEnabled', value)}
+                />
+              </SettingsGroup>
             </div>
           )}
 
-          {section === 'Privacy' && (
+          {section === 'Run' && (
             <div className="flex flex-col gap-3">
-              <SectionHeader label="Privacy" helpId="settings.general" />
-              <Checkbox
-                label="Confirm before login-node runs"
-                checked={settings.confirmOnLoginNodeRun}
-                onChange={(value) => toggle('settings:confirmOnLoginNodeRun', value)}
-              />
-              <Checkbox
-                label="Share anonymous usage telemetry"
-                checked={settings.telemetryOptIn}
-                onChange={(value) => toggle('settings:telemetryOptIn', value)}
-              />
-            </div>
-          )}
-
-          {section === 'Setup' && (
-            <div className="flex flex-col gap-3">
-              <SectionHeader label="Setup" helpId="settings.general" />
-              <div className="flex flex-wrap gap-2">
-                <Button variant="secondary" size="sm" onClick={runStartupWizard}>
-                  Run startup wizard
-                </Button>
-                <Button variant="secondary" size="sm" onClick={() => void checkForUpdates()} disabled={checkingUpdates}>
-                  {checkingUpdates && <Loader2 size={12} className="mr-1 animate-spin" />}
-                  {checkingUpdates ? 'Checking...' : 'Check for updates'}
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {section === 'Run Checks' && (
-            <div className="flex flex-col gap-3">
-              <SectionHeader label="Run Checks" helpId="settings.general" />
-              <Checkbox
-                label="Skip input file checks (faster, uses last known result)"
-                checked={settings.skipPreRunFileCheck}
-                onChange={(value) => toggle('settings:skipPreRunFileCheck', value)}
-              />
-              <Checkbox
-                label="Skip cluster doctor check before run"
-                checked={settings.skipPreRunDoctorCheck}
-                onChange={(value) => toggle('settings:skipPreRunDoctorCheck', value)}
-              />
-            </div>
-          )}
-
-          {section === 'Execution' && (
-            <div className="flex flex-col gap-3">
-              <SectionHeader label="Execution" helpId="settings.general" />
-              <div>
-                <label className="mb-1 block text-text-secondary text-xs font-medium">Array chain mode</label>
-                <select
+              <SectionHeader label="Run" helpId="settings.general" />
+              <SettingsGroup title="Defaults">
+                <Input
+                  label="Default partition"
+                  value={settings.defaultPartition}
+                  placeholder="Use connection partition"
+                  onChange={(e) => text('settings:defaultPartition', e.target.value)}
+                />
+                <Input
+                  label="Partition memory cap (GB)"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={settings.partitionMaxMemGB}
+                  onChange={(e) => number('settings:partitionMaxMemGB', Number(e.target.value))}
+                />
+                <Checkbox
+                  label="Open Jobs tab when a run starts"
+                  checked={settings.autoOpenJobsTabOnRun}
+                  onChange={(value) => toggle('settings:autoOpenJobsTabOnRun', value)}
+                />
+              </SettingsGroup>
+              <SettingsGroup title="Safety checks">
+                <Checkbox
+                  label="Confirm before login-node runs"
+                  checked={settings.confirmOnLoginNodeRun}
+                  onChange={(value) => toggle('settings:confirmOnLoginNodeRun', value)}
+                />
+                <Checkbox
+                  label="Skip input file checks (faster, uses last known result)"
+                  checked={settings.skipPreRunFileCheck}
+                  onChange={(value) => toggle('settings:skipPreRunFileCheck', value)}
+                />
+                <Checkbox
+                  label="Skip cluster doctor check before run"
+                  checked={settings.skipPreRunDoctorCheck}
+                  onChange={(value) => toggle('settings:skipPreRunDoctorCheck', value)}
+                />
+              </SettingsGroup>
+              <SettingsGroup title="Execution">
+                <ChoiceGroup
+                  label="Array chain mode"
                   value={settings.arrayChainMode}
-                  onChange={(e) => text('settings:execution:arrayChainMode', e.target.value)}
-                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
-                >
-                  <option value="task-level">Task-level (`aftercorr` when supported)</option>
-                  <option value="job-level">Job-level (`afterok` only)</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-text-secondary text-xs font-medium">File lifecycle</label>
-                <select
+                  options={[
+                    { value: 'task-level', label: 'Task-level aftercorr' },
+                    { value: 'job-level', label: 'Job-level afterok' },
+                  ]}
+                  onChange={(value) => text('settings:execution:arrayChainMode', value)}
+                />
+                <ChoiceGroup
+                  label="File lifecycle"
                   value={settings.fileLifecyclePolicy}
-                  onChange={(e) => text('settings:fileLifecyclePolicy', e.target.value)}
-                  className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
-                >
-                  <option value="keep-all">Keep all files</option>
-                  <option value="keep-outputs-only">Delete marked intermediates after success</option>
-                  <option value="delete-intermediates-on-success">Aggressive intermediate cleanup after success</option>
-                </select>
-              </div>
+                  options={[
+                    { value: 'keep-all', label: 'Keep all' },
+                    { value: 'keep-outputs-only', label: 'Outputs only' },
+                    { value: 'delete-intermediates-on-success', label: 'Aggressive cleanup' },
+                  ]}
+                  onChange={(value) => text('settings:fileLifecyclePolicy', value)}
+                />
+              </SettingsGroup>
             </div>
           )}
 
@@ -431,27 +414,6 @@ export function SettingsDialog({
             </div>
           )}
 
-          {section === 'Notifications' && (
-            <div className="flex flex-col gap-3">
-              <SectionHeader label="Notifications" helpId="settings.notifications" />
-              <Checkbox
-                label="Notify when a run finishes"
-                checked={settings.notifyOnRunFinish}
-                onChange={(value) => toggle('settings:notifyOnRunFinish', value)}
-              />
-              <Checkbox
-                label="Notify when a run fails"
-                checked={settings.notifyOnRunFail}
-                onChange={(value) => toggle('settings:notifyOnRunFail', value)}
-              />
-              <Checkbox
-                label="Play notification sound"
-                checked={settings.notifySoundEnabled}
-                onChange={(value) => toggle('settings:notifySoundEnabled', value)}
-              />
-            </div>
-          )}
-
           {section === 'DNAnexus' && devMode && <DnanexusSettingsPanel />}
 
           {section === 'Advanced' && (
@@ -543,6 +505,39 @@ function SettingsGroup({
     <div className="rounded-md bg-bg-tertiary px-3 py-2 text-xs text-text-secondary shadow-inner">
       <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">{title}</div>
       <div className="flex flex-col gap-2">{children}</div>
+    </div>
+  )
+}
+
+function ChoiceGroup<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string
+  value: T
+  options: Array<{ value: T; label: string }>
+  onChange: (value: T) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium text-text-secondary">{label}</div>
+      <div className="flex flex-wrap gap-1 rounded-md bg-bg-primary/60 p-1 shadow-inner">
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onChange(option.value)}
+            className={classNames(
+              'interactive-row min-h-7 px-2 py-1 text-left text-xs',
+              value === option.value ? 'bg-accent/10 text-accent' : 'text-text-secondary hover:text-text-primary',
+            )}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

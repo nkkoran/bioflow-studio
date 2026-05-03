@@ -34,7 +34,7 @@ export function AxedEdge(props: EdgeProps) {
       {label && (
         <EdgeLabelRenderer>
           <div
-            className="nodrag nopan rounded bg-bg-secondary/95 px-1.5 py-0.5 text-[9px] font-mono text-accent shadow"
+            className="nodrag nopan rounded bg-bg-secondary/95 px-1.5 py-0.5 text-xs font-mono text-accent shadow"
             style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
             {label}
@@ -44,7 +44,7 @@ export function AxedEdge(props: EdgeProps) {
       {!label && fanOutLabel && index === 0 && (
         <EdgeLabelRenderer>
           <div
-            className="nodrag nopan rounded bg-bg-secondary/95 px-1.5 py-0.5 text-[9px] text-warning shadow"
+            className="nodrag nopan rounded bg-bg-secondary/95 px-1.5 py-0.5 text-xs text-warning shadow"
             style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
             {fanOutLabel}

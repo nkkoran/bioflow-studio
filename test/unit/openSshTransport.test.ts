@@ -6,6 +6,7 @@ import {
   buildExpectScript,
   buildOpenSshBaseArgs,
   buildOpenSshHostBlock,
+  buildOpenSshMasterCheckArgs,
   buildOpenSshTerminalArgs,
   buildOpenSshTerminalExpectScript,
   buildOpenSshTerminalPtyInvocation,
@@ -64,6 +65,27 @@ describe('OpenSSH ControlPersist transport helpers', () => {
     expect(args.some((arg) => arg.includes('bioflow_rorqual_nk'))).toBe(true)
     expect(args).toContain('PreferredAuthentications=publickey,keyboard-interactive,password')
     expect(args.join(' ')).not.toContain('calculquebec')
+  })
+
+  it('can build non-interactive ssh args for background operations', () => {
+    const controlPath = bioflowControlPath(baseConfig)
+    const args = buildOpenSshBaseArgs(baseConfig, controlPath, { batchMode: true })
+
+    expect(args).toContain('NumberOfPasswordPrompts=0')
+    expect(args).toContain('BatchMode=yes')
+    expect(args).toContain('PasswordAuthentication=no')
+    expect(args).toContain('KbdInteractiveAuthentication=no')
+    expect(args).not.toContain('NumberOfPasswordPrompts=3')
+  })
+
+  it('checks ControlPersist masters without allowing interactive prompts', () => {
+    const controlPath = bioflowControlPath(baseConfig)
+    const args = buildOpenSshMasterCheckArgs(baseConfig, controlPath)
+
+    expect(args).toContain('BatchMode=yes')
+    expect(args).toContain('KbdInteractiveAuthentication=no')
+    expect(args).toContain('NumberOfPasswordPrompts=0')
+    expect(args.slice(-3)).toEqual(['-O', 'check', baseConfig.host])
   })
 
   it('builds terminal args that target the BioFlow control socket', () => {
@@ -179,8 +201,8 @@ describe('OpenSSH ControlPersist transport helpers', () => {
 
   it('parses GNU find null-separated rows into remote file entries', () => {
     const buffer = Buffer.from([
-      'b.txt', '/work/b.txt', 'f', '20', '1000.5', '-rw-r--r--',
-      'adir', '/work/adir', 'd', '4096', '1001', 'drwxr-xr-x',
+      'b.txt', '/work/b.txt', 'f', 'f', '20', '1000.5', '-rw-r--r--',
+      'adir', '/work/adir', 'd', 'd', '4096', '1001', 'drwxr-xr-x',
       '',
     ].join('\0'))
 
@@ -190,6 +212,19 @@ describe('OpenSSH ControlPersist transport helpers', () => {
     expect(entries[0].isDirectory).toBe(true)
     expect(entries[1].extension).toBe('txt')
     expect(entries[1].modified).toBe(1000500)
+  })
+
+  it('treats symlinks to directories as directories in OpenSSH listings', () => {
+    const buffer = Buffer.from([
+      'project-a', '/home/nk/projects/project-a', 'l', 'd', '4096', '1002', 'lrwxr-xr-x',
+      '',
+    ].join('\0'))
+
+    expect(parseOpenSshFindOutput(buffer)[0]).toMatchObject({
+      name: 'project-a',
+      isDirectory: true,
+      extension: '',
+    })
   })
 
   it('parses stat output and detects directories from mode bits', () => {

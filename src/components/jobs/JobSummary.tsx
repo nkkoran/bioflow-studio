@@ -99,7 +99,9 @@ export function JobSummary({ run, runId, connectionId, ns }: Props) {
       setActionMessage(runConnectionUnavailableMessage(run))
       return
     }
-    openPreview(path, entry.name)
+    openPreview(path, entry.name, undefined, {
+      connectionId: entry.origin === 'local' ? LOCAL_CONNECTION_ID : connectionId ?? undefined,
+    })
     setBottomPanelMode('data')
   }
 

@@ -21,18 +21,28 @@ export function FileGlyph({ entry, size = 'row', selected = false, open = false 
   const iconDef = getFileIcon(entry.extension, entry.isDirectory, open)
   const Icon = iconDef.icon
   const classes = sizeClasses[size]
+  const finderStyleFolder = size === 'grid' && entry.isDirectory
 
   return (
     <span
       className={classNames(
         'bioflow-file-glyph flex shrink-0 items-center justify-center',
         classes.frame,
-        selected ? 'bg-accent/15' : 'bg-bg-tertiary/90',
+        finderStyleFolder
+          ? 'bg-transparent'
+          : selected ? 'bg-accent/15' : 'bg-bg-tertiary/90',
       )}
       data-kind={entry.isDirectory ? 'folder' : 'file'}
+      data-size={size}
       aria-hidden
     >
-      <Icon className={classNames(classes.icon, iconDef.color)} />
+      <Icon
+        className={classNames(
+          finderStyleFolder ? 'h-12 w-12 fill-accent/35' : classes.icon,
+          iconDef.color,
+        )}
+        strokeWidth={finderStyleFolder ? 1.35 : undefined}
+      />
     </span>
   )
 }

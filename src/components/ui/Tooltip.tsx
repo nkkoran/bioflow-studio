@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { classNames } from '@/lib/utils'
 
 interface TooltipProps {
@@ -8,11 +9,10 @@ interface TooltipProps {
   delay?: number
 }
 
-const positionStyles: Record<NonNullable<TooltipProps['side']>, string> = {
-  top: 'bottom-full left-1/2 -translate-x-1/2 mb-1.5',
-  bottom: 'top-full left-1/2 -translate-x-1/2 mt-1.5',
-  left: 'right-full top-1/2 -translate-y-1/2 mr-1.5',
-  right: 'left-full top-1/2 -translate-y-1/2 ml-1.5',
+interface TooltipPosition {
+  left: number
+  top: number
+  transform: string
 }
 
 export function Tooltip({
@@ -22,6 +22,8 @@ export function Tooltip({
   delay = 300,
 }: TooltipProps) {
   const [visible, setVisible] = useState(false)
+  const [position, setPosition] = useState<TooltipPosition | null>(null)
+  const rootRef = useRef<HTMLSpanElement | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -32,13 +34,42 @@ export function Tooltip({
     }
   }, [])
 
+  const updatePosition = useCallback(() => {
+    const rect = rootRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const gap = 8
+    if (side === 'bottom') {
+      setPosition({ left: rect.left + rect.width / 2, top: rect.bottom + gap, transform: 'translateX(-50%)' })
+    } else if (side === 'left') {
+      setPosition({ left: rect.left - gap, top: rect.top + rect.height / 2, transform: 'translate(-100%, -50%)' })
+    } else if (side === 'right') {
+      setPosition({ left: rect.right + gap, top: rect.top + rect.height / 2, transform: 'translateY(-50%)' })
+    } else {
+      setPosition({ left: rect.left + rect.width / 2, top: rect.top - gap, transform: 'translate(-50%, -100%)' })
+    }
+  }, [side])
+
+  useEffect(() => {
+    if (!visible) return
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [updatePosition, visible])
+
   const show = useCallback(() => {
     if (hideTimerRef.current) {
       clearTimeout(hideTimerRef.current)
       hideTimerRef.current = null
     }
-    timerRef.current = setTimeout(() => setVisible(true), delay)
-  }, [delay])
+    timerRef.current = setTimeout(() => {
+      updatePosition()
+      setVisible(true)
+    }, delay)
+  }, [delay, updatePosition])
 
   const hide = useCallback(() => {
     if (timerRef.current) {
@@ -49,19 +80,20 @@ export function Tooltip({
   }, [])
 
   return (
-    <div className="relative inline-flex" onMouseEnter={show} onMouseLeave={hide}>
+    <span ref={rootRef} className="bioflow-tooltip-root relative inline-flex" onMouseEnter={show} onMouseLeave={hide}>
       {children}
-      {visible && (
+      {visible && position && typeof document !== 'undefined' && createPortal(
         <span
           className={classNames(
-            'absolute z-50 whitespace-nowrap rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary shadow-lg',
+            'bioflow-tooltip-content fixed z-[1200] max-w-[min(22rem,calc(100vw-var(--space-4)))] rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary shadow-lg',
             'pointer-events-auto',
-            positionStyles[side],
           )}
+          style={position}
         >
           {content}
-        </span>
+        </span>,
+        document.body,
       )}
-    </div>
+    </span>
   )
 }

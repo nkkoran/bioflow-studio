@@ -185,7 +185,7 @@ function docsChip(def: ToolFlagDef) {
   if (!def.docUrl && !def.description) return <>{def.label}</>
   return (
     <Tooltip
-      side="right"
+      side="left"
       content={
         <span className="block max-w-[280px] whitespace-normal leading-relaxed">
           {def.description && <span className="block">{def.description}</span>}

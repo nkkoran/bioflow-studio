@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { CheckCircle2, Info, ListChecks, Plus, X, XCircle } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
@@ -59,7 +60,7 @@ function helpLabel(def: AnalysisOptionDef) {
   if (!def.description && !def.docUrl) return def.label
   return (
     <Tooltip
-      side="right"
+      side="left"
       content={
         <span className="block max-w-[300px] whitespace-normal leading-relaxed">
           {def.description && <span className="block">{def.description}</span>}
@@ -103,6 +104,83 @@ function optionSearchText(def: AnalysisOptionDef): string {
     def.description,
     def.group,
   ].filter(Boolean).join(' ').toLowerCase()
+}
+
+interface ReadablePreviewItem {
+  label: string
+  detail: string
+  meta?: string
+}
+
+function sourcePreviewText(source: ValueSource, connectedPathForPort: (portId: string) => string | null, fallbackPortId?: string): string {
+  if (source.kind === 'upstream-file') {
+    const portId = source.portId ?? fallbackPortId ?? 'input'
+    return connectedPathForPort(portId) ?? `Connect a file on ${portId}`
+  }
+  if (source.kind === 'local-path') return source.value ? `Local file: ${source.value}` : 'Choose a local file'
+  if (source.kind === 'path') return source.value ? `Remote file: ${source.value}` : 'Choose a remote file'
+  if (source.kind === 'upstream-column') return source.value ? `Column: ${source.value}` : 'Choose an upstream column'
+  return source.value ?? ''
+}
+
+function subOptionPreview(option: AnalysisOptionState, def: AnalysisOptionDef): string[] {
+  return (def.subOptions ?? []).flatMap((sub) => {
+    const state = option.subOptions?.[sub.id]
+    if (!state?.enabled) return []
+    if (sub.kind === 'switch') return [sub.label]
+    const value = state.value === undefined || state.value === null || state.value === '' ? '' : String(state.value)
+    return value ? [`${sub.label}: ${value}`] : []
+  })
+}
+
+function optionPreviewDetail(def: AnalysisOptionDef, option: AnalysisOptionState, connectedPathForPort: (portId: string) => string | null): string {
+  if (def.kind === 'switch') return 'Enabled'
+  if (def.kind === 'file' || (def.kind === 'compound' && def.filePortId)) {
+    const source = sourceValue(option, def.filePortId ? 'upstream-file' : 'path', def.filePortId ?? def.sourcePortId)
+    const base = sourcePreviewText(source, connectedPathForPort, def.filePortId ?? def.sourcePortId)
+    const extras = subOptionPreview(option, def)
+    return extras.length ? `${base}; ${extras.join(', ')}` : base
+  }
+  if (def.kind === 'column') {
+    const value = sourcePreviewText(sourceValue(option, 'literal', def.sourcePortId), connectedPathForPort, def.sourcePortId)
+    return value || 'Choose a column'
+  }
+  if (def.kind === 'compound') {
+    const main = optionValue(option)
+    const extras = subOptionPreview(option, def)
+    return [main ? `Mode: ${main}` : '', ...extras].filter(Boolean).join('; ') || 'Enabled'
+  }
+  const value = optionValue(option)
+  return value || 'Needs a value'
+}
+
+function readablePreviewItems(
+  tool: ToolDef,
+  nodeData: ToolNodeData,
+  options: AnalysisOptionState[],
+  connectedPathForPort: (portId: string) => string | null,
+): ReadablePreviewItem[] {
+  if (nodeData.commandOverride?.trim()) {
+    return [{ label: 'Command override', detail: 'Using the manually edited command instead of generated settings.' }]
+  }
+  const defsById = new Map(getAnalysisOptionDefs(tool).map((def) => [def.id, def]))
+  return options.flatMap((option) => {
+    if (!option.enabled) return []
+    const def = defsById.get(option.optionId)
+    if (!def) {
+      const label = option.customLabel?.trim() || option.customFlag?.trim() || 'Custom flag'
+      if (option.customInputKind === 'file') {
+        const source = sourceValue(option, 'path')
+        return [{ label, detail: sourcePreviewText(source, connectedPathForPort, source.portId), meta: option.customFlag }]
+      }
+      return [{ label, detail: option.value === undefined || option.value === null || option.value === '' ? 'Enabled' : String(option.value), meta: option.customFlag }]
+    }
+    return [{
+      label: def.label,
+      detail: optionPreviewDetail(def, option, connectedPathForPort),
+      meta: def.flag ?? def.id,
+    }]
+  })
 }
 
 function compoundSubOptionEditor(
@@ -168,6 +246,7 @@ function ColumnOptionEditor(props: {
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
   const [draft, setDraft] = useState('')
+  const [suggestionRect, setSuggestionRect] = useState<{ top: number; left: number; width: number } | null>(null)
   const source = sourceValue(option, 'literal', def.sourcePortId)
   const inputPath = connectedInputPath(snapshot, nodeId, def.sourcePortId ?? 'input')
   const schema = resolveUpstreamSchema(snapshot, nodeId, def.sourcePortId ?? 'input', schemas)
@@ -177,7 +256,7 @@ function ColumnOptionEditor(props: {
   const selected = columnParamValues(current, { whitespaceSeparated: allowsMultiple })
   const token = allowsMultiple ? draft.trim().toLowerCase() : current.split(/[,\s]+/).pop()?.toLowerCase() ?? ''
   const suggestions = columns
-    .filter((column) => !allowsMultiple || !selected.includes(column) || column.toLowerCase().includes(token))
+    .filter((column) => !allowsMultiple || !selected.includes(column))
     .filter((column) => column.toLowerCase().includes(token))
     .slice(0, 12)
 
@@ -188,6 +267,29 @@ function ColumnOptionEditor(props: {
   useEffect(() => {
     if (!allowsMultiple && draft) setDraft('')
   }, [allowsMultiple, draft])
+
+  const updateSuggestionRect = useCallback(() => {
+    const rect = inputRef.current?.getBoundingClientRect()
+    setSuggestionRect(rect ? { top: rect.bottom + 4, left: rect.left, width: rect.width } : null)
+  }, [])
+
+  useEffect(() => {
+    if (!focused || !showSuggestions || columns.length === 0) {
+      setSuggestionRect(null)
+      return
+    }
+    updateSuggestionRect()
+    window.addEventListener('resize', updateSuggestionRect)
+    window.addEventListener('scroll', updateSuggestionRect, true)
+    return () => {
+      window.removeEventListener('resize', updateSuggestionRect)
+      window.removeEventListener('scroll', updateSuggestionRect, true)
+    }
+  }, [columns.length, focused, showSuggestions, suggestions.length, updateSuggestionRect])
+
+  useEffect(() => {
+    if (focused && columns.length > 0) setShowSuggestions(true)
+  }, [columns.length, focused])
 
   const removeColumn = (column: string) => {
     onPatch({ source: { ...source, value: selected.filter((value) => value !== column).join(' ') } })
@@ -220,6 +322,38 @@ function ColumnOptionEditor(props: {
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }
 
+  const suggestionList = focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && suggestionRect && typeof document !== 'undefined'
+    ? createPortal(
+        <div
+          className="bioflow-suggestion-popover surface-popover fixed z-[1300] max-h-56 overflow-y-auto rounded-md py-1"
+          style={{
+            top: suggestionRect.top,
+            left: suggestionRect.left,
+            width: suggestionRect.width,
+          }}
+        >
+          {suggestions.map((column, index) => (
+            <button
+              key={column}
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault()
+                insertColumn(column)
+              }}
+              onMouseEnter={() => setActiveSuggestionIndex(index)}
+              className={classNames(
+                'block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover',
+                index === activeSuggestionIndex && 'bg-bg-hover',
+              )}
+            >
+              {column}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )
+    : null
+
   return (
     <div className="flex flex-col gap-2">
       {allowsMultiple && selected.length > 0 && (
@@ -240,7 +374,7 @@ function ColumnOptionEditor(props: {
         </div>
       )}
       <div className="flex gap-1.5">
-        <div className="relative flex-1">
+        <div className="bioflow-suggestion-root relative flex-1 overflow-visible">
           <input
             ref={inputRef}
             type="text"
@@ -248,7 +382,7 @@ function ColumnOptionEditor(props: {
             placeholder={columns.length ? (allowsMultiple ? 'Type a column and press Enter...' : 'Start typing a column name...') : def.placeholder}
             onFocus={() => {
               setFocused(true)
-              setShowSuggestions(!allowsMultiple || draft.trim().length > 0)
+              setShowSuggestions(true)
               setActiveSuggestionIndex(0)
               if (columns.length === 0 && inputPath) void onLoadSchema(inputPath, { force: true })
             }}
@@ -259,7 +393,7 @@ function ColumnOptionEditor(props: {
             onChange={(event) => {
               if (allowsMultiple) {
                 setDraft(event.target.value)
-                setShowSuggestions(event.target.value.trim().length > 0)
+                setShowSuggestions(true)
               } else {
                 onPatch({ source: { ...source, value: event.target.value } })
                 setShowSuggestions(true)
@@ -297,30 +431,24 @@ function ColumnOptionEditor(props: {
             }}
             className="bioflow-field h-8 w-full rounded-md px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors"
           />
-          {focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && (
-            <div className="surface-popover absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md py-1">
-              {suggestions.map((column, index) => (
-                <button
-                  key={column}
-                  type="button"
-                  onMouseDown={(event) => {
-                    event.preventDefault()
-                    insertColumn(column)
-                  }}
-                  onMouseEnter={() => setActiveSuggestionIndex(index)}
-                  className={classNames(
-                    'block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover',
-                    index === activeSuggestionIndex && 'bg-bg-hover',
-                  )}
-                >
-                  {column}
-                </button>
-              ))}
-            </div>
-          )}
+          {suggestionList}
         </div>
         {inputPath && (
-          <Button variant="secondary" size="sm" className="h-8 px-2 text-[11px]" onClick={() => void onLoadSchema(inputPath, { force: true })}>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 px-2 text-[11px]"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              setFocused(true)
+              setShowSuggestions(true)
+              inputRef.current?.focus()
+              void onLoadSchema(inputPath, { force: true }).finally(() => {
+                setShowSuggestions(true)
+                window.setTimeout(updateSuggestionRect, 0)
+              })
+            }}
+          >
             {refreshingSchemaPath === inputPath ? 'Refreshing...' : 'Columns'}
           </Button>
         )}
@@ -508,6 +636,13 @@ export function AnalysisOptionsPanel({
     () => previewAnalysisCommand(tool, { ...nodeData, analysisOptions: options }, (portId) => connectedInputPath(snapshot, nodeId, portId)),
     [tool, nodeData, options, snapshot, nodeId],
   )
+  const readablePreview = useMemo(
+    () => readablePreviewItems(tool, nodeData, options, (portId) => connectedInputPath(snapshot, nodeId, portId)),
+    [tool, nodeData, options, snapshot, nodeId],
+  )
+  const mainInputPath = tool.inputs.some((port) => port.id === 'input')
+    ? connectedInputPath(snapshot, nodeId, 'input')
+    : null
   const supportsCommandApply = tool.command === 'plink2' || tool.command === 'plink'
 
   useEffect(() => {
@@ -593,7 +728,7 @@ export function AnalysisOptionsPanel({
   }, [disconnectNotice])
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="bioflow-analysis-options flex flex-col gap-3 overflow-visible">
       {disconnectNotice && (
         <div className="flex items-center justify-between gap-3 rounded-md bg-accent/10 px-3 py-2 text-[11px] text-text-secondary shadow-sm">
           <span>
@@ -611,13 +746,21 @@ export function AnalysisOptionsPanel({
           </button>
         </div>
       )}
-      <div className="flex items-center gap-2">
-        <Input label="" value={search} placeholder="Search options" onChange={(event) => setSearch(event.target.value)} />
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setCustomDialogOpen(true)}>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-[1_1_10rem]">
+          <Input
+            label=""
+            value={search}
+            placeholder="Search options"
+            className="text-xs"
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={() => setCustomDialogOpen(true)}>
           <Plus size={13} />
           Custom
         </Button>
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setValidationOpen((value) => !value)}>
+        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={() => setValidationOpen((value) => !value)}>
           <ListChecks size={13} />
           Validate settings
         </Button>
@@ -664,7 +807,7 @@ export function AnalysisOptionsPanel({
         </div>
       )}
       {term && (
-        <div className="rounded-md bg-bg-tertiary/30 p-1.5 shadow-inner">
+        <div className="surface-popover rounded-md bg-bg-tertiary/30 p-1.5 shadow-inner">
           {searchResults.length > 0 ? (
             <div className="flex flex-col gap-1">
               {searchResults.map((def) => {
@@ -696,15 +839,15 @@ export function AnalysisOptionsPanel({
         </div>
       )}
 
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-2 overflow-visible">
         {commonSelectedDefs.map((def) => {
           const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: true, value: def.defaultValue }
           const invalid = issueByOption.get(def.id)
           return (
-            <div key={def.id} className={classNames('rounded-md p-2 shadow-sm', invalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary')}>
+            <div key={def.id} className={classNames('overflow-visible rounded-md p-2 shadow-sm', invalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary')}>
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-nowrap text-xs font-medium text-text-primary">{helpLabel(def)}</div>
+                  <div className="text-xs font-medium leading-4 text-text-primary">{helpLabel(def)}</div>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-nowrap font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
                     <span className="bioflow-badge text-nowrap rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-muted">{def.group}</span>
@@ -765,7 +908,7 @@ export function AnalysisOptionsPanel({
                   const option = options.find((candidate) => candidate.optionId === def.id) ?? { optionId: def.id, enabled: true, value: def.defaultValue }
                   const invalid = issueByOption.get(def.id)
                   return (
-                    <div key={def.id} className={classNames('rounded-md p-2 shadow-sm', invalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary')}>
+                    <div key={def.id} className={classNames('overflow-visible rounded-md p-2 shadow-sm', invalid ? 'bg-error/5 ring-1 ring-error/30' : 'bg-bg-secondary')}>
                       <div className="mb-2 flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="text-xs font-medium text-text-primary">{helpLabel(def)}</div>
@@ -814,7 +957,7 @@ export function AnalysisOptionsPanel({
           sourcePortId: customPortId,
         }
         return (
-          <div key={option.optionId} className="rounded-md bg-bg-secondary p-2 shadow-sm">
+          <div key={option.optionId} className="overflow-visible rounded-md bg-bg-secondary p-2 shadow-sm">
             <div className="mb-2 flex items-center justify-between gap-2">
               <Input label="Custom flag" value={option.customFlag ?? ''} placeholder="--set-all-var-ids" onChange={(event) => patchOption(option.optionId, { customFlag: event.target.value })} />
               <button type="button" className="mt-5 rounded bg-bg-tertiary p-1 text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary" onClick={() => commit(options.filter((candidate) => candidate.optionId !== option.optionId))}>
@@ -854,11 +997,42 @@ export function AnalysisOptionsPanel({
         )
       })}
 
-      <div>
-        <h5 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Command Preview</h5>
-        <pre className="overflow-x-auto rounded-md bg-bg-primary px-3 py-2 text-[11px] leading-relaxed text-slate-100 shadow-inner">
-          <code>{preview}</code>
-        </pre>
+      <div className="bioflow-readable-preview">
+        <h5 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Preview</h5>
+        <div className="rounded-md bg-bg-primary px-3 py-2 text-xs leading-5 text-text-secondary shadow-inner">
+          <div className="mb-2 text-text-primary">
+            {nodeData.commandOverride?.trim()
+              ? 'This node will use a manual command override.'
+              : `Run ${tool.name} with ${mainInputPath ? 'the connected input' : 'no primary input connected yet'}.`}
+          </div>
+          {mainInputPath && (
+            <div className="mb-1 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2">
+              <span className="text-text-muted">Input</span>
+              <span className="break-all font-mono text-text-secondary">{mainInputPath}</span>
+            </div>
+          )}
+          {readablePreview.length > 0 ? (
+            <div className="flex flex-col gap-1">
+              {readablePreview.map((item) => (
+                <div key={`${item.label}-${item.meta ?? item.detail}`} className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2">
+                  <span className="text-text-muted">{item.label}</span>
+                  <span className="min-w-0">
+                    <span className="text-wrap text-text-secondary">{item.detail}</span>
+                    {item.meta && <span className="ml-1 font-mono text-[10px] text-text-muted">({item.meta})</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-text-muted">No optional analysis settings are enabled yet.</div>
+          )}
+        </div>
+        <details className="mt-2 rounded-md bg-bg-secondary px-3 py-2 text-[11px] text-text-muted shadow-sm">
+          <summary className="cursor-pointer text-text-secondary">Raw command</summary>
+          <pre className="mt-2 overflow-x-auto rounded-md bg-bg-primary px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-100 shadow-inner">
+            <code>{preview}</code>
+          </pre>
+        </details>
       </div>
 
       <div className="rounded-md bg-bg-secondary p-2 shadow-sm">

@@ -159,11 +159,11 @@ export function JobsPanel() {
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header: run selector + cancel */}
       <div className="flex items-center gap-2 px-3 py-1.5 shrink-0">
-        <span className="text-xs text-text-muted">Run:</span>
+        <span className="text-nowrap shrink-0 text-xs text-text-muted">Run:</span>
         <select
           value={activeRunId ?? ''}
           onChange={(e) => setActiveRun(e.target.value || null)}
-          className="bioflow-field min-w-[280px] rounded px-2 py-0.5 text-xs text-text-primary focus:outline-none"
+          className="bioflow-field min-w-0 flex-1 rounded px-2 py-0.5 text-xs text-text-primary focus:outline-none"
         >
           {(['running', 'queued', 'done', 'failed', 'cancelled', 'other'] as const).map((bucket) => {
             const list = groupedRuns[bucket]
@@ -295,8 +295,8 @@ export function JobsPanel() {
             <div className="w-[34%] min-w-[260px] max-w-[420px] flex flex-col min-h-0">
               <RunHistoryList runs={sortedRuns} activeRunId={activeRun.runId} onSelect={setActiveRun} />
               <div className="px-3 py-1.5 shrink-0 flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wide text-text-muted">Steps</span>
-                <span className="text-[10px] text-text-muted">{Object.keys(activeRun.nodes).length}</span>
+                <span className="text-xs uppercase tracking-wide text-text-muted">Steps</span>
+                <span className="text-xs text-text-muted">{Object.keys(activeRun.nodes).length}</span>
                 <button
                   onClick={() => setNodesCollapsed(true)}
                   className="ml-auto flex h-6 w-6 items-center justify-center rounded bg-bg-tertiary text-text-muted shadow-sm hover:bg-bg-hover hover:text-text-primary"
@@ -353,7 +353,7 @@ export function JobsPanel() {
             {activeRunIsDnxOnly ? (
               <div className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center text-xs text-text-muted">
                 <span>DNAnexus jobs stream their logs on the platform.</span>
-                <span className="text-[10px]">Open the job in the DNAnexus web UI for real-time stdout/stderr.</span>
+                <span className="text-xs">Open the job in the DNAnexus web UI for real-time stdout/stderr.</span>
               </div>
             ) : activeRunHasSshSteps && activeRunConnectionId ? (
               <LogViewer run={activeRun} connectionId={activeRunConnectionId} />
@@ -413,7 +413,7 @@ function RunHistoryList({
 }) {
   return (
     <div className="shrink-0 max-h-36 overflow-y-auto">
-      <div className="sticky top-0 bg-bg-secondary/95 px-3 py-1.5 text-[10px] uppercase tracking-wide text-text-muted shadow-sm">
+      <div className="sticky top-0 bg-bg-secondary/95 px-3 py-1.5 text-xs uppercase tracking-wide text-text-muted shadow-sm">
         Past runs
       </div>
       {runs.map((run) => (
@@ -425,14 +425,14 @@ function RunHistoryList({
           }`}
         >
           <div className="flex items-center gap-2">
-            <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusChipColor(run.status)}`}>
+            <span className={`text-xs px-1.5 py-0.5 rounded ${statusChipColor(run.status)}`}>
               {run.status}
             </span>
             <span className="text-xs text-text-primary truncate">
               {run.pipelineName?.trim() || run.workDir.split('/').pop() || run.runId.slice(0, 8)}
             </span>
           </div>
-          <div className="mt-0.5 text-[10px] text-text-muted truncate">
+          <div className="mt-0.5 text-xs text-text-muted truncate">
             {formatRelativeTime(run.createdAt)} · {formatAbsoluteTime(run.createdAt)} · {Object.keys(run.nodes).length} step{Object.keys(run.nodes).length === 1 ? '' : 's'}
           </div>
         </button>
@@ -446,13 +446,13 @@ function SelectedNodeSummary({ ns, label }: { ns: NodeRunState; label: string })
     <div className="bg-bg-primary/70 px-3 py-2 shadow-sm shrink-0">
       <div className="flex items-center gap-2 text-xs">
         <span className="font-medium text-text-primary truncate">{label}</span>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] ${statusChipColor(ns.status ?? 'idle')}`}>
+        <span className={`px-1.5 py-0.5 rounded text-xs ${statusChipColor(ns.status ?? 'idle')}`}>
           {ns.status ?? 'idle'}
         </span>
-        {ns.isArray && <span className="text-[10px] text-accent">array {ns.arraySize ?? '?'}</span>}
-        <span className="ml-auto text-[10px] text-text-muted font-mono">{formatDuration(ns)}</span>
+        {ns.isArray && <span className="text-xs text-accent">array {ns.arraySize ?? '?'}</span>}
+        <span className="ml-auto text-xs text-text-muted font-mono">{formatDuration(ns)}</span>
       </div>
-      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-text-muted">
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
         {ns.jobId && <span>job <span className="font-mono text-text-secondary">{ns.jobId}</span></span>}
         {ns.exitCode !== undefined && <span>exit <span className="font-mono text-text-secondary">{ns.exitCode}</span></span>}
         {ns.outputDir && <span className="truncate">outputs <span className="font-mono text-text-secondary">{ns.outputDir}</span></span>}
@@ -464,7 +464,7 @@ function SelectedNodeSummary({ ns, label }: { ns: NodeRunState; label: string })
 function RunDetails({ run }: { run: RunState }) {
   return (
     <div className="bg-bg-secondary/30 px-3 py-2 shadow-sm shrink-0">
-      <div className="flex items-center gap-3 text-[11px] text-text-secondary">
+      <div className="flex items-center gap-3 text-xs text-text-secondary">
         <span className={`px-1.5 py-0.5 rounded ${statusChipColor(run.status)}`}>{run.status}</span>
         <span>
           <span className="text-text-muted">created </span>
@@ -475,7 +475,7 @@ function RunDetails({ run }: { run: RunState }) {
           {formatAbsoluteTime(run.updatedAt)}
         </span>
       </div>
-      <div className="mt-1 text-[10px] text-text-muted font-mono truncate" title={run.workDir}>
+      <div className="mt-1 text-xs text-text-muted font-mono truncate" title={run.workDir}>
         {run.workDir}
       </div>
     </div>

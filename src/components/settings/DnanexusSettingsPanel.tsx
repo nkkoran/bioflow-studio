@@ -3,6 +3,7 @@ import { Pencil, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { MenuSelect } from '@/components/ui/MenuSelect'
 import { SPARK_INSTANCE_TYPES } from '@/lib/dnxInstanceCatalog'
 import { BUILTIN_UKB_FIELD_PRESETS } from '@/lib/ukbFieldPresets'
 import { useDialogStore } from '@/stores/dialogStore'
@@ -219,18 +220,16 @@ export function DnanexusSettingsPanel() {
 
       <div>
         <label className="mb-1 block text-xs font-medium text-text-secondary">Default project</label>
-        <select
+        <MenuSelect
           value={defaultProjectId ?? ''}
-          onChange={(event) => void setDefaultProject(event.target.value || null)}
-          className="bioflow-field h-8 w-full rounded-md px-2 text-sm text-text-primary outline-none"
-        >
-          <option value="">Choose a project</option>
-          {projectOptions.map((project) => (
-            <option key={project.value} value={project.value}>
-              {project.label}
-            </option>
-          ))}
-        </select>
+          onChange={(value) => void setDefaultProject(value || null)}
+          options={projectOptions}
+          placeholder="Choose a project"
+          buttonClassName="h-8 text-sm"
+          menuClassName="w-full"
+          allowEmpty
+          emptyLabel="Choose a project"
+        />
       </div>
 
       <div className="rounded-md bg-bg-tertiary px-3 py-3 shadow-inner">

@@ -1,4 +1,5 @@
 import type { SavedPreviewView } from '@/stores/dataPreviewStore'
+import { MenuSelect } from '@/components/ui/MenuSelect'
 
 interface Props {
   views: SavedPreviewView[]
@@ -20,26 +21,24 @@ export function SavedViewsMenu({
   onDelete,
 }: Props) {
   return (
-    <div className="flex items-center gap-1.5">
-      <label className="flex items-center gap-1 text-[11px] text-text-muted">
-        View
-        <select
-          value={activeViewId ?? ''}
-          onChange={(e) => onApply(e.target.value)}
-          className="bioflow-field h-6 min-w-[120px] rounded px-1.5 text-[11px] text-text-primary outline-none"
-        >
-          <option value="">Fresh</option>
-          {views.map((view) => (
-            <option key={view.id} value={view.id}>
-              {view.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <button className="rounded bg-bg-tertiary px-2 py-0.5 text-[11px] text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary" onClick={onSave}>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[11px] text-text-muted">View</span>
+      <MenuSelect
+        value={activeViewId ?? ''}
+        onChange={(value) => onApply(value)}
+        options={views.map((view) => ({ value: view.id, label: view.name }))}
+        allowEmpty
+        emptyLabel="Fresh"
+        placeholder="Fresh"
+        className="w-32"
+        buttonClassName="h-6 text-[11px]"
+        menuClassName="w-44"
+      />
+      <button type="button" className="rounded bg-bg-tertiary px-2 py-0.5 text-[11px] text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary" onClick={onSave}>
         Save view
       </button>
       <button
+        type="button"
         className="rounded bg-bg-tertiary px-2 py-0.5 text-[11px] text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary disabled:opacity-40"
         onClick={onUpdate}
         disabled={!activeViewId}
@@ -47,6 +46,7 @@ export function SavedViewsMenu({
         Update current
       </button>
       <button
+        type="button"
         className="rounded bg-bg-tertiary px-2 py-0.5 text-[11px] text-text-secondary shadow-sm hover:bg-bg-hover hover:text-text-primary disabled:opacity-40"
         onClick={onRename}
         disabled={!activeViewId}
@@ -54,6 +54,7 @@ export function SavedViewsMenu({
         Rename
       </button>
       <button
+        type="button"
         className="rounded bg-bg-tertiary px-2 py-0.5 text-[11px] text-text-secondary shadow-sm hover:bg-error/10 hover:text-error disabled:opacity-40"
         onClick={onDelete}
         disabled={!activeViewId}

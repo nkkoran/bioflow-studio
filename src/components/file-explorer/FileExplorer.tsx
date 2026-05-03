@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react'
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import {
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   RefreshCw,
   Bookmark,
@@ -37,6 +39,7 @@ import { classifyPreview } from '@/lib/filePreviewClassifier'
 import { artifactFromEntry, basename, collectProtectedInputPaths, isLargeGeneticPath, stripKnownPlinkExtension } from '@/lib/dataArtifacts'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { MenuSelect } from '@/components/ui/MenuSelect'
 import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
 import { Breadcrumb } from './Breadcrumb'
 import { FileTreeNode } from './FileTreeNode'
@@ -106,6 +109,7 @@ export function FileExplorer() {
   const resolveFilePick = useUIStore((s) => s.resolveFilePick)
   const cancelFilePick = useUIStore((s) => s.cancelFilePick)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
+  const openConnectionDialog = useUIStore((s) => s.openConnectionDialog)
   const addFileNode = usePipelineStore((s) => s.addFileNode)
   const updateNodeData = usePipelineStore((s) => s.updateNodeData)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
@@ -129,6 +133,7 @@ export function FileExplorer() {
 
   const [origin, setOrigin] = useState<'fs' | 'dnx'>('fs')
   const [searchQuery, setSearchQuery] = useState('')
+  const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [deepSearchResults, setDeepSearchResults] = useState<RemoteFileEntry[] | null>(null)
   const [searchingDeep, setSearchingDeep] = useState(false)
   const [bookmarksOpen, setBookmarksOpen] = useState(true)
@@ -138,10 +143,14 @@ export function FileExplorer() {
   const [browserOpen, setBrowserOpen] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
   const [moreActionsOpen, setMoreActionsOpen] = useState(false)
+  const [recentsOpen, setRecentsOpen] = useState(true)
   const [tabs, setTabs] = useState<ExplorerTab[]>([])
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
+  const [sidebarBackStack, setSidebarBackStack] = useState<string[]>([])
+  const [sidebarForwardStack, setSidebarForwardStack] = useState<string[]>([])
   const [marquee, setMarquee] = useState<{ startX: number; startY: number; x: number; y: number; active: boolean } | null>(null)
+  const sidebarSearchInputRef = useRef<HTMLInputElement>(null)
   const currentExplorerLabel = useMemo(() => {
     if (origin === 'dnx') return 'DNAnexus'
     if (activeConnectionId === LOCAL_CONNECTION_ID) return 'Local'
@@ -159,6 +168,12 @@ export function FileExplorer() {
   }, [loadPreferences])
 
   useEffect(() => {
+    if (!sidebarSearchOpen) return
+    const id = window.setTimeout(() => sidebarSearchInputRef.current?.focus(), 0)
+    return () => window.clearTimeout(id)
+  }, [sidebarSearchOpen])
+
+  useEffect(() => {
     if (tabs.length > 0) return
     const id = `tab-${Date.now()}`
     setTabs([{ id, label: currentExplorerLabel, origin: 'fs', connectionId: activeConnectionId ?? null, cwd }])
@@ -169,6 +184,11 @@ export function FileExplorer() {
     if (!activeTabId) return
     setTabs((current) => current.map((tab) => tab.id === activeTabId ? { ...tab, label: currentExplorerLabel, origin, connectionId: activeConnectionId ?? null, cwd } : tab))
   }, [activeConnectionId, activeTabId, currentExplorerLabel, cwd, origin])
+
+  useEffect(() => {
+    setSidebarBackStack([])
+    setSidebarForwardStack([])
+  }, [activeConnectionId, origin])
 
   // Context menu state
   const [contextEntry, setContextEntry] = useState<RemoteFileEntry | null>(null)
@@ -306,13 +326,33 @@ export function FileExplorer() {
   }, [])
 
   const handleNavigate = useCallback(
-    (path: string) => {
+    (path: string, opts: { pushHistory?: boolean } = {}) => {
+      if (opts.pushHistory !== false && cwd && path !== cwd) {
+        setSidebarBackStack((stack) => [...stack, cwd].slice(-40))
+        setSidebarForwardStack([])
+      }
       setSearchQuery('')
       setDeepSearchResults(null)
-      navigate(path)
+      navigate(path, { connectionId: cwdConnectionId ?? activeConnectionId ?? undefined })
     },
-    [navigate],
+    [activeConnectionId, cwd, cwdConnectionId, navigate],
   )
+
+  const navigateBack = useCallback(() => {
+    const previous = sidebarBackStack[sidebarBackStack.length - 1]
+    if (!previous) return
+    setSidebarBackStack((stack) => stack.slice(0, -1))
+    if (cwd) setSidebarForwardStack((stack) => [...stack, cwd].slice(-40))
+    handleNavigate(previous, { pushHistory: false })
+  }, [cwd, handleNavigate, sidebarBackStack])
+
+  const navigateForward = useCallback(() => {
+    const next = sidebarForwardStack[sidebarForwardStack.length - 1]
+    if (!next) return
+    setSidebarForwardStack((stack) => stack.slice(0, -1))
+    if (cwd) setSidebarBackStack((stack) => [...stack, cwd].slice(-40))
+    handleNavigate(next, { pushHistory: false })
+  }, [cwd, handleNavigate, sidebarForwardStack])
 
   const handlePreview = useCallback(
     (entry: RemoteFileEntry) => {
@@ -328,14 +368,16 @@ export function FileExplorer() {
         resolveFilePick(
           entry.path,
           inferFileType(entry.name),
-          activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh',
+          (cwdConnectionId ?? activeConnectionId) === LOCAL_CONNECTION_ID ? 'local' : 'ssh',
         )
         return
       }
-      openPreview(entry.path, entry.name, classifyPreview(entry.name || entry.path))
+      openPreview(entry.path, entry.name, classifyPreview(entry.name || entry.path), {
+        connectionId: cwdConnectionId ?? activeConnectionId ?? undefined,
+      })
       setBottomPanelMode('data')
     },
-    [activeConnectionId, filePickMode.accept, filePickMode.active, filePickMode.target, resolveFilePick, openPreview, setBottomPanelMode],
+    [activeConnectionId, cwdConnectionId, filePickMode.accept, filePickMode.active, filePickMode.target, resolveFilePick, openPreview, setBottomPanelMode],
   )
 
   // Escape cancels an active pick.
@@ -366,18 +408,19 @@ export function FileExplorer() {
   }, [])
 
   const isCurrentBookmarked = bookmarks.includes(cwd)
-  const canUploadLocal = Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
   const selectedEntries = useMemo(() => (
     selectedPaths.map((path) => visibleEntries.find((entry) => entry.path === path)).filter((entry): entry is RemoteFileEntry => Boolean(entry))
   ), [selectedPaths, visibleEntries])
-  const canManageCurrentFolder = Boolean(activeConnectionId && origin === 'fs')
+  const currentFileConnectionId = cwdConnectionId ?? activeConnectionId
+  const canUploadLocal = Boolean(currentFileConnectionId && currentFileConnectionId !== LOCAL_CONNECTION_ID)
+  const canManageCurrentFolder = Boolean(currentFileConnectionId && origin === 'fs')
 
   const stageSelectedToCart = useCallback(() => {
     if (selectedEntries.length === 0) return
-    const itemOrigin = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
+    const itemOrigin = currentFileConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
     addDataCartItems(selectedEntries.map((entry) => artifactFromEntry(entry, itemOrigin)))
     setUploadMessage(`Staged ${selectedEntries.length} item${selectedEntries.length === 1 ? '' : 's'} in the data cart`)
-  }, [activeConnectionId, addDataCartItems, selectedEntries])
+  }, [addDataCartItems, currentFileConnectionId, selectedEntries])
 
   const addDataCartToCanvas = useCallback(() => {
     if (dataCartItems.length === 0) return
@@ -458,12 +501,12 @@ export function FileExplorer() {
   }, [addFileNode, clearDataCart, dataCartItems])
 
   const runDeepSearch = useCallback(async () => {
-    if (!activeConnectionId || !searchQuery.trim() || origin !== 'fs') return
+    if (!currentFileConnectionId || !searchQuery.trim() || origin !== 'fs') return
     setSearchingDeep(true)
     try {
-      const results = activeConnectionId === LOCAL_CONNECTION_ID
+      const results = currentFileConnectionId === LOCAL_CONNECTION_ID
         ? await window.api.local.search(cwd, searchQuery.trim(), { maxResults: 200, maxDepth: 5 })
-        : await window.api.sftp.search(activeConnectionId, cwd, searchQuery.trim(), { maxResults: 200, maxDepth: 5 })
+        : await window.api.sftp.search(currentFileConnectionId, cwd, searchQuery.trim(), { maxResults: 200, maxDepth: 5 })
       setDeepSearchResults(results)
       setUploadMessage(`Found ${results.length} matching path${results.length === 1 ? '' : 's'} under ${cwd}`)
     } catch (err) {
@@ -472,11 +515,12 @@ export function FileExplorer() {
       setSearchingDeep(false)
       window.setTimeout(() => setUploadMessage(null), 4000)
     }
-  }, [activeConnectionId, cwd, origin, searchQuery])
+  }, [currentFileConnectionId, cwd, origin, searchQuery])
 
   useEffect(() => {
-    if (!activeConnectionId || dataCartItems.length === 0) return
-    const pending = dataCartItems.filter((item) => item.origin === (activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh') && item.sidecars?.some((sidecar) => !sidecar.status || sidecar.status === 'unknown'))
+    if (!currentFileConnectionId || dataCartItems.length === 0) return
+    const connectionId = currentFileConnectionId
+    const pending = dataCartItems.filter((item) => item.origin === (connectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh') && item.sidecars?.some((sidecar) => !sidecar.status || sidecar.status === 'unknown'))
     if (pending.length === 0) return
     let cancelled = false
     async function checkSidecars() {
@@ -484,9 +528,9 @@ export function FileExplorer() {
         const paths = item.sidecars?.map((sidecar) => sidecar.path) ?? []
         if (paths.length === 0) continue
         try {
-          const rows = activeConnectionId === LOCAL_CONNECTION_ID
+          const rows = connectionId === LOCAL_CONNECTION_ID
             ? await window.api.local.statMany(paths)
-            : await window.api.sftp.statMany(activeConnectionId!, paths)
+            : await window.api.sftp.statMany(connectionId, paths)
           if (cancelled) return
           setDataCartSidecarStatuses(item.id, Object.fromEntries(rows.map((row) => [row.path, row.ok ? 'present' : 'missing'])))
         } catch {
@@ -496,10 +540,10 @@ export function FileExplorer() {
     }
     void checkSidecars()
     return () => { cancelled = true }
-  }, [activeConnectionId, dataCartItems, setDataCartSidecarStatuses])
+  }, [currentFileConnectionId, dataCartItems, setDataCartSidecarStatuses])
 
   const uploadLocalFile = useCallback(async () => {
-    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || uploading || uploadPickerOpen) return
+    if (!currentFileConnectionId || currentFileConnectionId === LOCAL_CONNECTION_ID || uploading || uploadPickerOpen) return
     setUploadPickerOpen(true)
     const localPath = await window.api.dialog.openFile().finally(() => setUploadPickerOpen(false))
     if (!localPath) return
@@ -518,7 +562,7 @@ export function FileExplorer() {
       }))) {
         return
       }
-      await window.api.sftp.upload(activeConnectionId, localPath, remotePath)
+      await window.api.sftp.upload(currentFileConnectionId, localPath, remotePath)
       const offset = Date.now() % 80
       addFileNode(
         { x: 120 + offset, y: 120 + offset },
@@ -537,7 +581,7 @@ export function FileExplorer() {
       setUploading(false)
       window.setTimeout(() => setUploadMessage(null), 4000)
     }
-  }, [activeConnectionId, addFileNode, confirmDialog, cwd, refresh, uploadPickerOpen, uploading])
+  }, [addFileNode, confirmDialog, currentFileConnectionId, cwd, refresh, uploadPickerOpen, uploading])
 
   const switchTab = useCallback((tabId: string) => {
     const tab = tabs.find((candidate) => candidate.id === tabId)
@@ -570,12 +614,12 @@ export function FileExplorer() {
     resolveFilePick(
       entry.path,
       inferFileType(entry.name),
-      activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh',
+      (cwdConnectionId ?? activeConnectionId) === LOCAL_CONNECTION_ID ? 'local' : 'ssh',
     )
-  }, [activeConnectionId, filePickMode.accept, resolveFilePick])
+  }, [activeConnectionId, cwdConnectionId, filePickMode.accept, resolveFilePick])
 
   const copySelected = useCallback(async () => {
-    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !selectedPath) return
+    if (!currentFileConnectionId || currentFileConnectionId === LOCAL_CONNECTION_ID || !selectedPath) return
     const name = selectedPath.split('/').pop() || 'copy'
     const destination = await promptDialog({
       title: 'Copy file',
@@ -585,16 +629,16 @@ export function FileExplorer() {
     })
     if (!destination?.trim()) return
     try {
-      await window.api.ssh.exec(activeConnectionId, `cp -R ${shellQuote(selectedPath)} ${shellQuote(destination.trim())}`)
+      await window.api.ssh.exec(currentFileConnectionId, `cp -R ${shellQuote(selectedPath)} ${shellQuote(destination.trim())}`)
       setUploadMessage(`Copied ${name}`)
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, cwd, promptDialog, refresh, selectedPath])
+  }, [currentFileConnectionId, cwd, promptDialog, refresh, selectedPath])
 
   const addEntryToCanvas = useCallback((entry: RemoteFileEntry) => {
-    const originLabel = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
+    const originLabel = currentFileConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
     const source = originLabel === 'local' ? 'local' : 'remote'
     const offset = Date.now() % 80
     addFileNode(
@@ -610,10 +654,10 @@ export function FileExplorer() {
       },
     )
     setUploadMessage(`Added ${entry.name} to the canvas`)
-  }, [activeConnectionId, addFileNode])
+  }, [addFileNode, currentFileConnectionId])
 
   const moveSelected = useCallback(async () => {
-    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !selectedPath) return
+    if (!currentFileConnectionId || currentFileConnectionId === LOCAL_CONNECTION_ID || !selectedPath) return
     const name = selectedPath.split('/').pop() || 'file'
     const destination = await promptDialog({
       title: 'Move file',
@@ -623,31 +667,31 @@ export function FileExplorer() {
     })
     if (!destination?.trim()) return
     try {
-      await window.api.sftp.rename(activeConnectionId, selectedPath, destination.trim())
+      await window.api.sftp.rename(currentFileConnectionId, selectedPath, destination.trim())
       setUploadMessage(`Moved ${name}`)
       clearSelection()
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, clearSelection, cwd, promptDialog, refresh, selectedPath])
+  }, [clearSelection, currentFileConnectionId, cwd, promptDialog, refresh, selectedPath])
 
   const downloadSelected = useCallback(async () => {
-    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID || !selectedPath) return
+    if (!currentFileConnectionId || currentFileConnectionId === LOCAL_CONNECTION_ID || !selectedPath) return
     const folder = await window.api.dialog.openDirectory()
     if (!folder) return
     const name = selectedPath.split('/').pop() || 'download'
     try {
-      await window.api.sftp.download(activeConnectionId, selectedPath, `${folder}/${name}`)
+      await window.api.sftp.download(currentFileConnectionId, selectedPath, `${folder}/${name}`)
       setUploadMessage(`Downloaded ${name}`)
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, selectedPath])
+  }, [currentFileConnectionId, selectedPath])
 
   const addSelectedToCanvas = useCallback(() => {
     if (selectedEntries.length === 0) return
-    const originLabel = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
+    const originLabel = currentFileConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
     const source = originLabel === 'local' ? 'local' : 'remote'
     const offset = Date.now() % 80
     if (selectedEntries.length === 1) {
@@ -693,10 +737,10 @@ export function FileExplorer() {
       },
     )
     setUploadMessage(`Added ${entriesForSplit.length} selected paths as a split input`)
-  }, [activeConnectionId, addFileNode, selectedEntries])
+  }, [addFileNode, currentFileConnectionId, selectedEntries])
 
   const renameEntry = useCallback(async (entry: RemoteFileEntry) => {
-    if (!activeConnectionId || origin !== 'fs') return
+    if (!currentFileConnectionId || origin !== 'fs') return
     const next = await promptDialog({
       title: 'Rename',
       message: 'Choose the new path.',
@@ -705,8 +749,8 @@ export function FileExplorer() {
     })
     if (!next?.trim() || next.trim() === entry.path) return
     try {
-      if (activeConnectionId === LOCAL_CONNECTION_ID) await window.api.local.rename(entry.path, next.trim())
-      else await window.api.sftp.rename(activeConnectionId, entry.path, next.trim())
+      if (currentFileConnectionId === LOCAL_CONNECTION_ID) await window.api.local.rename(entry.path, next.trim())
+      else await window.api.sftp.rename(currentFileConnectionId, entry.path, next.trim())
       setUploadMessage(`Renamed ${entry.name}`)
       clearSelection()
       handleCloseContextMenu()
@@ -714,10 +758,10 @@ export function FileExplorer() {
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, clearSelection, handleCloseContextMenu, origin, promptDialog, refresh])
+  }, [clearSelection, currentFileConnectionId, handleCloseContextMenu, origin, promptDialog, refresh])
 
   const deleteEntry = useCallback(async (entry: RemoteFileEntry) => {
-    if (!activeConnectionId || origin !== 'fs') return
+    if (!currentFileConnectionId || origin !== 'fs') return
     const snapshot = exportSnapshot()
     const protectedInputs = new Set(collectProtectedInputPaths(snapshot))
     if (protectedInputs.has(entry.path)) {
@@ -745,8 +789,8 @@ export function FileExplorer() {
     })
     if (!confirmed) return
     try {
-      if (activeConnectionId === LOCAL_CONNECTION_ID) await window.api.local.delete(entry.path)
-      else await window.api.sftp.delete(activeConnectionId, entry.path)
+      if (currentFileConnectionId === LOCAL_CONNECTION_ID) await window.api.local.delete(entry.path)
+      else await window.api.sftp.delete(currentFileConnectionId, entry.path)
       const affectedNodes = snapshot.nodes.filter((node) => (
         node.type === 'file' && fileNodeReferencesDeletedPath(node.data as FileNodeData, entry.path, entry.isDirectory)
       ))
@@ -762,7 +806,7 @@ export function FileExplorer() {
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, clearSelection, confirmDialog, exportSnapshot, handleCloseContextMenu, origin, refresh, updateNodeData])
+  }, [clearSelection, confirmDialog, currentFileConnectionId, exportSnapshot, handleCloseContextMenu, origin, refresh, updateNodeData])
 
   const deleteSelectedEntries = useCallback(async () => {
     for (const entry of selectedEntries) {
@@ -771,7 +815,7 @@ export function FileExplorer() {
   }, [deleteEntry, selectedEntries])
 
   const createFileInFolder = useCallback(async (dirPath: string) => {
-    if (!activeConnectionId || origin !== 'fs') return
+    if (!currentFileConnectionId || origin !== 'fs') return
     const name = await promptDialog({
       title: 'New file',
       message: 'Create an empty file.',
@@ -781,17 +825,17 @@ export function FileExplorer() {
     if (!name?.trim()) return
     const target = normalizeChildPath(dirPath, name.trim())
     try {
-      if (activeConnectionId === LOCAL_CONNECTION_ID) await window.api.local.write(target, '')
-      else await window.api.sftp.write(activeConnectionId, target, '')
+      if (currentFileConnectionId === LOCAL_CONNECTION_ID) await window.api.local.write(target, '')
+      else await window.api.sftp.write(currentFileConnectionId, target, '')
       setUploadMessage(`Created ${target}`)
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, origin, promptDialog, refresh])
+  }, [currentFileConnectionId, origin, promptDialog, refresh])
 
   const createFolderInFolder = useCallback(async (dirPath: string) => {
-    if (!activeConnectionId || origin !== 'fs') return
+    if (!currentFileConnectionId || origin !== 'fs') return
     const name = await promptDialog({
       title: 'New folder',
       message: 'Create a folder.',
@@ -801,17 +845,17 @@ export function FileExplorer() {
     if (!name?.trim()) return
     const target = normalizeChildPath(dirPath, name.trim())
     try {
-      if (activeConnectionId === LOCAL_CONNECTION_ID) await window.api.local.mkdir(target)
-      else await window.api.sftp.mkdir(activeConnectionId, target)
+      if (currentFileConnectionId === LOCAL_CONNECTION_ID) await window.api.local.mkdir(target)
+      else await window.api.sftp.mkdir(currentFileConnectionId, target)
       setUploadMessage(`Created ${target}`)
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, origin, promptDialog, refresh])
+  }, [currentFileConnectionId, origin, promptDialog, refresh])
 
   const createFolder = useCallback(async () => {
-    if (!activeConnectionId || origin !== 'fs') return
+    if (!currentFileConnectionId || origin !== 'fs') return
     const name = await promptDialog({
       title: 'New folder',
       message: 'Create a folder in the current location.',
@@ -821,198 +865,128 @@ export function FileExplorer() {
     if (!name?.trim()) return
     const target = normalizeChildPath(cwd, name.trim())
     try {
-      if (activeConnectionId === LOCAL_CONNECTION_ID) await window.api.local.mkdir(target)
-      else await window.api.sftp.mkdir(activeConnectionId, target)
+      if (currentFileConnectionId === LOCAL_CONNECTION_ID) await window.api.local.mkdir(target)
+      else await window.api.sftp.mkdir(currentFileConnectionId, target)
       setUploadMessage(`Created ${target}`)
       await refresh()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : String(err))
     }
-  }, [activeConnectionId, cwd, origin, promptDialog, refresh])
+  }, [currentFileConnectionId, cwd, origin, promptDialog, refresh])
 
   const navigateUp = useCallback(() => {
     handleNavigate(parentPath(cwd))
   }, [cwd, handleNavigate])
 
-  const tabStrip = (
-    <div className="flex shrink-0 items-center gap-1 bg-bg-secondary/60 px-2 py-1 text-[11px]">
-      <select
-        value={activeTabId}
-        onChange={(event) => switchTab(event.target.value)}
-        className="h-6 min-w-0 flex-1 rounded bg-bg-tertiary px-1.5 text-[11px] text-text-primary shadow-sm"
-      >
-        {tabs.map((tab) => (
-          <option key={tab.id} value={tab.id}>
-            {tab.label} · {tab.origin === 'dnx' ? 'RAP' : tab.cwd || '/'}
-          </option>
-        ))}
-      </select>
-      <button type="button" onClick={addExplorerTab} className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Open another file tab">
-        <Plus size={12} />
-      </button>
-      <button type="button" onClick={() => setBrowserOpen(true)} className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Open full file explorer">
-        <FolderOpen size={12} />
-      </button>
-      {dnxReady && (
+  const compactPathLabel = origin === 'dnx' ? 'DNAnexus /' : compactSidebarPath(cwd)
+  const itemCountLabel = `${sortedEntries.length} item${sortedEntries.length === 1 ? '' : 's'}`
+  const recentTabs = tabs.filter((tab) => tab.id !== activeTabId).slice(-4).reverse()
+
+  const sidebarHeader = (
+    <div className="shrink-0">
+      <div className="flex h-8 items-center gap-1.5 px-2">
+        <ToolbarIconButton
+          label="Back"
+          icon={<ArrowLeft className="h-3.5 w-3.5" />}
+          onClick={navigateBack}
+          disabled={sidebarBackStack.length === 0 || loading}
+        />
+        <ToolbarIconButton
+          label="Forward"
+          icon={<ArrowRight className="h-3.5 w-3.5" />}
+          onClick={navigateForward}
+          disabled={sidebarForwardStack.length === 0 || loading}
+        />
         <button
-        type="button"
-        onClick={() => setOrigin('dnx')}
-        className={`rounded px-2 py-0.5 ${origin === 'dnx' ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'}`}
+          type="button"
+          onClick={() => setBrowserOpen(true)}
+          className="interactive-row flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-left text-xs text-text-secondary hover:text-text-primary"
+          title={origin === 'dnx' ? 'Open full file explorer' : `${cwd} - click to open full file explorer`}
         >
-          RAP
+          <FolderOpen size={14} className="shrink-0 text-text-muted" />
+          <span className="text-nowrap min-w-0 flex-1">{origin === 'dnx' ? currentExplorerLabel : compactPathLabel}</span>
         </button>
-      )}
-    </div>
-  )
-
-  const standaloneBrowser = (
-    <RemoteFileBrowser
-      open={browserOpen}
-      onClose={() => setBrowserOpen(false)}
-      title="File Explorer"
-      mode="file"
-      browseOnly
-      onSelect={() => undefined}
-    />
-  )
-
-  if (origin === 'dnx' && dnxReady) {
-    return (
-      <div className="flex h-full flex-col">
-        {tabStrip}
-        <div className="min-h-0 flex-1">
-          <DnxFilePanel />
-        </div>
-        {standaloneBrowser}
-      </div>
-    )
-  }
-
-  // Not connected state
-  if (!isConnected) {
-    return (
-      <div className="flex h-full flex-col">
-        {tabStrip}
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-          <ServerOff className="h-10 w-10 text-text-muted" />
-          <p className="text-sm text-text-muted">
-            Connect to a server to browse files
-          </p>
-        </div>
-        {standaloneBrowser}
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {tabStrip}
-      {/* Pick-mode banner — file or directory. */}
-      {filePickMode.active && (
-        <div className="animate-fade-up mx-2 mt-2 rounded-lg bg-accent/10 px-3 py-1.5 flex items-center gap-2 shadow-sm">
-          <span className="text-xs text-text-primary flex-1 truncate">
-            {filePickMode.target === 'directory' ? 'Navigate to a folder and click Select for ' : 'Select a file, then click Use selected for '}
-            {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
-          </span>
-          {filePickMode.target === 'file' && selectedPickEntry && (
-            <button
-              onClick={() => resolvePickedEntry(selectedPickEntry)}
-              className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
-              title="Use the selected file"
-            >
-              Use selected
-            </button>
-          )}
-          {filePickMode.target === 'directory' && (
-            <button
-              onClick={() => resolveFilePick(cwd, undefined, activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh')}
-              className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
-              title="Use the current folder"
-            >
-              Select this folder
-            </button>
-          )}
-          <button
-            onClick={cancelFilePick}
-            className="text-[10px] text-text-secondary hover:text-text-primary underline"
-            title="Cancel (Esc)"
-          >
-            cancel
-          </button>
-        </div>
-      )}
-
-      {/* Breadcrumb */}
-      <div>
-        <Breadcrumb path={cwd} onNavigate={handleNavigate} />
-      </div>
-
-      {/* Toolbar */}
-      <div className="relative flex items-center gap-2 overflow-visible px-3 py-2">
-        {selectedEntries.length > 0 ? (
-          <>
-            <button
-              type="button"
-              onClick={clearSelection}
-              className="interactive-row flex h-7 min-w-0 items-center gap-1.5 px-2 text-xs text-text-secondary"
-              aria-label="Clear file selection"
-              title="Clear selection"
-            >
-              <X className="h-3.5 w-3.5 shrink-0" />
-              <span className="text-nowrap">{selectedEntries.length} selected</span>
-            </button>
-            <ToolbarIconButton
-              label="Download selected"
-              icon={<Download className="h-3.5 w-3.5" />}
-              onClick={() => void downloadSelected()}
-              disabled={!canUploadLocal || !selectedPath}
-            />
-            <ToolbarIconButton
-              label="Delete selected"
-              icon={<Trash2 className="h-3.5 w-3.5" />}
-              onClick={() => void deleteSelectedEntries()}
-              disabled={!selectedPath}
-              danger
-            />
-          </>
-        ) : (
-          <>
-            <ToolbarIconButton
-              label="New folder"
-              icon={<FolderPlus className="h-3.5 w-3.5" />}
-              onClick={() => void createFolder()}
-              disabled={!canManageCurrentFolder}
-            />
-            <ToolbarIconButton
-              label="Upload"
-              icon={<Upload className={classNames('h-3.5 w-3.5', uploading && 'animate-fade-in')} />}
-              onClick={() => void uploadLocalFile()}
-              disabled={!canUploadLocal || uploading}
-            />
-            <ToolbarIconButton
-              label="Refresh"
-              icon={<RefreshCw className={classNames('h-3.5 w-3.5', loading && 'animate-spin')} />}
-              onClick={refresh}
-              disabled={loading}
-            />
-          </>
-        )}
-
-        <div className="relative ml-auto">
+        <button
+          type="button"
+          onClick={() => setBrowserOpen(true)}
+          className="interactive-row flex h-7 w-7 shrink-0 items-center justify-center text-accent"
+          title="Open full file explorer"
+          aria-label="Open full file explorer"
+        >
+          <FolderOpen size={13} className="shrink-0" />
+        </button>
+        <ToolbarIconButton
+          label="Parent folder"
+          icon={<ArrowUp className="h-3.5 w-3.5" />}
+          onClick={navigateUp}
+          disabled={!isConnected || origin !== 'fs' || !cwd || cwd === '/' || cwd === '~' || loading}
+        />
+        <ToolbarIconButton
+          label={sidebarSearchOpen ? 'Close search' : 'Filter files'}
+          icon={<Search className="h-3.5 w-3.5" />}
+          onClick={() => {
+            setSidebarSearchOpen((open) => {
+              if (open) {
+                setSearchQuery('')
+                setDeepSearchResults(null)
+              }
+              return !open
+            })
+          }}
+        />
+        <ToolbarIconButton
+          label="Refresh"
+          icon={<RefreshCw className={classNames('h-3.5 w-3.5', loading && 'animate-fade-in')} />}
+          onClick={() => void refresh()}
+          disabled={!isConnected || origin !== 'fs' || loading}
+        />
+        <ToolbarIconButton
+          label="Upload"
+          icon={<Upload className="h-3.5 w-3.5" />}
+          onClick={() => void uploadLocalFile()}
+          disabled={!canUploadLocal || uploading}
+        />
+        <div className="relative">
           <ToolbarIconButton
-            label="More file actions"
+            label="Explorer menu"
             icon={<MoreHorizontal className="h-3.5 w-3.5" />}
             onClick={() => setMoreActionsOpen((open) => !open)}
           />
-
           {moreActionsOpen && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setMoreActionsOpen(false)} />
-              <div className="surface-popover absolute right-0 top-full z-50 mt-1 w-48 rounded-lg py-1">
+              <div className="surface-popover absolute right-0 top-full z-50 mt-1 w-56 rounded-lg py-1">
+                <MoreActionButton
+                  icon={<FolderOpen className="h-3.5 w-3.5" />}
+                  label="Open full explorer"
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    setBrowserOpen(true)
+                  }}
+                />
+                <MoreActionButton
+                  icon={<Plus className="h-3.5 w-3.5" />}
+                  label="New explorer tab"
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    addExplorerTab()
+                  }}
+                />
+                {dnxReady && (
+                  <MoreActionButton
+                    label={origin === 'dnx' ? 'Use server files' : 'Use RAP files'}
+                    active={origin === 'dnx'}
+                    onClick={() => {
+                      setMoreActionsOpen(false)
+                      setOrigin(origin === 'dnx' ? 'fs' : 'dnx')
+                    }}
+                  />
+                )}
+                <div className="my-1 h-px bg-border-light" />
                 <MoreActionButton
                   icon={<ArrowUp className="h-3.5 w-3.5" />}
                   label="Parent folder"
-                  disabled={!cwd || cwd === '/' || cwd === '~'}
+                  disabled={!isConnected || origin !== 'fs' || !cwd || cwd === '/' || cwd === '~'}
                   onClick={() => {
                     setMoreActionsOpen(false)
                     navigateUp()
@@ -1021,28 +995,42 @@ export function FileExplorer() {
                 <MoreActionButton
                   icon={<Bookmark className={classNames('h-3.5 w-3.5', isCurrentBookmarked && 'fill-accent text-accent')} />}
                   label={isCurrentBookmarked ? 'Remove bookmark' : 'Bookmark folder'}
+                  disabled={!isConnected || origin !== 'fs'}
                   onClick={() => {
                     setMoreActionsOpen(false)
                     isCurrentBookmarked ? removeBookmark(cwd) : addBookmark(cwd)
                   }}
                 />
                 <MoreActionButton
-                  icon={showHidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  label={showHidden ? 'Hide dotfiles' : 'Show dotfiles'}
-                  onClick={() => setShowHidden((value) => !value)}
+                  icon={<RefreshCw className={classNames('h-3.5 w-3.5', loading && 'animate-fade-in')} />}
+                  label="Refresh"
+                  disabled={!isConnected || origin !== 'fs' || loading}
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    refresh()
+                  }}
+                />
+                <MoreActionButton
+                  icon={<FolderPlus className="h-3.5 w-3.5" />}
+                  label="New folder"
+                  disabled={!canManageCurrentFolder}
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    void createFolder()
+                  }}
+                />
+                <MoreActionButton
+                  icon={<Upload className="h-3.5 w-3.5" />}
+                  label="Upload"
+                  disabled={!canUploadLocal || uploading}
+                  onClick={() => {
+                    setMoreActionsOpen(false)
+                    void uploadLocalFile()
+                  }}
                 />
                 {selectedEntries.length > 0 && (
                   <>
                     <div className="my-1 h-px bg-border-light" />
-                    <MoreActionButton
-                      icon={<Download className="h-3.5 w-3.5" />}
-                      label="Download"
-                      disabled={!canUploadLocal || !selectedPath}
-                      onClick={() => {
-                        setMoreActionsOpen(false)
-                        void downloadSelected()
-                      }}
-                    />
                     <MoreActionButton
                       icon={<Copy className="h-3.5 w-3.5" />}
                       label="Copy"
@@ -1062,16 +1050,6 @@ export function FileExplorer() {
                       }}
                     />
                     <MoreActionButton
-                      icon={<Trash2 className="h-3.5 w-3.5" />}
-                      label="Delete"
-                      disabled={!selectedPath}
-                      danger
-                      onClick={() => {
-                        setMoreActionsOpen(false)
-                        void deleteSelectedEntries()
-                      }}
-                    />
-                    <MoreActionButton
                       icon={<FilePlus2 className="h-3.5 w-3.5" />}
                       label={selectedEntries.length === 1 ? 'Add to canvas' : 'Add as split node'}
                       onClick={() => {
@@ -1085,6 +1063,16 @@ export function FileExplorer() {
                       onClick={() => {
                         setMoreActionsOpen(false)
                         stageSelectedToCart()
+                      }}
+                    />
+                    <MoreActionButton
+                      icon={<Trash2 className="h-3.5 w-3.5" />}
+                      label="Delete"
+                      disabled={!selectedPath}
+                      danger
+                      onClick={() => {
+                        setMoreActionsOpen(false)
+                        void deleteSelectedEntries()
                       }}
                     />
                   </>
@@ -1108,88 +1096,200 @@ export function FileExplorer() {
         </div>
       </div>
 
+      {sidebarSearchOpen && (
+        <div className="animate-fade-up px-2 pb-2">
+          <div className="bioflow-field flex h-8 items-center gap-2 rounded-md px-2">
+            <Search size={14} className="shrink-0 text-text-muted" />
+            <input
+              ref={sidebarSearchInputRef}
+              type="text"
+              placeholder="Filter files..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void runDeepSearch()
+                if (e.key === 'Escape') {
+                  setSidebarSearchOpen(false)
+                  setSearchQuery('')
+                  setDeepSearchResults(null)
+                }
+              }}
+              className="min-w-0 flex-1 bg-transparent text-xs text-text-primary placeholder:text-text-muted outline-none"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('')
+                  setDeepSearchResults(null)
+                }}
+                className="interactive-button flex h-5 w-5 items-center justify-center text-text-muted hover:text-text-primary"
+                aria-label="Clear file filter"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
+  const standaloneBrowser = (
+    <RemoteFileBrowser
+      open={browserOpen}
+      onClose={() => setBrowserOpen(false)}
+      title="File Explorer"
+      mode="file"
+      browseOnly
+      onSelect={() => undefined}
+    />
+  )
+
+  if (origin === 'dnx' && dnxReady) {
+    return (
+      <div className="flex h-full flex-col">
+        {sidebarHeader}
+        <div className="min-h-0 flex-1">
+          <DnxFilePanel />
+        </div>
+        {standaloneBrowser}
+      </div>
+    )
+  }
+
+  // Not connected state
+  if (!isConnected) {
+    return (
+      <div className="flex h-full flex-col">
+        {sidebarHeader}
+        <div className="bioflow-empty-state animate-fade-up flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+          <FolderOpen className="text-text-muted" strokeWidth={1.5} />
+          <p className="text-sm font-medium text-text-secondary">No files</p>
+          <p className="text-wrap text-xs text-text-muted">Connect to a cluster to browse files.</p>
+          <button
+            type="button"
+            onClick={openConnectionDialog}
+            className="interactive-row px-2 py-1 text-xs text-accent"
+          >
+            Connect to cluster
+          </button>
+        </div>
+        <footer className="flex h-6 shrink-0 items-center justify-between px-3 text-[11px] text-text-muted">
+          <span>0 items</span>
+          <ServerOff size={13} />
+        </footer>
+        {standaloneBrowser}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {sidebarHeader}
+      {filePickMode.active && (
+        <div className="animate-fade-up mx-2 mb-2 rounded-lg bg-accent/10 px-3 py-1.5 flex items-center gap-2 shadow-sm">
+          <span className="text-nowrap flex-1 text-xs text-text-primary">
+            {filePickMode.target === 'directory' ? 'Navigate to a folder and click Select for ' : 'Select a file, then click Use selected for '}
+            {filePickMode.requesterLabel ? <b>{filePickMode.requesterLabel}</b> : 'this node'}
+          </span>
+          {filePickMode.target === 'file' && selectedPickEntry && (
+            <button
+              onClick={() => resolvePickedEntry(selectedPickEntry)}
+              className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
+              title="Use the selected file"
+            >
+              Use selected
+            </button>
+          )}
+          {filePickMode.target === 'directory' && (
+            <button
+              onClick={() => resolveFilePick(cwd, undefined, (cwdConnectionId ?? activeConnectionId) === LOCAL_CONNECTION_ID ? 'local' : 'ssh')}
+              className="text-[10px] bg-accent text-white px-2 py-0.5 rounded hover:opacity-90"
+              title="Use the current folder"
+            >
+              Select this folder
+            </button>
+          )}
+          <button
+            onClick={cancelFilePick}
+            className="text-[10px] text-text-secondary hover:text-text-primary underline"
+            title="Cancel (Esc)"
+          >
+            cancel
+          </button>
+        </div>
+      )}
+
       {uploadMessage && (
-        <div className="mx-2 rounded-md bg-bg-tertiary/70 px-3 py-1 text-[10px] text-text-muted shadow-sm">
+        <div className="animate-fade-up mx-2 mb-2 rounded-md bg-bg-tertiary/70 px-3 py-1 text-[10px] text-text-muted shadow-sm">
           {uploadMessage}
         </div>
       )}
 
-      {/* Bookmarks section */}
       {bookmarks.length > 0 && (
-        <div>
+        <section className="shrink-0 pb-1">
           <button
-            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-hover"
+            className="bioflow-section-label interactive-row flex h-6 w-full items-center gap-1.5 rounded-none px-3 text-left"
             onClick={() => setBookmarksOpen(!bookmarksOpen)}
           >
-            {bookmarksOpen ? (
-              <ChevronDown className="h-3 w-3" />
-            ) : (
-              <ChevronRight className="h-3 w-3" />
-            )}
-            <Bookmark className="h-3 w-3" />
-            Bookmarks
+            {bookmarksOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span className="text-nowrap">Bookmarks</span>
           </button>
 
           {bookmarksOpen && (
-            <div className="pb-1">
+            <div className="px-1 pb-1">
               {bookmarks.map((bm) => (
                 <button
                   key={bm}
-                  className="flex w-full items-center gap-2 px-5 py-1 text-xs text-text-muted transition-colors hover:bg-bg-hover hover:text-accent"
+                  className="interactive-row flex h-7 w-full items-center gap-2 px-2 text-left text-xs text-text-secondary hover:text-text-primary"
                   onClick={() => handleNavigate(bm)}
                 >
-                  <FolderOpen className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{bm}</span>
+                  <FolderOpen size={14} className="shrink-0 text-text-muted" />
+                  <span className="text-nowrap min-w-0 flex-1">{compactSidebarPath(bm)}</span>
                 </button>
               ))}
             </div>
           )}
-        </div>
+        </section>
       )}
 
-      {/* Search */}
-      <div className="px-2 py-1.5">
-        <div className="flex items-center gap-1.5 rounded-md bg-bg-tertiary px-2 py-1">
-          <Search className="h-3.5 w-3.5 text-text-muted" />
-          <input
-            type="text"
-            placeholder="Search..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void runDeepSearch()
-              if (e.key === 'Escape') setDeepSearchResults(null)
-            }}
-            className="w-full bg-transparent text-xs text-text-primary placeholder:text-text-muted outline-none"
-          />
-          {deepSearchResults && (
-            <button type="button" onClick={() => setDeepSearchResults(null)} className="rounded px-1 text-[10px] text-text-muted hover:bg-bg-hover hover:text-text-primary">
-              local
-            </button>
-          )}
+      {recentTabs.length > 0 && (
+        <section className="shrink-0 pb-1">
           <button
-            type="button"
-            onClick={() => void runDeepSearch()}
-            disabled={!searchQuery.trim() || searchingDeep}
-            className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-secondary hover:text-text-primary disabled:opacity-40"
-            title="Search inside folders from the current location"
+            className="bioflow-section-label interactive-row flex h-6 w-full items-center gap-1.5 rounded-none px-3 text-left"
+            onClick={() => setRecentsOpen(!recentsOpen)}
           >
-            {searchingDeep ? '...' : 'deep'}
+            {recentsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span className="text-nowrap">Recents</span>
           </button>
-        </div>
-      </div>
+          {recentsOpen && (
+            <div className="px-1 pb-1">
+              {recentTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => switchTab(tab.id)}
+                  className="interactive-row flex h-7 w-full items-center gap-2 px-2 text-left text-xs text-text-secondary hover:text-text-primary"
+                >
+                  <FolderOpen size={14} className="shrink-0 text-text-muted" />
+                  <span className="text-nowrap min-w-0 flex-1">{tab.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {dataCartItems.length > 0 && (
-        <div className="bg-bg-secondary/60">
+        <section className="shrink-0 bg-bg-secondary/30">
           <button
             type="button"
             onClick={() => setDataCartOpen(!dataCartOpen)}
-            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-hover"
+            className="bioflow-section-label interactive-row flex h-6 w-full items-center gap-1.5 rounded-none px-3 text-left"
           >
             {dataCartOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-            <FilePlus2 className="h-3 w-3" />
-            Data cart ({dataCartItems.length})
-            <span className="ml-auto text-[10px] text-text-muted">stage, label, add</span>
+            <span className="text-nowrap">Data cart ({dataCartItems.length})</span>
           </button>
           {dataCartOpen && (
             <div className="flex max-h-64 flex-col gap-1 overflow-y-auto px-2 pb-2">
@@ -1212,7 +1312,7 @@ export function FileExplorer() {
               </div>
             </div>
           )}
-        </div>
+        </section>
       )}
 
       {/* File list */}
@@ -1235,8 +1335,10 @@ export function FileExplorer() {
           />
         )}
         {loading && (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-5 w-5 animate-spin text-text-muted" />
+          <div className="flex flex-col gap-2 p-3">
+            <div className="animate-shimmer h-7 rounded-md" />
+            <div className="animate-shimmer h-7 rounded-md" />
+            <div className="animate-shimmer h-7 rounded-md" />
           </div>
         )}
 
@@ -1251,31 +1353,49 @@ export function FileExplorer() {
         )}
 
         {!loading && !error && sortedEntries.length === 0 && (
-          <div className="flex items-center justify-center py-8">
-            <p className="text-xs text-text-muted">
-              {searchQuery ? 'No matching files' : 'This directory is empty'}
+          <div className="bioflow-empty-state animate-fade-up flex h-full flex-col items-center justify-center gap-2 px-5 text-center">
+            <FolderOpen className="text-text-muted" strokeWidth={1.5} />
+            <p className="text-sm font-medium text-text-secondary">No files</p>
+            <p className="text-wrap text-xs text-text-muted">
+              {searchQuery ? 'No matching files in this folder.' : 'This directory is empty.'}
             </p>
           </div>
         )}
 
         {!loading && !error && sortedEntries.length > 0 && (
-          fileExplorerViewMode === 'icons' ? (
-            <div className="grid grid-cols-[repeat(auto-fill,92px)] justify-start gap-x-3 gap-y-4 p-3">
-              {sortedEntries.map((entry) => (
-                <FileIconNode
-                  key={entry.path}
-                  entry={entry}
-                  isSelected={selectedPaths.includes(entry.path)}
-                  onSelect={handleSelect}
-                  onNavigate={handleNavigate}
-                  onPreview={handlePreview}
-                  onContextMenu={handleContextMenu}
+          <div className="px-1 pb-2">
+            {selectedEntries.length > 0 && (
+              <div className="animate-fade-up sticky top-0 z-20 flex h-9 items-center gap-1.5 bg-bg-secondary/95 px-2 shadow-sm backdrop-blur">
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  className="interactive-row flex min-w-0 flex-1 items-center gap-1.5 px-2 text-xs text-text-secondary"
+                  aria-label="Clear file selection"
+                >
+                  <span className="text-nowrap">{selectedEntries.length} selected</span>
+                </button>
+                <ToolbarIconButton
+                  label="Download selected"
+                  icon={<Download className="h-3.5 w-3.5" />}
+                  onClick={() => void downloadSelected()}
+                  disabled={!canUploadLocal || !selectedPath}
                 />
-              ))}
-            </div>
-          ) : (
-            sortedEntries.map((entry) => (
-              <FileTreeNode
+                <ToolbarIconButton
+                  label="Delete selected"
+                  icon={<Trash2 className="h-3.5 w-3.5" />}
+                  onClick={() => void deleteSelectedEntries()}
+                  disabled={!selectedPath}
+                  danger
+                />
+                <ToolbarIconButton
+                  label="Clear selection"
+                  icon={<X className="h-3.5 w-3.5" />}
+                  onClick={clearSelection}
+                />
+              </div>
+            )}
+            {sortedEntries.map((entry) => (
+              <SidebarFileRow
                 key={entry.path}
                 entry={entry}
                 isSelected={selectedPaths.includes(entry.path)}
@@ -1284,12 +1404,25 @@ export function FileExplorer() {
                 onPreview={handlePreview}
                 onContextMenu={handleContextMenu}
               />
-            ))
-          )
+            ))}
+          </div>
         )}
       </div>
 
-      {/* Context Menu */}
+      <footer className="flex h-6 shrink-0 items-center justify-between gap-2 px-3 text-[11px] text-text-muted">
+        <span className="text-nowrap">{deepSearchResults ? `${itemCountLabel} found` : itemCountLabel}</span>
+        <Tooltip content={showHidden ? 'Hide dotfiles' : 'Show hidden files'}>
+          <button
+            type="button"
+            aria-label={showHidden ? 'Hide dotfiles' : 'Show hidden files'}
+            onClick={() => setShowHidden((value) => !value)}
+            className="interactive-button flex h-5 w-5 items-center justify-center text-text-muted hover:text-text-primary"
+          >
+            {showHidden ? <Eye size={13} /> : <EyeOff size={13} />}
+          </button>
+        </Tooltip>
+      </footer>
+
       <FileContextMenu
         entry={contextEntry}
         position={contextPos}
@@ -1371,6 +1504,93 @@ function MoreActionButton({
       {icon && <span className="flex h-4 w-4 shrink-0 items-center justify-center text-text-muted">{icon}</span>}
       <span className="text-nowrap min-w-0 flex-1">{label}</span>
     </button>
+  )
+}
+
+function SidebarFileRow({
+  entry,
+  isSelected,
+  onSelect,
+  onNavigate,
+  onPreview,
+  onContextMenu,
+}: {
+  entry: RemoteFileEntry
+  isSelected: boolean
+  onSelect: (entry: RemoteFileEntry, event: React.MouseEvent) => void
+  onNavigate: (path: string) => void
+  onPreview: (entry: RemoteFileEntry) => void
+  onContextMenu: (event: React.MouseEvent, entry: RemoteFileEntry) => void
+}) {
+  const fileType = entry.isDirectory ? '' : inferFileType(entry.name)
+  return (
+    <div
+      data-file-path={entry.path}
+      className={classNames(
+        'group flex h-7 min-w-0 items-center gap-1 rounded-sm border-l-2 pr-1 text-xs',
+        isSelected
+          ? 'border-accent bg-bg-tertiary text-text-primary'
+          : 'border-transparent text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+      )}
+      draggable
+      onClick={(event) => {
+        if (entry.isDirectory && !event.metaKey && !event.ctrlKey && !event.shiftKey) {
+          onNavigate(entry.path)
+          return
+        }
+        onSelect(entry, event)
+      }}
+      onDoubleClick={() => {
+        if (entry.isDirectory) onNavigate(entry.path)
+        else onPreview(entry)
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        onContextMenu(event, entry)
+      }}
+      onDragStart={(event) => {
+        event.dataTransfer.setData('text/plain', entry.path)
+        event.dataTransfer.setData('application/x-bioflow-path', entry.path)
+        event.dataTransfer.setData('application/x-bioflow-file-entry', JSON.stringify({
+          path: entry.path,
+          name: entry.name,
+          isDirectory: entry.isDirectory,
+        }))
+        event.dataTransfer.effectAllowed = 'copyMove'
+      }}
+      title={entry.path}
+    >
+      <button
+        type="button"
+        className="flex h-7 w-4 shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
+        onClick={(event) => {
+          event.stopPropagation()
+          if (entry.isDirectory) onNavigate(entry.path)
+        }}
+        aria-label={entry.isDirectory ? `Open ${entry.name}` : entry.name}
+        tabIndex={entry.isDirectory ? 0 : -1}
+      >
+        {entry.isDirectory ? <ChevronRight size={12} /> : null}
+      </button>
+      <FileGlyph entry={entry} size="row" selected={isSelected} />
+      <span className="text-nowrap min-w-0 flex-1">{entry.name}{entry.isDirectory ? '/' : ''}</span>
+      {!entry.isDirectory && (
+        <span className="bioflow-badge text-nowrap max-w-12 shrink-0 rounded bg-bg-tertiary px-1 text-[10px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          {fileType}
+        </span>
+      )}
+      <button
+        type="button"
+        className="interactive-button flex h-6 w-6 shrink-0 items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+        onClick={(event) => {
+          event.stopPropagation()
+          onContextMenu(event, entry)
+        }}
+        aria-label={`Open actions for ${entry.name}`}
+      >
+        <MoreHorizontal size={13} />
+      </button>
+    </div>
   )
 }
 
@@ -1461,15 +1681,14 @@ function DataCartRow({
         </button>
       </div>
       <div className="mt-1.5 grid grid-cols-[1fr_68px] gap-1">
-        <select
+        <MenuSelect<DataArtifactRole>
           value={item.role ?? 'other'}
-          onChange={(event) => onRole(event.target.value as DataArtifactRole)}
-          className="h-6 min-w-0 rounded border border-border bg-bg-tertiary px-1.5 text-[10px] text-text-primary"
-        >
-          {DATA_ROLE_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
+          onChange={(value) => onRole((value || 'other') as DataArtifactRole)}
+          options={DATA_ROLE_OPTIONS}
+          ariaLabel="Data role"
+          buttonClassName="h-6 text-[10px] px-1.5"
+          menuClassName="w-40"
+        />
         <input
           value={item.axis ?? ''}
           onChange={(event) => onAxis(event.target.value)}
@@ -1559,6 +1778,21 @@ function shellQuote(value: string): string {
 function normalizeChildPath(cwd: string, value: string): string {
   if (value.startsWith('/') || value.startsWith('~/') || value === '~') return value
   return `${cwd.replace(/\/+$/, '')}/${value.replace(/^\/+/, '')}`
+}
+
+function compactSidebarPath(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) return 'Files'
+  if (trimmed === '/' || trimmed === '~') return trimmed
+  const suffix = trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed
+  const parts = suffix.split('/').filter(Boolean)
+  if (suffix.startsWith('~/')) {
+    const homeParts = suffix.slice(2).split('/').filter(Boolean)
+    if (homeParts.length <= 1) return `~/${homeParts.join('/')}`.replace(/\/$/, '')
+    return `.../${homeParts.slice(-2).join('/')}`
+  }
+  if (parts.length <= 2) return suffix.startsWith('/') ? `/${parts.join('/')}` : parts.join('/')
+  return `.../${parts.slice(-2).join('/')}`
 }
 
 function parentPath(path: string): string {

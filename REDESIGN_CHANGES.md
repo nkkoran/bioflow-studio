@@ -146,3 +146,52 @@ This pass rebuilds the app around the design system documented in `design-resear
 - Promoted the previous General-page subsections into first-class Settings pages: Interface, Appearance, Privacy, Setup, Run Checks, and Execution now live in the left rail instead of being buried in disclosures.
 - Fixed the Settings left rail to stay a vertical, left-aligned menu at all app widths; removed the compact horizontal scrolling strip and gave every nav row the same explicit button geometry.
 - Verification: `npm run typecheck`, `npm test` (117 tests), and `npm run build` passed; build still reports the existing non-fatal `pipelineStore.ts` dynamic/static import warning.
+
+## Pass 6 — Sidebar explorer, popup explorer + preview, data previewer rebuild
+
+- Rebuilt the sidebar file explorer as a fast navigator: compact path header, hidden slide-down filter, contextual More menu, collapsible Bookmarks/Recents/Data cart sections, sticky selection toolbar, shimmer loading rows, empty-state action, footer item count, and icon-only hidden-files toggle.
+- Kept sidebar file-picker handoff, multi-select, preview opening, canvas staging, data cart staging, protected delete checks, missing canvas-node flagging, local/SSH routing, and DNAnexus panel access wired through the existing stores and handlers.
+- Rebuilt the popup file explorer into a three-column modal: source rail for Local/SSH/DNAnexus/Favorites/Recents, central list/grid browser with breadcrumb/search/sort/filter footer, and a right preview panel.
+- Added popup file previews for text and tabular files using first-200-line reads through the existing local/SFTP preview helpers; binary/unknown files now get a clear no-preview state.
+- Added popup mini-editor mode for text/table previews under 1MB with Save/Discard, existing local/SFTP write APIs, and a warning when the selected file is already used as a pipeline input.
+- Preserved split transfer by moving it into the popup source rail as an explicit two-pane transfer action rather than overloading the list/grid view toggle.
+- Rebuilt the data preview table into an exploration surface with row search, match counts, sortable headers, column type badges, resizable/autofit columns, selected row styling, null rendering, tooltip full values, column visibility/reorder popover, pagination, rows-per-page control, bottom-panel expansion, and current-view CSV export.
+- Updated data preview empty/loading states to use the shared empty-state and shimmer patterns instead of spinner/text-only feedback.
+- Verification: runtime-smoked the sidebar, popup explorer, popup preview, and data preview empty state in Electron; `npm run typecheck`, `npm test` (117 tests), `npm run build`, and `git diff --check` passed. The build still reports the existing non-fatal `pipelineStore.ts` dynamic/static import warning.
+
+## Post-Pass 6 regression sweep
+
+- Restored an explicit `Browse` command in the sidebar file explorer header so the popup explorer is discoverable without knowing the path chip opens it.
+- Restored visible data-preview rule filtering with a Filters popover, add/clear/remove filter actions, column/operator/value controls, and live application through the existing preview filter store.
+- Collapsed Settings back to a smaller left navigation: General, Run, Paths, Tools, DNAnexus, and Advanced. Interface, appearance, privacy, setup, notifications, checks, and execution are now visible groups inside those pages instead of separate cramped tabs.
+- Replaced the SSH saved-preset dropdown with selectable preset cards, including a clear New connection card.
+- Added a shared `MenuSelect` popover control and used it for the visible file/data/settings selectors touched in this sweep; remaining native selects are globally flattened so they no longer carry the old chunky bordered dropdown treatment.
+- Added compact modal/file-browser/settings responsive rules and wrapping data-preview toolbars so controls shrink or wrap instead of spilling when the window changes size.
+- Verification: `npm run typecheck`, `npm test` (117 tests), `npm run build`, and `git diff --check` passed. The build still reports the existing non-fatal `pipelineStore.ts` dynamic/static import warning.
+
+## SSH prompt after local preview fix
+
+- Fixed a connection-routing bug where data preview tabs stored only a path, so reopening or reloading a local `/Users/...` preview while Rorqual was active sent that local path through remote SFTP/OpenSSH.
+- Data preview tabs now retain their owning connection id, and preview `stat`, `head`, image/PDF reads, text/table reloads, raw/table mode switches, filtered CSV export, Jobs previews, sidebar previews, and popup previews route through that stored connection.
+- Added a local-path fallback for older tabs without connection metadata so macOS absolute paths are treated as local even if SSH is active.
+- Updated sidebar file explorer actions to use the current folder's connection id instead of the global active connection, preventing local-tab selections from being added, picked, copied, or previewed as remote files.
+
+## Pass 7 — Full visual QA sweep
+
+- Added `VISUAL_BUGS.md` and completed the requested visual QA log with critical, degraded, and polish groups.
+- Fixed the modal scroll/overflow contract so expanded connection dialog sections scroll inside the modal body instead of clipping behind the footer.
+- Bounded popup file preview tables with a shared mini-table layout so wide tabular previews truncate within their cells and remain scrollable.
+- Cleaned the narrow file inspector split row by giving the text column shrinkable wrap behavior and keeping the Enable control fixed to the right.
+- Raised sub-11px visual text in the audited palette, canvas nodes, edge labels, data-preview toolbar, jobs panel, connection preset cards, and popup preview controls to token-based `text-xs` sizing.
+- Added a scoped global typography guard that maps legacy 8–10px utility classes inside the app shell, modals, and popovers to the `--text-xs` token.
+- Fixed the Jobs run-selector header so the `Run:` label remains visible instead of collapsing next to the selector.
+- Tightened popup grid file labels with a shared two-line clamp class so long names wrap consistently without spilling or jagged breaks.
+- Continued the sweep on the missed light-theme cases: settings navigation, popup file explorer source rail, and preview rail now use light surface tokens instead of staying dark.
+- Fixed the PLINK inspector parameter control row so Search, Custom, and Validate wrap cleanly instead of being clipped in the narrow inspector.
+- Normalized dense file/tool text sizing, softened the canvas minimap, made bottom-panel badges token-sized, and changed workspace advanced tool paths to a single-column layout so long placeholders remain readable.
+
+## OpenSSH background MFA prompt fix
+
+- Restricted OpenSSH askpass/MFA prompting to explicit ControlPersist master startup during Connect.
+- Switched ordinary OpenSSH app operations, including `exec`, streaming exec, file listing, stat/head/read/write, upload, and download, to non-interactive batch mode with `SSH_ASKPASS` stripped from the child environment.
+- Added a unit test for the batch-mode SSH argument contract so background previews/readiness probes cannot silently regress into interactive authentication prompts.

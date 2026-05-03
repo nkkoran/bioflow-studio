@@ -20,6 +20,7 @@ import { CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-r
 import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { useSuccessAnimation } from './useSuccessAnimation'
+import { categoryTone, nodeChromeStyle } from './nodeTones'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -36,7 +37,7 @@ function StatusBadge({ status = 'idle' }: StatusBadgeProps) {
   }
   const { icon, label, cls } = map[status]
   return (
-    <span className={classNames('bioflow-status-badge flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium', cls)}>
+    <span className={classNames('bioflow-status-badge flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium', cls)}>
       {icon}
       {label}
     </span>
@@ -117,30 +118,31 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
     const sourceData = source.data as { split?: { items?: unknown[] } }
     return (sourceData.split?.items?.length ?? 0) > 0
   })
+  const tone = categoryTone(tool.category)
 
   return (
     <ToolHoverCard tool={tool} connectedPorts={connectedInputs.size + connectedOutputs.size}>
       <div
-      className={classNames(
-        'animate-fade-up relative min-w-[260px] max-w-[320px] rounded-lg bg-bg-secondary/95 transition-all duration-150 ease-out',
-        selected && 'translate-y-[-2px]',
-        successAnimating && 'animate-success',
-      )}
-      style={{ boxShadow: selected ? 'var(--shadow-node-selected)' : 'var(--shadow-node)' }}
+        className={classNames(
+          'animate-fade-up relative min-w-[260px] max-w-[320px] rounded-lg border bg-bg-secondary/95 transition-all duration-150 ease-out',
+          selected && 'translate-y-[-2px]',
+          successAnimating && 'animate-success',
+        )}
+        style={nodeChromeStyle(tone, Boolean(selected))}
       >
       {/* Header */}
       <div className="px-3 py-2 flex items-center justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <div className="text-[10px] uppercase tracking-wide text-text-muted flex items-center gap-1">
+          <div className="flex items-center gap-1 text-xs uppercase tracking-wide text-text-muted">
             <ToolIcon size={10} className="shrink-0" />
             <span>{tool.category}</span>
             {tool.backends && tool.backends.length > 1 && (
-              <span className="rounded bg-cyan-500/15 px-1 py-px text-[9px] text-cyan-200 normal-case tracking-normal">
+              <span className="rounded bg-cyan-500/15 px-1 py-px text-xs text-cyan-200 normal-case tracking-normal">
                 {nodeData.backend === 'dnx' ? 'dnx' : 'ssh'}
               </span>
             )}
             {nodeData.executionMode === 'login' && (
-              <span className="rounded bg-yellow-500/15 px-1 py-px text-[9px] text-yellow-300 normal-case tracking-normal">
+              <span className="rounded bg-yellow-500/15 px-1 py-px text-xs text-yellow-300 normal-case tracking-normal">
                 login
               </span>
             )}
@@ -153,7 +155,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       </div>
 
       {outputPreview && (
-        <div className="px-3 pb-1 text-[10px] font-mono text-text-muted truncate">
+        <div className="px-3 pb-1 text-xs font-mono text-text-muted truncate">
           <MiddleEllipsis value={outputPreview} max={44} />
         </div>
       )}
@@ -164,7 +166,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       <div className="py-2 flex flex-col text-[11px]">
         {/* Inputs on the left */}
         {activeInputs.length > 0 && (
-          <div className="mb-1 px-3 text-[9px] uppercase tracking-wide text-text-muted">Inputs</div>
+          <div className="mb-1 px-3 text-xs uppercase tracking-wide text-text-muted">Inputs</div>
         )}
         {activeInputs.map((port) => {
           const connected = connectedInputs.has(port.id)
@@ -207,14 +209,14 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
               </span>
               <span
                 className={classNames(
-                  'shrink-0 rounded px-1 py-0.5 text-[8px] font-medium uppercase',
+                  'shrink-0 rounded px-1 py-0.5 text-xs font-medium uppercase',
                   port.required ? 'bg-error/15 text-error' : 'bg-bg-tertiary text-text-muted',
                 )}
                 title={port.required ? 'Required input' : 'Optional input'}
               >
                 {port.required ? 'req' : 'opt'}
               </span>
-              <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[9px] text-text-muted shrink-0">
+              <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs text-text-muted shrink-0">
                 {port.fileType}
               </span>
             </div>
@@ -227,7 +229,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
 
         {/* Outputs on the right */}
         {tool.outputs.length > 0 && (
-          <div className="mb-1 px-3 text-[9px] uppercase tracking-wide text-text-muted">Outputs</div>
+          <div className="mb-1 px-3 text-xs uppercase tracking-wide text-text-muted">Outputs</div>
         )}
         {tool.outputs.map((port) => {
           const connected = connectedOutputs.has(port.id)
@@ -253,7 +255,7 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
                       },
                     })
                   }}
-                  className={`rounded px-1.5 py-0.5 text-[9px] shrink-0 ${
+                  className={`rounded px-1.5 py-0.5 text-xs shrink-0 ${
                     autoMergeEnabled
                       ? 'bg-emerald-500/15 text-emerald-200'
                       : 'bg-bg-tertiary text-text-muted hover:text-text-primary'
@@ -264,11 +266,11 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
                 </button>
               )}
               {outputCount > 1 && (
-                <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent shrink-0">
+                <span className="rounded bg-accent/10 px-1.5 py-0.5 text-xs text-accent shrink-0">
                   {outputCount}x
                 </span>
               )}
-              <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[9px] text-text-muted shrink-0">
+              <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs text-text-muted shrink-0">
                 {port.fileType}
               </span>
               <span className={classNames('min-w-0 flex-1 truncate text-right', connected ? 'text-text-primary' : 'text-text-secondary')}>
@@ -302,14 +304,14 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
 
       {/* Error line */}
       {nodeData.error && (
-        <div className="px-3 py-1.5 bg-error/10 text-[10px] text-error truncate">
+        <div className="px-3 py-1.5 bg-error/10 text-xs text-error truncate">
           {nodeData.error}
         </div>
       )}
 
       {/* Job ID */}
       {nodeData.jobId && (
-        <div className="px-3 py-1 text-[10px] text-text-muted font-mono">
+        <div className="px-3 py-1 text-xs text-text-muted font-mono">
           job: {nodeData.jobId}
         </div>
       )}

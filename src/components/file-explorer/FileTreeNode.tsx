@@ -74,7 +74,7 @@ export function FileTreeNode({
       >
         <FileGlyph entry={entry} size="row" selected={isSelected} />
 
-        <span className="min-w-0 flex-1 truncate text-sm text-text-primary">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-primary">
           {entry.name}
           {entry.isDirectory && '/'}
         </span>

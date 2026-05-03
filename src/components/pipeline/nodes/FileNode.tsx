@@ -11,6 +11,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { computeFileOutputPreview } from '@/lib/outputPathPreview'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
+import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
 
 function FileNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as FileNodeData
@@ -49,32 +50,33 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
   }, pathSettings), [id, nodes, edges, groups, pipelineId, pipelineName, pipelineDescription, pathSettings])
   const fanOutCount = edges.filter((edge) => edge.source === id && (edge.sourceHandle ?? 'output') === 'output').length
   const wireFileNodeToCompatibleInputs = usePipelineStore((s) => s.wireFileNodeToCompatibleInputs)
+  const tone = nodeTypeTone('file')
 
   return (
     <div
       className={classNames(
-        'animate-fade-up relative min-w-[180px] max-w-[320px] rounded-lg bg-bg-secondary/95 px-4 py-2 transition-all duration-150 ease-out',
+        'animate-fade-up relative min-w-[180px] max-w-[320px] rounded-lg border bg-bg-secondary/95 px-4 py-2 transition-all duration-150 ease-out',
         selected && 'translate-y-[-2px]',
         missing && 'ring-2 ring-error/35',
       )}
-      style={{ boxShadow: selected ? 'var(--shadow-node-selected)' : 'var(--shadow-node)' }}
+      style={nodeChromeStyle(tone, Boolean(selected))}
     >
       <div className="flex items-center gap-2">
         <FileText size={14} className="text-amber-400 shrink-0" />
         <div className="flex-1 min-w-0">
-          <div className="text-[10px] uppercase tracking-wide text-text-muted">
+          <div className="text-xs uppercase tracking-wide text-text-muted">
             {nodeData.fileType} {isInput ? 'input' : 'output'}{isInput && nodeData.source === 'local' ? ' · local' : ''}
           </div>
           <div className="bioflow-canvas-node-label truncate text-xs font-semibold text-text-primary">
             {nodeData.label}
           </div>
           {isInput && nodeData.path && (
-            <div className="text-[10px] text-text-muted font-mono truncate">
+            <div className="text-xs text-text-muted font-mono truncate">
               <MiddleEllipsis value={nodeData.path} max={40} />
             </div>
           )}
           {missing && (
-            <div className="mt-1 flex items-center gap-1 rounded bg-error/10 px-1.5 py-0.5 text-[10px] text-error">
+            <div className="mt-1 flex items-center gap-1 rounded bg-error/10 px-1.5 py-0.5 text-xs text-error">
               <AlertTriangle size={10} />
               Path deleted or missing
             </div>
@@ -82,27 +84,27 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           {isInput && nodeData.split?.items?.length && (
             <div className="mt-1 flex max-h-16 flex-wrap gap-1 overflow-hidden">
               {nodeData.split.items.slice(0, 6).map((item) => (
-                <span key={item.key} className="rounded bg-amber-500/10 px-1 py-0.5 text-[9px] text-amber-200" title={item.path}>
+                <span key={item.key} className="rounded bg-amber-500/10 px-1 py-0.5 text-xs text-amber-200" title={item.path}>
                   {item.key}
                 </span>
               ))}
               {nodeData.split.items.length > 6 && (
-                <span className="rounded bg-bg-tertiary px-1 py-0.5 text-[9px] text-text-muted">+{nodeData.split.items.length - 6}</span>
+                <span className="rounded bg-bg-tertiary px-1 py-0.5 text-xs text-text-muted">+{nodeData.split.items.length - 6}</span>
               )}
             </div>
           )}
           {isInput && fanOutCount > 1 && (
-            <div className="mt-1 text-[10px] text-accent">
+            <div className="mt-1 text-xs text-accent">
               Fan-out: {fanOutCount} downstream inputs
             </div>
           )}
           {!isInput && outputLabel && (
-            <div className="text-[10px] text-text-muted font-mono truncate" title={outputFolder || 'Default output folder'}>
+            <div className="text-xs text-text-muted font-mono truncate" title={outputFolder || 'Default output folder'}>
               → <MiddleEllipsis value={outputLabel} max={34} />
             </div>
           )}
           {!isInput && outputPreview && (
-            <div className="text-[10px] text-text-muted font-mono truncate">
+            <div className="text-xs text-text-muted font-mono truncate">
               <MiddleEllipsis value={outputPreview} max={40} />
             </div>
           )}
@@ -141,7 +143,7 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
             }}
           />
           {fanOutCount > 1 && (
-            <div className="absolute right-4 top-1/2 -translate-y-1/2 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-medium text-amber-200">
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-200">
               {fanOutCount}x
             </div>
           )}

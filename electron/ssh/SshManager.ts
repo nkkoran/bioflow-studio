@@ -9,7 +9,7 @@ import { execFile } from 'child_process'
 
 import type { ConnectionConfig, ConnectionResult, ConnectionStatus, ExecResult, LoginPolicy, SshKeySetupRequest, SshKeySetupResult } from './types'
 import { promptUser, type PromptRequestPayload } from './prompt'
-import { OpenSshTransport, type OpenSshConnectionHandle } from './OpenSshTransport'
+import { OpenSshTransport, isOpenSshSessionInactiveError, type OpenSshConnectionHandle } from './OpenSshTransport'
 
 interface ManagedConnection {
   client: Client | null
@@ -814,7 +814,7 @@ export class SshManager {
         }
         const conn = this.connections.get(id)
         if (conn && !conn.reconnecting) {
-          this.attemptReconnect(id)
+          this.markConnectionUnavailable(id, 'SSH session hit an error; background reconnect is disabled to avoid surprise MFA prompts.')
         }
       })
 
@@ -828,8 +828,7 @@ export class SshManager {
         }
         const conn = this.connections.get(id)
         if (conn && !conn.reconnecting) {
-          this.sendStatusChange(id, false)
-          this.attemptReconnect(id)
+          this.markConnectionUnavailable(id, 'SSH session closed; reconnect manually when you need cluster access again.')
         }
       })
 
@@ -987,10 +986,17 @@ export class SshManager {
     throw new Error('SSH exec failed')
   }
 
-  private execOnce(id: string, command: string): Promise<ExecResult> {
+  private async execOnce(id: string, command: string): Promise<ExecResult> {
     const openSsh = this.getOpenSshConnection(id)
     if (openSsh) {
-      return OpenSshTransport.getInstance().exec(openSsh, command, (stage, detail) => this.emitDebug(id, stage, detail))
+      try {
+        return await OpenSshTransport.getInstance().exec(openSsh, command, (stage, detail) => this.emitDebug(id, stage, detail))
+      } catch (err) {
+        if (isOpenSshSessionInactiveError(err)) {
+          this.markConnectionUnavailable(id, 'OpenSSH ControlPersist session expired; reconnect manually before cluster operations continue.')
+        }
+        throw err
+      }
     }
 
     return new Promise((resolve, reject) => {
@@ -1149,95 +1155,12 @@ export class SshManager {
     })
   }
 
-  private attemptReconnect(id: string): void {
+  markConnectionUnavailable(id: string, detail: string): void {
     const conn = this.connections.get(id)
     if (!conn || conn.reconnecting) return
-    if (conn.transport === 'openssh-controlpersist') return
-
     conn.reconnecting = true
-    this.sendStatusChange(id, 'reconnecting')
-    const { config } = conn
-    const maxAttempts = 5
-    const maxDelay = 30_000
-
-    const tryReconnect = (attempt: number): void => {
-      if (attempt > maxAttempts) {
-        this.connections.delete(id)
-        this.sendStatusChange(id, false)
-        return
-      }
-
-      const delay = Math.min(1000 * Math.pow(2, attempt - 1), maxDelay)
-
-      setTimeout(() => {
-        if (!this.connections.has(id)) return
-
-        let connectOptions: ConnectConfig
-        try {
-          connectOptions = buildConnectOptions(config, (detail) => this.emitDebug(id, 'auth', detail))
-        } catch {
-          tryReconnect(attempt + 1)
-          return
-        }
-
-        const newClient = new Client()
-        const keyboardInteractiveState: KeyboardInteractiveState = { passwordAutoResponded: false }
-
-        // For reconnect, use same keyboard-interactive handler
-        newClient.on('keyboard-interactive', (_name, instructions, _lang, prompts, finish) => {
-          this.emitDebug(id, 'auth', `Re-authentication requested ${prompts.length} prompt(s)`)
-          const processPrompts = async () => {
-            const responses: string[] = []
-            for (const prompt of prompts) {
-              const promptText = prompt.prompt.toLowerCase()
-              if (shouldAutoRespondPasswordPrompt(config, promptText, instructions, keyboardInteractiveState)) {
-                this.emitDebug(id, 'prompt', 'Auto-responded to "password" prompt with the stored password')
-                responses.push(config.password!)
-                keyboardInteractiveState.passwordAutoResponded = true
-              } else {
-                this.emitDebug(id, 'prompt', `Prompted user for: ${prompt.prompt || instructions || 'verification code'}`)
-                const userInput = await promptUser(
-                  buildPromptRequest(config, 'Re-authentication Required', instructions, prompt),
-                )
-                responses.push(userInput ?? '')
-              }
-            }
-            finish(responses)
-          }
-          processPrompts().catch(() => finish(prompts.map(() => '')))
-        })
-
-        newClient.on('ready', () => {
-          const existing = this.connections.get(id)
-          if (!existing) {
-            newClient.end()
-            return
-          }
-          existing.client = newClient
-          existing.connectedAt = Date.now()
-          existing.reconnecting = false
-          this.emitDebug(id, 'connect', 'SSH session reconnected')
-          this.sendStatusChange(id, true)
-        })
-
-        newClient.on('error', (err) => {
-          this.emitDebug(id, 'error', err.message)
-          tryReconnect(attempt + 1)
-        })
-
-        newClient.on('close', () => {
-          const c = this.connections.get(id)
-          if (c && !c.reconnecting) {
-            this.sendStatusChange(id, false)
-            this.attemptReconnect(id)
-          }
-        })
-
-        newClient.connect(connectOptions)
-      }, delay)
-    }
-
-    tryReconnect(1)
+    this.emitDebug(id, 'connect', detail)
+    this.sendStatusChange(id, false)
   }
 
   private sendStatusChange(id: string, status: boolean | string): void {

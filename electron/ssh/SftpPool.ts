@@ -1,6 +1,6 @@
 import type { SFTPWrapper, FileEntry as SshFileEntry } from 'ssh2'
 import { SshManager } from './SshManager'
-import { OpenSshTransport } from './OpenSshTransport'
+import { OpenSshTransport, isOpenSshSessionInactiveError, type OpenSshConnectionHandle } from './OpenSshTransport'
 import type { RemoteFileEntry, FileStat } from './types'
 import { createReadStream, createWriteStream } from 'fs'
 import { promises as fs } from 'fs'
@@ -19,6 +19,8 @@ interface Waiter {
   resolve: (sftp: SFTPWrapper) => void
   reject: (err: unknown) => void
 }
+
+type OpenSshOperationResult<T> = { handled: true; value: T } | { handled: false }
 
 // HPC login nodes can have low SSH channel/session limits. Keep SFTP
 // conservative so ordinary exec calls (script preview, mkdir, sbatch) still
@@ -197,12 +199,12 @@ export class SftpPool {
       return cached.entries
     }
 
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
+    const openSshResult = await this.withOpenSsh(connectionId, async (openSsh) => {
       const entries = await OpenSshTransport.getInstance().ls(openSsh, remotePath)
       this.cache.set(cacheKey, { entries, timestamp: Date.now() })
       return entries
-    }
+    })
+    if (openSshResult.handled) return openSshResult.value
 
     return this.withSftp(connectionId, async (sftp) => {
       const list = await new Promise<SshFileEntry[]>((resolve, reject) => {
@@ -263,8 +265,8 @@ export class SftpPool {
   }
 
   async stat(connectionId: string, remotePath: string): Promise<FileStat> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) return OpenSshTransport.getInstance().stat(openSsh, remotePath)
+    const openSshResult = await this.withOpenSsh(connectionId, (openSsh) => OpenSshTransport.getInstance().stat(openSsh, remotePath))
+    if (openSshResult.handled) return openSshResult.value
 
     return this.withSftp(connectionId, async (sftp) => {
       const attrs = await new Promise<{ size: number; mtime: number; mode: number }>(
@@ -311,8 +313,8 @@ export class SftpPool {
     offset?: number,
     length?: number,
   ): Promise<Buffer> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) return OpenSshTransport.getInstance().readBuffer(openSsh, remotePath, offset, length)
+    const openSshResult = await this.withOpenSsh(connectionId, (openSsh) => OpenSshTransport.getInstance().readBuffer(openSsh, remotePath, offset, length))
+    if (openSshResult.handled) return openSshResult.value
 
     return this.withSftp(connectionId, async (sftp) => {
       return await new Promise<Buffer>((resolve, reject) => {
@@ -340,8 +342,8 @@ export class SftpPool {
     remotePath: string,
     lines: number,
   ): Promise<string> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) return OpenSshTransport.getInstance().head(openSsh, remotePath, lines)
+    const openSshResult = await this.withOpenSsh(connectionId, (openSsh) => OpenSshTransport.getInstance().head(openSsh, remotePath, lines))
+    if (openSshResult.handled) return openSshResult.value
 
     return this.withSftp(connectionId, async (sftp) => {
       const content = await new Promise<string>((resolve, reject) => {
@@ -368,12 +370,11 @@ export class SftpPool {
   }
 
   async mkdir(connectionId: string, remotePath: string): Promise<void> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
+    const openSshResult = await this.withOpenSsh(connectionId, async (openSsh) => {
       await OpenSshTransport.getInstance().mkdir(openSsh, remotePath)
       this.invalidateCache(connectionId, parentDir(remotePath))
-      return
-    }
+    })
+    if (openSshResult.handled) return openSshResult.value
 
     const sftp = await this.acquire(connectionId)
     try {
@@ -389,13 +390,12 @@ export class SftpPool {
     oldPath: string,
     newPath: string,
   ): Promise<void> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
+    const openSshResult = await this.withOpenSsh(connectionId, async (openSsh) => {
       await OpenSshTransport.getInstance().rename(openSsh, oldPath, newPath)
       this.invalidateCache(connectionId, parentDir(oldPath))
       this.invalidateCache(connectionId, parentDir(newPath))
-      return
-    }
+    })
+    if (openSshResult.handled) return openSshResult.value
 
     const sftp = await this.acquire(connectionId)
     try {
@@ -413,12 +413,11 @@ export class SftpPool {
   }
 
   async remove(connectionId: string, remotePath: string): Promise<void> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
+    const openSshResult = await this.withOpenSsh(connectionId, async (openSsh) => {
       await OpenSshTransport.getInstance().remove(openSsh, remotePath)
       this.invalidateCache(connectionId, parentDir(remotePath))
-      return
-    }
+    })
+    if (openSshResult.handled) return openSshResult.value
 
     const sftp = await this.acquire(connectionId)
     try {
@@ -502,12 +501,11 @@ export class SftpPool {
     remotePath: string,
     content: string,
   ): Promise<void> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
+    const openSshResult = await this.withOpenSsh(connectionId, async (openSsh) => {
       await OpenSshTransport.getInstance().write(openSsh, remotePath, content)
       this.invalidateCache(connectionId, parentDir(remotePath))
-      return
-    }
+    })
+    if (openSshResult.handled) return openSshResult.value
 
     const sftp = await this.acquire(connectionId)
     try {
@@ -524,12 +522,11 @@ export class SftpPool {
   }
 
   async upload(connectionId: string, localPath: string, remotePath: string, onProgress?: SftpProgressCallback): Promise<void> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
+    const openSshResult = await this.withOpenSsh(connectionId, async (openSsh) => {
       await OpenSshTransport.getInstance().upload(openSsh, localPath, remotePath, onProgress)
       this.invalidateCache(connectionId, parentDir(remotePath))
-      return
-    }
+    })
+    if (openSshResult.handled) return openSshResult.value
 
     const sftp = await this.acquire(connectionId)
     try {
@@ -555,11 +552,8 @@ export class SftpPool {
   }
 
   async download(connectionId: string, remotePath: string, localPath: string, onProgress?: SftpProgressCallback): Promise<void> {
-    const openSsh = SshManager.getInstance().getOpenSshConnection(connectionId)
-    if (openSsh) {
-      await OpenSshTransport.getInstance().download(openSsh, remotePath, localPath, onProgress)
-      return
-    }
+    const openSshResult = await this.withOpenSsh(connectionId, (openSsh) => OpenSshTransport.getInstance().download(openSsh, remotePath, localPath, onProgress))
+    if (openSshResult.handled) return openSshResult.value
 
     const sftp = await this.acquire(connectionId)
     try {
@@ -607,6 +601,24 @@ export class SftpPool {
         }
       })
     })
+  }
+
+  private async withOpenSsh<T>(
+    connectionId: string,
+    operation: (openSsh: OpenSshConnectionHandle) => Promise<T>,
+  ): Promise<OpenSshOperationResult<T>> {
+    const manager = SshManager.getInstance()
+    const openSsh = manager.getOpenSshConnection(connectionId)
+    if (!openSsh) return { handled: false }
+
+    try {
+      return { handled: true, value: await operation(openSsh) }
+    } catch (err) {
+      if (isOpenSshSessionInactiveError(err)) {
+        manager.markConnectionUnavailable(connectionId, 'OpenSSH ControlPersist session expired; reconnect manually before file operations continue.')
+      }
+      throw err
+    }
   }
 }
 

@@ -38,16 +38,10 @@ export interface FilePickMode {
 
 export type SettingsSection =
   | 'General'
-  | 'Interface'
-  | 'Appearance'
-  | 'Privacy'
-  | 'Setup'
-  | 'Run Checks'
-  | 'Execution'
+  | 'Run'
   | 'Paths'
   | 'Tools'
   | 'DNAnexus'
-  | 'Notifications'
   | 'Advanced'
 
 interface UIStore {

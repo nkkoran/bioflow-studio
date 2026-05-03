@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import { useDataPreviewStore } from '@/stores/dataPreviewStore'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
+import { useUIStore } from '@/stores/uiStore'
 import type { DelimiterOverride } from '@/stores/dataPreviewStore'
-import { headPreviewFile, readFileBase64, statFile } from '@/stores/fileStore'
+import { headPreviewFileForConnection, readFileBase64ForConnection, statFileForConnection } from '@/stores/fileStore'
 import { MAX_PREVIEW_BYTES } from '@/lib/filePreviewClassifier'
 import { Tabs } from '@/components/ui/Tabs'
-import { DataTable } from './DataTable'
+import { DataTable, getUsableFilterRules } from './DataTable'
 import { RawTextView } from './RawTextView'
 import { SavedViewsMenu } from './SavedViewsMenu'
+import { MenuSelect } from '@/components/ui/MenuSelect'
 import { detectDelimiter, parseTabularData, type Delimiter } from './DelimiterDetector'
-import { Table2, Loader2, AlertCircle, Clipboard, ClipboardCheck, ClipboardPaste } from 'lucide-react'
+import { AlertCircle, Clipboard, ClipboardCheck, ClipboardPaste, Table2 } from 'lucide-react'
 import { joinRemotePath, pathBasename, pathDirname } from '@/lib/remotePath'
 import { useDialogStore } from '@/stores/dialogStore'
 import { exportBugReport } from '@/lib/bugReport'
@@ -49,6 +51,7 @@ export function DataPreview() {
   const alertDialog = useDialogStore((s) => s.alert)
   const promptDialog = useDialogStore((s) => s.prompt)
   const confirmDialog = useDialogStore((s) => s.confirm)
+  const setBottomPanelHeight = useUIStore((s) => s.setBottomPanelHeight)
 
   useEffect(() => {
     if (!savedViewsLoaded) void loadSavedViews()
@@ -60,10 +63,12 @@ export function DataPreview() {
         loadingRef.current.add(tab.id)
         const tabId = tab.id
         const filePath = tab.filePath
+        const connectionId = connectionIdForPreviewTab(tab, activeConnectionId)
 
         ;(async () => {
           try {
-            const stat = await statFile(filePath)
+            if (!connectionId) throw new Error('No file connection is available for this preview.')
+            const stat = await statFileForConnection(connectionId, filePath)
             if (tab.mode === 'image' || tab.mode === 'pdf') {
               if (stat.size > MAX_PREVIEW_BYTES) {
                 setErrors((prev) => ({
@@ -73,7 +78,7 @@ export function DataPreview() {
                 setTabData(tabId, { headers: [], rows: [], delimiter: '\t', rawText: '' })
                 return
               }
-              const base64 = await readFileBase64(filePath, MAX_PREVIEW_BYTES)
+              const base64 = await readFileBase64ForConnection(connectionId, filePath, MAX_PREVIEW_BYTES)
               const mime = tab.mode === 'pdf' ? 'application/pdf' : mimeForImage(filePath)
               setMediaUrls((prev) => ({ ...prev, [tabId]: `data:${mime};base64,${base64}` }))
               setErrors((prev) => {
@@ -84,7 +89,7 @@ export function DataPreview() {
               return
             }
 
-            const content = await headPreviewFile(filePath, 500)
+            const content = await headPreviewFileForConnection(connectionId, filePath, 500)
             const truncated = stat.size > MAX_PREVIEW_BYTES
             if (content.length === 0) {
               setErrors((prev) => ({ ...prev, [tabId]: 'File is empty.' }))
@@ -154,7 +159,7 @@ export function DataPreview() {
         })()
       }
     }
-  }, [tabs, setTabData])
+  }, [activeConnectionId, tabs, setTabData])
 
   const pasteRawText = async () => {
     try {
@@ -177,9 +182,10 @@ export function DataPreview() {
 
   if (tabs.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted">
+      <div className="bioflow-empty-state animate-fade-up flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-text-muted">
         <Table2 size={32} strokeWidth={1.5} />
-        <span className="text-sm">Double-click a file to preview</span>
+        <span className="text-sm font-medium">No data loaded</span>
+        <span className="text-wrap text-xs">Open a result file from Jobs or drag a file here.</span>
         <button
           type="button"
           onClick={() => void pasteRawText()}
@@ -196,7 +202,7 @@ export function DataPreview() {
   const activeTab = tabs.find((t) => t.id === activeTabId)
   const activeViews = activeTab ? (savedViews[activeTab.filePath] ?? []) : []
   const selectedSavedViewId = activeTab ? activeSavedViewId[activeTab.filePath] : undefined
-  const activeFilters = activeTab ? (filters[activeTab.filePath] ?? []) : []
+  const activeFilters = activeTab ? getUsableFilterRules(filters[activeTab.filePath] ?? [], activeTab.data?.headers ?? []) : []
 
   const addFilteredToPipeline = () => {
     if (!activeTab || activeFilters.length === 0) return
@@ -235,17 +241,18 @@ export function DataPreview() {
   }
 
   const exportFilteredFile = async (filteredRows: string[][]) => {
-    if (!activeTab || !activeConnectionId) return
-    const outputFilename = `${pathBasename(activeTab.filePath).replace(/(\.[^.]+)?$/, '')}.filtered.tsv`
+    const connectionId = activeTab ? connectionIdForPreviewTab(activeTab, activeConnectionId) : null
+    if (!activeTab || !connectionId) return
+    const outputFilename = `${pathBasename(activeTab.filePath).replace(/(\.[^.]+)?$/, '')}.filtered.csv`
     const outputPath = joinRemotePath(pathDirname(activeTab.filePath), outputFilename)
     const content = [
-      activeTab.data?.headers.join('\t') ?? '',
-      ...filteredRows.map((row) => row.join('\t')),
+      activeTab.data?.headers.map(toCsvCell).join(',') ?? '',
+      ...filteredRows.map((row) => row.map(toCsvCell).join(',')),
     ].join('\n')
-    if (activeConnectionId === LOCAL_CONNECTION_ID) {
+    if (connectionId === LOCAL_CONNECTION_ID) {
       await window.api.local.write(outputPath, content)
     } else {
-      await window.api.sftp.write(activeConnectionId, outputPath, content)
+      await window.api.sftp.write(connectionId, outputPath, content)
     }
     await alertDialog({
       title: 'Filtered file saved',
@@ -269,45 +276,50 @@ export function DataPreview() {
       />
 
       {activeTab && !activeTab.loading && activeTab.data?.rawText !== undefined && (
-        <div className="flex items-center gap-2 px-3 py-1.5 shadow-sm">
+        <div className="flex min-h-9 flex-wrap items-center gap-2 px-3 py-1.5 shadow-sm">
           <button
+            type="button"
             className={`rounded px-2 py-0.5 text-[11px] transition-all duration-150 ${
               activeTab.mode === 'text'
                 ? 'bg-accent/10 text-text-primary shadow-sm'
                 : 'text-text-muted hover:bg-bg-hover hover:text-text-primary'
             }`}
-            onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'text')}
+            onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'text', { connectionId: activeTab.connectionId })}
           >
             Raw text
           </button>
           <button
+            type="button"
             className={`rounded px-2 py-0.5 text-[11px] transition-all duration-150 ${
               activeTab.mode === 'tabular'
                 ? 'bg-accent/10 text-text-primary shadow-sm'
                 : 'text-text-muted hover:bg-bg-hover hover:text-text-primary'
             }`}
-            onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'tabular')}
+            onClick={() => useDataPreviewStore.getState().openFile(activeTab.filePath, activeTab.fileName, 'tabular', { connectionId: activeTab.connectionId })}
           >
             Table
           </button>
           {activeTab.mode === 'tabular' && (
             <>
-              <label className="ml-1 flex items-center gap-1 text-[11px] text-text-muted">
-                Delimiter
-                <select
+              <div className="ml-1 flex items-center gap-1 text-[11px] text-text-muted">
+                <span>Delimiter</span>
+                <MenuSelect
                   value={delimiterOverride[activeTab.filePath] ?? 'auto'}
-                  onChange={(e) => setDelimiterOverride(activeTab.filePath, e.target.value as DelimiterOverride)}
-                  className="bioflow-field h-6 rounded px-1.5 text-[11px] text-text-primary outline-none"
-                  title="Override the delimiter used to parse this file"
-                >
-                  <option value="auto">Auto</option>
-                  <option value={'\t'}>Tab</option>
-                  <option value=",">Comma</option>
-                  <option value=" ">Space</option>
-                  <option value=";">Semicolon</option>
-                  <option value="|">Pipe</option>
-                </select>
-              </label>
+                  onChange={(value) => setDelimiterOverride(activeTab.filePath, value as DelimiterOverride)}
+                  options={[
+                    { value: 'auto', label: 'Auto' },
+                    { value: '\t', label: 'Tab' },
+                    { value: ',', label: 'Comma' },
+                    { value: ' ', label: 'Space' },
+                    { value: ';', label: 'Semicolon' },
+                    { value: '|', label: 'Pipe' },
+                  ]}
+                  placeholder="Auto"
+                  buttonClassName="h-6 text-[11px]"
+                  className="w-24"
+                  menuClassName="w-32"
+                />
+              </div>
               <SavedViewsMenu
                 views={activeViews}
                 activeViewId={selectedSavedViewId}
@@ -393,10 +405,8 @@ export function DataPreview() {
       <div className="flex-1 min-h-0">
         {activeTab?.loading && (
           <div className="flex h-full flex-col gap-2 p-4 text-text-muted">
-            <div className="flex items-center gap-2 text-xs">
-              <Loader2 size={14} className="animate-spin" />
-              Loading preview
-            </div>
+            <div className="animate-shimmer h-8 rounded-md" />
+            <div className="animate-shimmer h-8 rounded-md" />
             <div className="animate-shimmer h-8 rounded-md" />
             <div className="animate-shimmer h-8 rounded-md" />
             <div className="animate-shimmer h-8 rounded-md" />
@@ -410,6 +420,7 @@ export function DataPreview() {
             rows={activeTab.data.rows}
             onAddFilteredToPipeline={addFilteredToPipeline}
             onExportFilteredFile={(nextRows) => void exportFilteredFile(nextRows)}
+            onExpandPanel={() => setBottomPanelHeight(Math.max(520, Math.round(window.innerHeight * 0.72)))}
           />
         )}
 
@@ -437,6 +448,25 @@ export function DataPreview() {
       </div>
     </div>
   )
+}
+
+function toCsvCell(value: string): string {
+  if (!/[",\n\r]/.test(value)) return value
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function connectionIdForPreviewTab(tab: { filePath: string; connectionId?: string }, activeConnectionId: string | null): string | null {
+  if (tab.connectionId) return tab.connectionId
+  if (looksLikeLocalAbsolutePath(tab.filePath)) return LOCAL_CONNECTION_ID
+  return activeConnectionId
+}
+
+function looksLikeLocalAbsolutePath(filePath: string): boolean {
+  return filePath.startsWith('/Users/')
+    || filePath.startsWith('/Volumes/')
+    || filePath.startsWith('/private/')
+    || filePath.startsWith('/var/folders/')
+    || /^[A-Za-z]:[\\/]/.test(filePath)
 }
 
 function mimeForImage(path: string): string {

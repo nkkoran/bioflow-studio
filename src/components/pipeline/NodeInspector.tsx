@@ -2488,16 +2488,16 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
 
       {/* Split by axis (enables per-axis SLURM arrays downstream) */}
       <div className="border-t border-border pt-3 mt-1">
-        <div className="flex items-center justify-between mb-2">
-          <div>
-            <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium">
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <h4 className="text-xs uppercase tracking-wide text-text-muted font-medium">
               Split into per-item files
             </h4>
-            <p className="mt-0.5 text-[10px] text-text-muted">
+            <p className="text-wrap mt-0.5 text-xs text-text-muted">
               Use this when one logical input is really many files, such as one genotype file per chromosome.
             </p>
           </div>
-          <label className="flex items-center gap-1.5 cursor-pointer">
+          <label className="flex shrink-0 items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
               checked={!!split}
@@ -2512,7 +2512,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               }}
               className="accent-accent"
             />
-            <span className="text-[11px] text-text-secondary">Enable</span>
+            <span className="text-xs text-text-secondary">Enable</span>
           </label>
         </div>
 

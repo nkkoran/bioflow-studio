@@ -316,7 +316,7 @@ export function WorkspaceSwitcher() {
           </div>
           <details className="col-span-2 rounded-md bg-bg-tertiary/40 p-3 shadow-inner">
             <summary className="cursor-pointer text-xs font-medium text-text-secondary">Advanced tool paths</summary>
-            <div className="mt-3 grid grid-cols-2 gap-3">
+            <div className="mt-3 grid grid-cols-1 gap-3">
               <Input
                 label="Tools root"
                 value={form.toolsRoot}

@@ -102,9 +102,13 @@ export async function readFileBase64(filePath: string, maxBytes: number): Promis
   const { activeConnectionId } = useConnectionStore.getState()
   if (!activeConnectionId) throw new Error('Not connected')
 
-  return activeConnectionId === LOCAL_CONNECTION_ID
+  return readFileBase64ForConnection(activeConnectionId, filePath, maxBytes)
+}
+
+export async function readFileBase64ForConnection(connectionId: string, filePath: string, maxBytes: number): Promise<string> {
+  return connectionId === LOCAL_CONNECTION_ID
     ? window.api.local.readBase64(filePath, 0, maxBytes)
-    : window.api.sftp.readBase64(activeConnectionId, filePath, 0, maxBytes)
+    : window.api.sftp.readBase64(connectionId, filePath, 0, maxBytes)
 }
 
 function shellQuote(value: string): string {

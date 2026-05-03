@@ -1,19 +1,44 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { HelpCircle } from 'lucide-react'
 import { getHelpContent } from '@/lib/helpContent'
 
 export function HelpButton({ id }: { id: string }) {
   const [open, setOpen] = useState(false)
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
   const ref = useRef<HTMLSpanElement>(null)
+  const popoverRef = useRef<HTMLSpanElement>(null)
   const content = getHelpContent(id)
 
   useEffect(() => {
     if (!open) return
     const onDown = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false)
+      const target = event.target as Node
+      if (!ref.current?.contains(target) && !popoverRef.current?.contains(target)) setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const updatePosition = () => {
+      const rect = ref.current?.getBoundingClientRect()
+      if (!rect) return
+      const width = 256
+      const padding = 8
+      setPosition({
+        left: Math.max(padding, Math.min(window.innerWidth - width - padding, rect.right - width)),
+        top: rect.bottom + 6,
+      })
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
   }, [open])
 
   return (
@@ -27,8 +52,12 @@ export function HelpButton({ id }: { id: string }) {
       >
         <HelpCircle size={13} />
       </button>
-      {open && (
-        <span className="absolute right-0 top-6 z-50 w-64 rounded-md border border-border bg-bg-secondary p-3 text-left shadow-xl">
+      {open && position && typeof document !== 'undefined' && createPortal(
+        <span
+          ref={popoverRef}
+          className="bioflow-help-popover fixed z-[1200] w-64 rounded-md border border-border bg-bg-secondary p-3 text-left shadow-xl"
+          style={position}
+        >
           <span className="block text-xs font-semibold text-text-primary">{content.title}</span>
           <span className="mt-1 block text-[11px] leading-relaxed text-text-secondary">{content.body}</span>
           {content.example && (
@@ -36,7 +65,8 @@ export function HelpButton({ id }: { id: string }) {
               {content.example}
             </span>
           )}
-        </span>
+        </span>,
+        document.body,
       )}
     </span>
   )

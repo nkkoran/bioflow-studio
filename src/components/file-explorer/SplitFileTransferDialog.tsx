@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronUp, Copy, Loader2, MoveRight, PanelsLeftRight, RefreshCw, Upload } from 'lucide-react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
+import { MenuSelect } from '@/components/ui/MenuSelect'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDialogStore } from '@/stores/dialogStore'
 import type { RemoteFileEntry } from '@/types/files'
@@ -250,17 +251,21 @@ function FilePane({
       }}
     >
       <div className="flex items-center gap-2 border-b border-border-light px-2 py-2">
-        <select
+        <MenuSelect<PaneOrigin>
           value={pane.origin}
-          onChange={(event) => {
-            const nextOrigin = event.target.value as PaneOrigin
+          onChange={(value) => {
+            const nextOrigin = value || 'local'
             onPatch({ origin: nextOrigin, cwd: homeByOrigin[nextOrigin] || '/', entries: [], selected: null, nonce: pane.nonce + 1 })
           }}
-          className="bioflow-field h-7 rounded-md border border-border-light bg-bg-tertiary px-2 text-xs text-text-primary"
-        >
-          <option value="local">Local</option>
-          <option value="ssh">Server</option>
-        </select>
+          options={[
+            { value: 'local', label: 'Local' },
+            { value: 'ssh', label: 'Server' },
+          ]}
+          ariaLabel="Choose transfer side"
+          className="w-24 shrink-0"
+          buttonClassName="h-7 text-xs"
+          menuClassName="w-28"
+        />
         <input
           value={pane.cwd}
           disabled={disabled}

@@ -425,33 +425,43 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       <div className="flex flex-col gap-3">
         {savedConnections.length > 0 && (
           <div className="rounded-md bg-bg-secondary/80 p-3 shadow-sm">
-            <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-text-muted">
-              Saved preset
-            </label>
-            <select
-              value={activeSavedName}
-              onChange={(event) => {
-                const next = savedConnections.find((conn) => conn.name === event.target.value)
-                if (next) {
-                  fillFromSaved(next)
-                } else {
-                  setForm(initialFormData)
-                }
-              }}
-              className="bioflow-field h-8 w-full rounded-md border border-border-light bg-bg-tertiary/90 px-2.5 text-sm text-text-primary shadow-sm outline-none transition-all duration-150 ease-out focus:border-accent focus:ring-2 focus:ring-accent/25"
-            >
-              <option value="">New connection</option>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-text-muted">
+              Saved presets
+            </div>
+            <div className="grid max-h-40 grid-cols-1 gap-1.5 overflow-y-auto sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setForm(initialFormData)}
+                className={classNames(
+                  'interactive-row flex min-h-14 min-w-0 flex-col items-start justify-center px-3 py-2 text-left shadow-sm',
+                  !activeSavedName ? 'bg-accent/10 text-text-primary' : 'bg-bg-tertiary/70 text-text-secondary hover:text-text-primary',
+                )}
+              >
+                <span className="text-nowrap text-xs font-medium">New connection</span>
+                <span className="text-nowrap mt-0.5 text-xs text-text-muted">Start blank</span>
+              </button>
               {savedConnections.map((conn) => (
-                <option key={conn.name} value={conn.name}>
-                  {conn.name} · {conn.username}@{conn.host}
-                </option>
+                <button
+                  key={conn.name}
+                  type="button"
+                  onClick={() => fillFromSaved(conn)}
+                  className={classNames(
+                    'interactive-row flex min-h-14 min-w-0 flex-col items-start justify-center px-3 py-2 text-left shadow-sm',
+                    activeSavedName === conn.name ? 'bg-accent/10 text-text-primary' : 'bg-bg-tertiary/70 text-text-secondary hover:text-text-primary',
+                  )}
+                >
+                  <span className="text-nowrap max-w-full text-xs font-medium">{conn.name}</span>
+                  <span className="text-nowrap mt-0.5 max-w-full font-mono text-xs text-text-muted" title={`${conn.username}@${conn.host}`}>
+                    {conn.username}@{conn.host}
+                  </span>
+                </button>
               ))}
-            </select>
+            </div>
           </div>
         )}
 
         <div className="rounded-md bg-bg-secondary/80 p-2 shadow-sm">
-          <div className="mb-2 px-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">
+          <div className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
             Authentication
           </div>
           <div className="grid grid-cols-3 gap-1 rounded-md bg-bg-primary p-1 shadow-inner">
@@ -568,7 +578,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
             />
             {form.authMethod === 'key' && (
               <div className="rounded-md bg-bg-tertiary/60 px-3 py-2 shadow-inner">
-                <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Key generation</div>
+                <div className="mb-2 text-xs uppercase tracking-wide text-text-muted">Key generation</div>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -656,7 +666,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
               <textarea
                 readOnly
                 value={setupResult.publicKey}
-                className="mt-2 h-20 w-full resize-none rounded border border-border bg-bg-primary p-2 font-mono text-[10px] text-text-secondary"
+                className="mt-2 h-20 w-full resize-none rounded border border-border bg-bg-primary p-2 font-mono text-xs text-text-secondary"
                 aria-label="Generated SSH public key"
               />
             ) : (
@@ -691,12 +701,12 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
           <div className="rounded-md bg-bg-secondary px-3 py-2 shadow-sm">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="text-xs font-medium text-text-primary">Connection trace</div>
-              <div className="text-[10px] text-text-muted">{connectionEvents.length} events</div>
+              <div className="text-xs text-text-muted">{connectionEvents.length} events</div>
             </div>
             {connectionEvents.length === 0 ? (
               <div className="text-[11px] text-text-muted">Starting SSH connection...</div>
             ) : (
-              <div className="flex max-h-36 flex-col gap-1 overflow-y-auto font-mono text-[10px]">
+              <div className="flex max-h-36 flex-col gap-1 overflow-y-auto font-mono text-xs">
                 {connectionEvents.map((event, index) => (
                   <div key={`${event.at}-${index}`} className="grid grid-cols-[4.5rem_1fr] gap-2 rounded border border-border/70 bg-bg-primary px-2 py-1">
                     <span className={traceStageClass(event.stage)}>{event.stage}</span>

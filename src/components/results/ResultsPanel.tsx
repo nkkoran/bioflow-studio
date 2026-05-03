@@ -170,7 +170,9 @@ export function ResultsPanel() {
   const previewOutput = async (path: string, origin: FileOrigin) => {
     const ready = await activateOutputOrigin(origin, path)
     if (!ready) return
-    openFile(path, pathBasename(path), classifyPreview(path))
+    openFile(path, pathBasename(path), classifyPreview(path), {
+      connectionId: origin === 'local' ? LOCAL_CONNECTION_ID : activeRunConnectionId ?? activeRun?.connectionId,
+    })
   }
 
   const openOutputFolder = async (path: string, origin: FileOrigin) => {

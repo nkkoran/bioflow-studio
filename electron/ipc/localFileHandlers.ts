@@ -49,13 +49,10 @@ export function registerLocalFileHandlers(): void {
 
     const entries: RemoteFileEntry[] = []
     for (const item of items) {
-      // Skip hidden files by default (can be toggled later)
-      if (item.name.startsWith('.')) continue
-
       const fullPath = join(resolved, item.name)
       try {
         const stats = statSync(fullPath)
-        const isDir = item.isDirectory()
+        const isDir = stats.isDirectory()
         const ext = !isDir ? extname(item.name).slice(1).toLowerCase() : ''
 
         entries.push({
@@ -131,18 +128,18 @@ export function registerLocalFileHandlers(): void {
       }
       const dirs: string[] = []
       for (const item of items) {
-        if (item.name.startsWith('.')) continue
         const fullPath = join(resolvePath(dirPath), item.name)
         try {
           const stats = statSync(fullPath)
+          const isDir = stats.isDirectory()
           const entry: RemoteFileEntry = {
             name: item.name,
             path: fullPath,
-            isDirectory: item.isDirectory(),
+            isDirectory: isDir,
             size: stats.size,
             modified: stats.mtimeMs,
             permissions: modeToPermissions(stats.mode),
-            extension: item.isDirectory() ? '' : extname(item.name).slice(1).toLowerCase(),
+            extension: isDir ? '' : extname(item.name).slice(1).toLowerCase(),
           }
           if (entry.name.toLowerCase().includes(needle) || entry.path.toLowerCase().includes(needle)) {
             results.push(entry)

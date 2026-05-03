@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { TransformFilterRule } from '@/types/pipeline'
+import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 
 export type PreviewMode = 'tabular' | 'text' | 'binary' | 'image' | 'pdf'
 export type DelimiterOverride = 'auto' | '\t' | ',' | ' ' | ';' | '|'
@@ -17,6 +18,7 @@ interface DataPreviewTab {
   filePath: string
   fileName: string
   mode: PreviewMode
+  connectionId?: string
   data: DataPreviewData | null
   loading: boolean
   savedView?: boolean
@@ -48,7 +50,7 @@ interface DataPreviewStore {
   schemas: Record<string, { columns: string[]; delimiter: string; fetchedAt: number; modified?: number }>
 
   loadSavedViews: () => Promise<void>
-  openFile: (filePath: string, fileName: string, mode?: PreviewMode) => void
+  openFile: (filePath: string, fileName: string, mode?: PreviewMode, opts?: { connectionId?: string }) => void
   openText: (fileName: string, text: string) => void
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
@@ -96,16 +98,19 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
     })
   },
 
-  openFile: (filePath, fileName, mode = 'tabular') => {
+  openFile: (filePath, fileName, mode = 'tabular', opts = {}) => {
+    const connectionId = opts.connectionId ?? inferPreviewConnectionId(filePath)
     set((state) => {
       // If already open, just activate it
-      const existing = state.tabs.find((t) => t.filePath === filePath)
+      const existing = state.tabs.find((t) => t.filePath === filePath && (connectionId === undefined || t.connectionId === connectionId))
       if (existing) {
         return {
           activeTabId: existing.id,
           tabs: state.tabs.map((t) =>
             t.id === existing.id && t.mode !== mode
-              ? { ...t, mode, loading: true, data: null }
+              ? { ...t, mode, connectionId, loading: true, data: null }
+              : t.id === existing.id && connectionId !== t.connectionId
+                ? { ...t, connectionId }
               : t,
           ),
         }
@@ -117,7 +122,7 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
       const { [filePath]: _sort, ...sort } = state.sort
       const { [filePath]: _activeSavedViewId, ...activeSavedViewId } = state.activeSavedViewId
       return {
-        tabs: [...state.tabs, { id, filePath, fileName, mode, data: null, loading: true }],
+        tabs: [...state.tabs, { id, filePath, fileName, mode, connectionId, data: null, loading: true }],
         activeTabId: id,
         filters,
         draftFilters,
@@ -375,3 +380,17 @@ export const useDataPreviewStore = create<DataPreviewStore>((set, get) => ({
     scrollOffset: {},
   }),
 }))
+
+function inferPreviewConnectionId(filePath: string): string | undefined {
+  if (filePath.startsWith('clipboard://')) return undefined
+  if (looksLikeLocalAbsolutePath(filePath)) return LOCAL_CONNECTION_ID
+  return useConnectionStore.getState().activeConnectionId ?? undefined
+}
+
+function looksLikeLocalAbsolutePath(filePath: string): boolean {
+  return filePath.startsWith('/Users/')
+    || filePath.startsWith('/Volumes/')
+    || filePath.startsWith('/private/')
+    || filePath.startsWith('/var/folders/')
+    || /^[A-Za-z]:[\\/]/.test(filePath)
+}
