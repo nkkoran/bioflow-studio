@@ -325,7 +325,7 @@ function ColumnOptionEditor(props: {
   const suggestionList = focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && suggestionRect && typeof document !== 'undefined'
     ? createPortal(
         <div
-          className="bioflow-suggestion-popover surface-popover fixed z-[1300] max-h-56 overflow-y-auto rounded-md py-1"
+          className="bioflow-suggestion-popover bioflow-inspector-popover surface-popover fixed z-[1300] max-h-56 overflow-y-auto rounded-md py-1"
           style={{
             top: suggestionRect.top,
             left: suggestionRect.left,
@@ -429,7 +429,7 @@ function ColumnOptionEditor(props: {
                 return
               }
             }}
-            className="bioflow-field h-8 w-full rounded-md px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors"
+            className="bioflow-field h-8 w-full rounded-md px-3 text-xs text-text-primary placeholder-text-muted outline-none transition-colors"
           />
           {suggestionList}
         </div>
@@ -484,7 +484,7 @@ function optionEditor(props: {
       <select
         value={optionValue(option)}
         onChange={(event) => onPatch({ value: event.target.value })}
-        className="bioflow-field h-8 rounded-md px-2 text-sm text-text-primary outline-none"
+        className="bioflow-field h-8 rounded-md px-2 text-xs text-text-primary outline-none"
       >
         <option value="">-- select --</option>
         {def.options?.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -499,7 +499,7 @@ function optionEditor(props: {
           <select
             value={optionValue(option)}
             onChange={(event) => onPatch({ value: event.target.value })}
-            className="bioflow-field h-8 rounded-md px-2 text-sm text-text-primary outline-none"
+            className="bioflow-field h-8 rounded-md px-2 text-xs text-text-primary outline-none"
           >
             <option value="">-- select --</option>
             {def.options.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -756,11 +756,11 @@ export function AnalysisOptionsPanel({
             onChange={(event) => setSearch(event.target.value)}
           />
         </div>
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={() => setCustomDialogOpen(true)}>
+        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setCustomDialogOpen(true)}>
           <Plus size={13} />
           Custom
         </Button>
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={() => setValidationOpen((value) => !value)}>
+        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setValidationOpen((value) => !value)}>
           <ListChecks size={13} />
           Validate settings
         </Button>

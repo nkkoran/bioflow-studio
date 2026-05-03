@@ -7,7 +7,7 @@
  * port they attach to.
  */
 import { memo, useMemo } from 'react'
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { Position, type NodeProps } from '@xyflow/react'
 import { classNames } from '@/lib/utils'
 import { getTool } from '@/lib/toolRegistry'
 import type { ToolNodeData } from '@/types/pipeline'
@@ -21,6 +21,7 @@ import { ToolHoverCard } from '@/components/pipeline/ToolHoverCard'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { categoryTone, nodeChromeStyle } from './nodeTones'
+import { PortHandle } from './PortHandle'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -125,7 +126,6 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
       <div
         className={classNames(
           'animate-fade-up relative min-w-[260px] max-w-[320px] rounded-lg border bg-bg-secondary/95 transition-all duration-150 ease-out',
-          selected && 'translate-y-[-2px]',
           successAnimating && 'animate-success',
         )}
         style={nodeChromeStyle(tone, Boolean(selected))}
@@ -179,26 +179,13 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
                 missingRequired ? 'bg-error/5 ring-1 ring-error/25' : '',
               )}
             >
-              <Handle
+              <PortHandle
+                nodeId={id}
                 type="target"
                 position={Position.Left}
                 id={port.id}
-                className="bioflow-port-handle"
-                data-port-node={id}
-                data-port-id={port.id}
-                data-port-type="target"
-                style={{
-                  position: 'absolute',
-                  left: -6,
-                  right: 'auto',
-                  top: 8,
-                  width: 12,
-                  height: 12,
-                  borderRadius: '50%',
-                  transform: 'none',
-                  background: connected ? 'var(--color-accent)' : 'var(--color-bg-secondary)',
-                  border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-accent)',
-                }}
+                tone="input"
+                connected={connected}
               />
               <span
                 className={classNames('min-w-0 flex-1 truncate', connected ? 'text-text-primary' : 'text-text-secondary')}
@@ -276,26 +263,13 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
               <span className={classNames('min-w-0 flex-1 truncate text-right', connected ? 'text-text-primary' : 'text-text-secondary')}>
                 {port.label}
               </span>
-              <Handle
+              <PortHandle
+                nodeId={id}
                 type="source"
                 position={Position.Right}
                 id={port.id}
-                className="bioflow-port-handle"
-                data-port-node={id}
-                data-port-id={port.id}
-                data-port-type="source"
-                style={{
-                  position: 'absolute',
-                  left: 'auto',
-                  right: -6,
-                  top: 8,
-                  width: 12,
-                  height: 12,
-                  borderRadius: '50%',
-                  transform: 'none',
-                  background: connected ? 'var(--color-success)' : 'var(--color-bg-secondary)',
-                  border: connected ? '2px solid var(--color-bg-secondary)' : '2px solid var(--color-success)',
-                }}
+                tone="output"
+                connected={connected}
               />
             </div>
           )

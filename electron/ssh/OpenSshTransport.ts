@@ -80,7 +80,13 @@ export class OpenSshTransport {
     }
 
     debug('connect', `No OpenSSH master socket found for ${config.host}; starting one`)
-    const start = await this.startMaster(config, baseArgs, debug)
+    await clearStaleControlPath(controlPath, debug)
+    let start = await this.startMaster(config, baseArgs, debug)
+    if (start.exitCode !== 0 && looksLikeStaleControlSocket(start)) {
+      debug('connect', 'OpenSSH reported a stale/broken ControlPersist socket; clearing it and retrying once')
+      await clearStaleControlPath(controlPath, debug)
+      start = await this.startMaster(config, baseArgs, debug)
+    }
     if (start.exitCode !== 0) {
       throw new Error(formatOpenSshFailure('Could not start OpenSSH ControlPersist master', start))
     }
@@ -900,6 +906,21 @@ function formatOpenSshFailure(action: string, result: SpawnResult): string {
   const stderr = result.stderr.toString('utf8').trim()
   const stdout = result.stdout.toString('utf8').trim()
   return `${action} failed via OpenSSH ControlPersist (exit ${result.exitCode}). ${stderr || stdout || 'No error output'}`
+}
+
+async function clearStaleControlPath(controlPath: string, debug?: OpenSshDebugSink): Promise<void> {
+  if (!existsSync(controlPath)) return
+  try {
+    await fs.rm(controlPath, { force: true })
+    debug?.('connect', 'Cleared stale OpenSSH ControlPersist socket before starting a new master')
+  } catch (err) {
+    debug?.('error', `Could not clear stale OpenSSH ControlPersist socket: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+function looksLikeStaleControlSocket(result: SpawnResult): boolean {
+  const output = `${result.stderr.toString('utf8')}\n${result.stdout.toString('utf8')}`
+  return /Control socket|ControlPath|mux_|Broken pipe|stale|already exists|Connection refused|No such file/i.test(output)
 }
 
 export function isOpenSshSessionInactiveError(err: unknown): boolean {

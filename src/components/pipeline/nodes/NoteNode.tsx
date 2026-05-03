@@ -15,7 +15,7 @@ function NoteNodeInner({ data, selected }: NodeProps) {
     <div
       className={classNames(
         'animate-fade-up rounded-lg px-3 py-2 min-w-[160px] max-w-[320px] text-xs transition-all duration-150 ease-out',
-        selected && 'translate-y-[-2px] ring-2 ring-accent/45',
+        selected && 'ring-2 ring-accent/45',
       )}
       style={{
         background: (nodeData.color ?? '#fbbf24') + '33', // 20% opacity

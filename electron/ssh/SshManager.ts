@@ -861,12 +861,7 @@ export class SshManager {
     conn.reconnecting = true
     try {
       if (conn.transport === 'openssh-controlpersist' && conn.openSshAlias && conn.openSshControlPath) {
-        await OpenSshTransport.getInstance().disconnect({
-          connectionId: id,
-          config: conn.config,
-          alias: conn.openSshAlias,
-          controlPath: conn.openSshControlPath,
-        })
+        this.emitDebug(id, 'connect', 'Detached BioFlow from the OpenSSH ControlPersist session; the master socket remains available for quick reconnect.')
       } else {
         conn.client?.end()
       }

@@ -6,12 +6,13 @@
  * or plain cat).
  */
 import { memo } from 'react'
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { Position, type NodeProps } from '@xyflow/react'
 import { classNames } from '@/lib/utils'
 import { GitMerge, CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import type { MergeNodeData, ToolNodeData } from '@/types/pipeline'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
+import { PortHandle } from './PortHandle'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -46,7 +47,6 @@ function MergeNodeInner({ id, data, selected }: NodeProps) {
     <div
       className={classNames(
         'animate-fade-up relative min-w-[200px] max-w-[320px] rounded-lg border bg-bg-secondary/95 transition-all duration-150 ease-out',
-        selected && 'translate-y-[-2px]',
         successAnimating && 'animate-success',
       )}
       style={nodeChromeStyle(tone, Boolean(selected))}
@@ -76,49 +76,22 @@ function MergeNodeInner({ id, data, selected }: NodeProps) {
       </div>
 
       {handles.map((handle, index) => (
-        <Handle
+        <PortHandle
           key={handle.id}
+          nodeId={id}
           type="target"
           position={Position.Left}
           id={handle.id}
-          className="bioflow-port-handle"
-          data-port-node={id}
-          data-port-id={handle.id}
-          data-port-type="target"
-          style={{
-            position: 'absolute',
-            left: -6,
-            right: 'auto',
-            top: `calc(${((index + 1) / (handles.length + 1)) * 100}% - 6px)`,
-            width: 12,
-            height: 12,
-            borderRadius: '50%',
-            transform: 'none',
-            background: 'var(--color-accent)',
-            border: '2px solid var(--color-bg-secondary)',
-          }}
+          tone="input"
+          top={`${((index + 1) / (handles.length + 1)) * 100}%`}
         />
       ))}
-      <Handle
+      <PortHandle
+        nodeId={id}
         type="source"
         position={Position.Right}
         id="output"
-        className="bioflow-port-handle"
-        data-port-node={id}
-        data-port-id="output"
-        data-port-type="source"
-        style={{
-          position: 'absolute',
-          left: 'auto',
-          right: -6,
-          top: 'calc(50% - 6px)',
-          width: 12,
-          height: 12,
-          borderRadius: '50%',
-          transform: 'none',
-          background: 'var(--color-success)',
-          border: '2px solid var(--color-bg-secondary)',
-        }}
+        tone="output"
       />
 
       {nodeData.error && (

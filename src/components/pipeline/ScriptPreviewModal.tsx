@@ -83,7 +83,7 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
       bodyClassName="bioflow-workbench-body"
     >
       <div className="bioflow-script-preview flex min-h-0 flex-1">
-        <div className="scroll-region w-72 shrink-0 border-r border-border bg-bg-secondary/40">
+        <div className="bioflow-script-list scroll-region shrink-0 border-r border-border bg-bg-secondary/40">
           {scripts.length === 0 ? (
             <div className="p-4 text-xs text-text-muted">No runnable nodes.</div>
           ) : (
@@ -133,13 +133,32 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
 
           {selectedScript ? (
             <div className="scroll-region min-h-0 flex-1 p-4">
-              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]">
-                <div className="space-y-3">
+              <div className="grid min-h-full gap-3 lg:grid-cols-[minmax(0,1fr)_20rem]">
+                <section className="bioflow-script-card flex min-h-[32rem] min-w-0 flex-col rounded-md border border-border bg-bg-secondary p-3">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-text-muted">Raw Slurm script</div>
+                      <div className="mt-0.5 text-[11px] text-text-muted">Exact script BioFlow will submit for this node.</div>
+                    </div>
+                  </div>
+                  <pre className="bioflow-script-raw min-h-0 flex-1 overflow-auto rounded-md border border-border-light bg-bg-primary p-3 font-mono text-[11px] leading-relaxed text-slate-100">{selectedScript.script}</pre>
+                </section>
+
+                <aside className="space-y-3">
                   <section className="bioflow-script-card rounded-md border border-border bg-bg-secondary p-3">
                     <div className="text-[10px] uppercase tracking-wide text-text-muted">Summary</div>
                     <p className="bioflow-body-copy mt-1 text-sm leading-5 text-text-primary">
                       {selectedScript.summary || 'No summary available.'}
                     </p>
+                  </section>
+
+                  <section className="bioflow-script-card rounded-md border border-border bg-bg-secondary p-3">
+                    <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Execution</div>
+                    <div className="space-y-2">
+                      {executionRows.map((row) => (
+                        <DetailRowView key={row.label} row={row} />
+                      ))}
+                    </div>
                   </section>
 
                   <section className="bioflow-script-card rounded-md border border-border bg-bg-secondary p-3">
@@ -157,24 +176,6 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
                     )}
                   </section>
 
-                  <details className="bioflow-script-card rounded-md border border-border bg-bg-secondary p-3">
-                    <summary className="cursor-pointer text-xs font-medium text-text-primary">Raw Slurm script</summary>
-                    <pre className="mt-3 max-h-80 overflow-auto rounded-md border border-border-light bg-bg-primary p-3 font-mono text-[11px] leading-relaxed text-slate-100">
-                      {selectedScript.script}
-                    </pre>
-                  </details>
-                </div>
-
-                <aside className="space-y-3">
-                  <section className="bioflow-script-card rounded-md border border-border bg-bg-secondary p-3">
-                    <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Execution</div>
-                    <div className="space-y-2">
-                      {executionRows.map((row) => (
-                        <DetailRowView key={row.label} row={row} />
-                      ))}
-                    </div>
-                  </section>
-
                   <section className="bioflow-script-card rounded-md border border-border bg-bg-secondary p-3">
                     <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Outputs</div>
                     <div className="space-y-2">
@@ -182,9 +183,9 @@ export function ScriptPreviewModal({ scripts, onClose }: Props) {
                         <div
                           key={`${path}-${index}`}
                           title={path}
-                          className="bioflow-script-value rounded border border-border-light bg-bg-tertiary p-2 font-mono text-[10px] leading-4 text-text-primary"
+                          className="bioflow-script-value break-all rounded border border-border-light bg-bg-tertiary p-2 font-mono text-[10px] leading-4 text-text-primary"
                         >
-                          {compactPath(path)}
+                          {path}
                         </div>
                       ))}
                     </div>
@@ -214,15 +215,11 @@ function CommandCard({ command }: { command: CommandSummary }) {
           ))}
         </div>
       ) : (
-        <pre className="mt-2 rounded bg-bg-primary p-2 font-mono text-[10px] leading-relaxed text-text-primary">
-          {command.raw}
-        </pre>
+        <pre className="mt-2 rounded bg-bg-primary p-2 font-mono text-[10px] leading-relaxed text-text-primary">{command.raw}</pre>
       )}
       <details className="mt-2">
         <summary className="cursor-pointer text-[10px] text-text-muted">Raw command</summary>
-        <pre className="mt-1 rounded bg-bg-primary p-2 font-mono text-[10px] leading-relaxed text-text-primary">
-          {command.raw}
-        </pre>
+        <pre className="mt-1 rounded bg-bg-primary p-2 font-mono text-[10px] leading-relaxed text-text-primary">{command.raw}</pre>
       </details>
     </div>
   )
@@ -230,9 +227,9 @@ function CommandCard({ command }: { command: CommandSummary }) {
 
 function DetailRowView({ row }: { row: DetailRow }) {
   return (
-    <div className="bioflow-script-row grid grid-cols-[6.5rem_minmax(0,1fr)] gap-2 text-xs">
+    <div className="bioflow-script-row grid grid-cols-[6.25rem_minmax(0,1fr)] gap-2 text-xs">
       <div className="text-text-muted">{row.label}</div>
-      <div className="bioflow-script-value break-words font-mono text-text-primary">{row.value}</div>
+      <div className="bioflow-script-value break-all font-mono text-text-primary">{row.value}</div>
     </div>
   )
 }

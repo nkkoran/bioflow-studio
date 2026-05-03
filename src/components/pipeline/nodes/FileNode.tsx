@@ -3,7 +3,7 @@
  * Input files have a source handle on the right; output files have a target handle on the left.
  */
 import { memo, useMemo } from 'react'
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { Position, type NodeProps } from '@xyflow/react'
 import { classNames } from '@/lib/utils'
 import { AlertTriangle, FileText, Share2 } from 'lucide-react'
 import type { FileNodeData } from '@/types/pipeline'
@@ -12,6 +12,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { computeFileOutputPreview } from '@/lib/outputPathPreview'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
+import { PortHandle } from './PortHandle'
 
 function FileNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as FileNodeData
@@ -56,7 +57,6 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
     <div
       className={classNames(
         'animate-fade-up relative min-w-[180px] max-w-[320px] rounded-lg border bg-bg-secondary/95 px-4 py-2 transition-all duration-150 ease-out',
-        selected && 'translate-y-[-2px]',
         missing && 'ring-2 ring-error/35',
       )}
       style={nodeChromeStyle(tone, Boolean(selected))}
@@ -121,26 +121,12 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           >
             <Share2 size={12} />
           </button>
-          <Handle
+          <PortHandle
+            nodeId={id}
             type="source"
             position={Position.Right}
             id="output"
-            className="bioflow-port-handle"
-            data-port-node={id}
-            data-port-id="output"
-            data-port-type="source"
-            style={{
-              position: 'absolute',
-              left: 'auto',
-              right: -6,
-              top: 'calc(50% - 6px)',
-              width: 12,
-              height: 12,
-              borderRadius: '50%',
-              transform: 'none',
-              background: 'var(--color-warning)',
-              border: '2px solid var(--color-bg-secondary)',
-            }}
+            tone="file"
           />
           {fanOutCount > 1 && (
             <div className="absolute right-4 top-1/2 -translate-y-1/2 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-200">
@@ -149,26 +135,12 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
           )}
         </>
       ) : (
-        <Handle
+        <PortHandle
+          nodeId={id}
           type="target"
           position={Position.Left}
           id="input"
-          className="bioflow-port-handle"
-          data-port-node={id}
-          data-port-id="input"
-          data-port-type="target"
-          style={{
-            position: 'absolute',
-            left: -6,
-            right: 'auto',
-            top: 'calc(50% - 6px)',
-            width: 12,
-            height: 12,
-            borderRadius: '50%',
-            transform: 'none',
-            background: 'var(--color-warning)',
-            border: '2px solid var(--color-bg-secondary)',
-          }}
+          tone="file"
         />
       )}
     </div>

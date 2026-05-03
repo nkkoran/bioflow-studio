@@ -215,6 +215,7 @@ function ParamField({
           max={param.max}
           step={param.step ?? 'any'}
           placeholder={param.placeholder}
+          className="text-xs"
           onChange={(e) => {
             const v = e.target.value
             onChange(v === '' ? undefined : Number(v))
@@ -231,7 +232,7 @@ function ParamField({
           <select
             value={value === undefined ? '' : String(value)}
             onChange={(e) => onChange(e.target.value)}
-            className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+            className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent"
           >
             <option value="">-- select --</option>
             {param.options?.map((opt) => (
@@ -249,6 +250,7 @@ function ParamField({
           type="text"
           value={value === undefined || value === null ? '' : String(value)}
           placeholder={param.placeholder}
+          className="text-xs"
           onChange={(e) => onChange(e.target.value)}
         />
       )
@@ -274,6 +276,7 @@ function ParamField({
           type="text"
           value={value === undefined || value === null ? '' : String(value)}
           placeholder={param.placeholder}
+          className="text-xs"
           onChange={(e) => onChange(e.target.value)}
         />
       )
@@ -307,7 +310,7 @@ function ColumnParamField({
   const selected = columnParamValues(value, { whitespaceSeparated: allowsMultiple })
   const token = allowsMultiple ? draft.trim().toLowerCase() : current.split(/[,\s]+/).pop()?.toLowerCase() ?? ''
   const suggestions = columns
-    .filter((column) => !selected.includes(column) || !allowsMultiple || column.toLowerCase().includes(token))
+    .filter((column) => !allowsMultiple || !selected.includes(column))
     .filter((column) => column.toLowerCase().includes(token))
     .slice(0, 12)
   useEffect(() => {
@@ -363,7 +366,7 @@ function ColumnParamField({
             placeholder={columns.length > 0 ? (allowsMultiple ? 'Type to add a column...' : 'Start typing a column name...') : (loading ? 'Loading columns...' : param.placeholder)}
             onFocus={() => {
               setFocused(true)
-              setShowSuggestions(!allowsMultiple || draft.trim().length > 0)
+              setShowSuggestions(true)
               setActiveSuggestionIndex(0)
               if (columns.length === 0 && !loading && onRefresh) onRefresh()
             }}
@@ -374,7 +377,7 @@ function ColumnParamField({
             onChange={(e) => {
               if (allowsMultiple) {
                 setDraft(e.target.value)
-                setShowSuggestions(e.target.value.trim().length > 0)
+                setShowSuggestions(true)
               } else {
                 onChange(e.target.value)
                 setShowSuggestions(true)
@@ -407,7 +410,7 @@ function ColumnParamField({
                 setShowSuggestions(false)
               }
             }}
-            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
+            className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-xs text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
           />
           {focused && showSuggestions && columns.length > 0 && suggestions.length > 0 && (
             <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">

@@ -1,10 +1,11 @@
 import { memo } from 'react'
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { Position, type NodeProps } from '@xyflow/react'
 import { SlidersHorizontal, CheckCircle2, Circle, AlertCircle, Loader2, Clock, Ban } from 'lucide-react'
 import { classNames } from '@/lib/utils'
 import type { ToolNodeData, TransformNodeData } from '@/types/pipeline'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
+import { PortHandle } from './PortHandle'
 
 function StatusBadge({ status = 'idle' }: { status?: ToolNodeData['status'] }) {
   const map: Record<NonNullable<ToolNodeData['status']>, { icon: React.ReactNode; label: string; cls: string }> = {
@@ -35,7 +36,6 @@ function TransformNodeInner({ id, data, selected }: NodeProps) {
     <div
       className={classNames(
         'animate-fade-up relative min-w-[200px] rounded-lg border bg-bg-secondary/95 transition-all duration-150 ease-out',
-        selected && 'translate-y-[-2px]',
         successAnimating && 'animate-success',
       )}
       style={nodeChromeStyle(tone, Boolean(selected))}
@@ -56,47 +56,19 @@ function TransformNodeInner({ id, data, selected }: NodeProps) {
         <div><span className="text-text-muted">filters: </span>{filterCount}</div>
       </div>
 
-      <Handle
+      <PortHandle
+        nodeId={id}
         type="target"
         position={Position.Left}
         id="input"
-        className="bioflow-port-handle"
-        data-port-node={id}
-        data-port-id="input"
-        data-port-type="target"
-        style={{
-          position: 'absolute',
-          left: -6,
-          right: 'auto',
-          top: 'calc(50% - 6px)',
-          width: 12,
-          height: 12,
-          borderRadius: '50%',
-          transform: 'none',
-          background: 'var(--color-accent)',
-          border: '2px solid var(--color-bg-secondary)',
-        }}
+        tone="input"
       />
-      <Handle
+      <PortHandle
+        nodeId={id}
         type="source"
         position={Position.Right}
         id="output"
-        className="bioflow-port-handle"
-        data-port-node={id}
-        data-port-id="output"
-        data-port-type="source"
-        style={{
-          position: 'absolute',
-          left: 'auto',
-          right: -6,
-          top: 'calc(50% - 6px)',
-          width: 12,
-          height: 12,
-          borderRadius: '50%',
-          transform: 'none',
-          background: 'var(--color-success)',
-          border: '2px solid var(--color-bg-secondary)',
-        }}
+        tone="output"
       />
 
       {nodeData.error && (

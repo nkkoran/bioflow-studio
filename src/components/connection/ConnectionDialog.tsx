@@ -329,9 +329,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
       onClose()
       setForm(initialFormData)
     } catch (err) {
-      setConnectError(
-        err instanceof Error ? err.message : 'Connection failed',
-      )
+      setConnectError(userFacingConnectionError(err))
     } finally {
       setIsConnecting(false)
     }
@@ -483,12 +481,18 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
           </div>
         </div>
 
+        {connectError && (
+          <div className="rounded-md bg-error/10 px-3 py-2 text-xs leading-5 text-error shadow-sm">
+            {connectError}
+          </div>
+        )}
+
         <Input
           label="Host or IP"
           placeholder="rorqual.mcgill.ca"
           value={form.host}
           onChange={(e) => updateField('host', e.target.value)}
-          error={errors.host || connectError || undefined}
+          error={errors.host}
         />
         <Input
           label="Username"
@@ -698,24 +702,17 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
         )}
 
         {(isConnecting || connectionEvents.length > 0) && (
-          <div className="rounded-md bg-bg-secondary px-3 py-2 shadow-sm">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs font-medium text-text-primary">Connection trace</div>
-              <div className="text-xs text-text-muted">{connectionEvents.length} events</div>
-            </div>
+          <details className="rounded-md bg-bg-secondary px-3 py-2 text-xs text-text-secondary shadow-sm">
+            <summary className="flex cursor-pointer select-none items-center justify-between gap-3 text-text-primary">
+              <span>Connection trace</span>
+              <span className="text-text-muted">{connectionEvents.length} events</span>
+            </summary>
             {connectionEvents.length === 0 ? (
-              <div className="text-[11px] text-text-muted">Starting SSH connection...</div>
+              <div className="mt-2 text-[11px] text-text-muted">Starting SSH connection...</div>
             ) : (
-              <div className="flex max-h-36 flex-col gap-1 overflow-y-auto font-mono text-xs">
-                {connectionEvents.map((event, index) => (
-                  <div key={`${event.at}-${index}`} className="grid grid-cols-[4.5rem_1fr] gap-2 rounded border border-border/70 bg-bg-primary px-2 py-1">
-                    <span className={traceStageClass(event.stage)}>{event.stage}</span>
-                    <span className="whitespace-pre-wrap break-words text-text-secondary">{event.detail}</span>
-                  </div>
-                ))}
-              </div>
+              <pre className="mt-2 max-h-32 overflow-auto rounded bg-bg-primary px-2 py-1.5 font-mono text-[10px] leading-4 text-text-secondary shadow-inner">{connectionEvents.map(traceEventLine).join('\n')}</pre>
             )}
-          </div>
+          </details>
         )}
       </div>
       <Dialog
@@ -816,12 +813,15 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
   )
 }
 
-function traceStageClass(stage: SshDebugEvent['stage']): string {
-  switch (stage) {
-    case 'error': return 'text-error'
-    case 'prompt': return 'text-warning'
-    case 'banner': return 'text-accent'
-    case 'auth': return 'text-blue-300'
-    default: return 'text-text-muted'
-  }
+function traceEventLine(event: SshDebugEvent): string {
+  const time = new Date(event.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return `[${time}] ${event.stage.padEnd(7)} ${event.detail}`
+}
+
+function userFacingConnectionError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err || 'Connection failed')
+  return raw
+    .replace(/^Error invoking remote method 'ssh:connect':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim() || 'Connection failed'
 }

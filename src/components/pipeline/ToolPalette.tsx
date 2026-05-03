@@ -45,7 +45,7 @@ function PaletteItem({ tool, favorite, onToggleFavorite, onUse }: PaletteItemPro
         draggable
         onDragStart={onDragStart}
         className={classNames(
-          'group px-3 py-1.5 rounded-md text-xs cursor-grab active:cursor-grabbing',
+          'group px-3 py-1.5 rounded-md text-[11px] cursor-grab active:cursor-grabbing',
           'hover:bg-bg-hover/80 hover:shadow-sm',
           'transition-all duration-150 select-none',
         )}
@@ -77,7 +77,7 @@ function PaletteItem({ tool, favorite, onToggleFavorite, onUse }: PaletteItemPro
             </button>
           )}
         </div>
-        <div className="text-xs text-text-muted truncate">{tool.command}</div>
+        <div className="truncate text-[10px] text-text-muted">{tool.command}</div>
       </div>
     </ToolHoverCard>
   )
@@ -95,7 +95,7 @@ function BundleItem({ bundle }: { bundle: ToolBundle }) {
       draggable
       onDragStart={onDragStart}
       className={classNames(
-        'px-3 py-1.5 rounded-md text-xs cursor-grab active:cursor-grabbing',
+        'px-3 py-1.5 rounded-md text-[11px] cursor-grab active:cursor-grabbing',
         'hover:bg-bg-hover/80 hover:shadow-sm',
         'transition-all duration-150 select-none',
       )}
@@ -105,8 +105,8 @@ function BundleItem({ bundle }: { bundle: ToolBundle }) {
         <Icon size={11} className="shrink-0 text-text-muted" />
         <span className="truncate">{bundle.label}</span>
       </div>
-      <div className="text-xs text-text-muted truncate">{bundle.pack}</div>
-      <div className="text-xs text-text-muted truncate">{bundle.description}</div>
+      <div className="truncate text-[10px] text-text-muted">{bundle.pack}</div>
+      <div className="truncate text-[10px] text-text-muted">{bundle.description}</div>
     </div>
   )
 }
@@ -128,7 +128,7 @@ function SpecialItem({ type, label, icon }: SpecialItemProps) {
       draggable
       onDragStart={onDragStart}
       className={classNames(
-        'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs cursor-grab active:cursor-grabbing',
+        'flex items-center gap-2 px-3 py-1.5 rounded-md text-[11px] cursor-grab active:cursor-grabbing',
         'hover:bg-bg-hover/80 hover:shadow-sm',
         'transition-all duration-150 select-none',
       )}
@@ -259,7 +259,7 @@ export function ToolPalette() {
     <div className="bioflow-tool-palette-surface surface-panel animate-fade-up">
       {/* Header */}
       <div className="px-3 py-3">
-        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-text-muted">
+        <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">
           Tool Palette
         </div>
         <Input
@@ -272,7 +272,7 @@ export function ToolPalette() {
           variant="secondary"
           size="sm"
           icon={<Plus size={12} />}
-          className="mt-2 w-full justify-center text-xs"
+          className="mt-2 h-7 w-full justify-center text-[11px]"
           onClick={() => setCustomBuilderOpen(true)}
         >
           New Custom Node
@@ -293,7 +293,7 @@ export function ToolPalette() {
       <div className="bioflow-tool-palette-scroll scroll-region py-1">
         {!search.trim() && favoriteTools.length > 0 && (
           <div className="mb-1">
-            <div className="w-full flex items-center gap-1 px-3 py-1 text-xs uppercase tracking-wide text-text-muted">
+            <div className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
               <Star size={10} className="fill-current text-amber-300" />
               Favorites
               <span className="ml-auto text-text-muted">{favoriteTools.length}</span>
@@ -313,7 +313,7 @@ export function ToolPalette() {
         )}
         {!search.trim() && recentTools.length > 0 && (
           <div className="mb-1">
-            <div className="w-full flex items-center gap-1 px-3 py-1 text-xs uppercase tracking-wide text-text-muted">
+            <div className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
               <Clock3 size={10} />
               Recent
               <span className="ml-auto text-text-muted">{recentTools.length}</span>
@@ -333,7 +333,7 @@ export function ToolPalette() {
         )}
         {bundles.length > 0 && (
           <div className="mb-1">
-            <div className="w-full flex items-center gap-1 px-3 py-1 text-xs uppercase tracking-wide text-text-muted">
+            <div className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
               <BundleIcon size={10} />
               Workflow packs
               <span className="ml-auto text-text-muted">{bundles.length}</span>
@@ -346,11 +346,11 @@ export function ToolPalette() {
           </div>
         )}
         {groups.length === 0 && bundles.length === 0 && (
-          <div className="px-3 py-4 text-xs text-text-muted text-center">No matching tools</div>
+          <div className="px-3 py-4 text-center text-[11px] text-text-muted">No matching tools</div>
         )}
         {customNodes.length > 0 && (
           <div className="mb-1">
-            <div className="w-full flex items-center gap-1 px-3 py-1 text-xs uppercase tracking-wide text-text-muted">
+            <div className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
               Custom
               <span className="ml-auto text-text-muted">{customNodes.length}</span>
             </div>
@@ -382,7 +382,7 @@ export function ToolPalette() {
             <div key={category} className="mb-1">
               <button
                 onClick={() => toggleGroup(category)}
-                className="w-full flex items-center gap-1 px-3 py-1 text-xs uppercase tracking-wide text-text-muted hover:text-text-primary transition-colors"
+                className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted transition-colors hover:text-text-primary"
               >
                 <ChevronRight
                   size={10}
@@ -411,7 +411,7 @@ export function ToolPalette() {
       </div>
 
       {/* Footer hint */}
-      <div className="px-3 py-2 text-xs text-text-muted">
+      <div className="px-3 py-2 text-[11px] text-text-muted">
         Drag tools onto the canvas to build your pipeline.
       </div>
       <CustomNodeBuilder open={customBuilderOpen} onClose={() => setCustomBuilderOpen(false)} />

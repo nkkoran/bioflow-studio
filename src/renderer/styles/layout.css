@@ -12,10 +12,6 @@
   --color-app-bg: var(--color-bg-primary);
   --color-border-subtle: var(--color-border-light);
 
-  --text-xs: 0.75rem;
-  --text-sm: 0.875rem;
-  --text-base: 1rem;
-
   --panel-sidebar-width: 15rem;
   --panel-tool-palette-width: 15rem;
   --panel-inspector-width: 21.5rem;
@@ -30,13 +26,6 @@
 .bioflow-app-shell * {
   min-width: 0;
   min-height: 0;
-}
-
-.bioflow-app-shell :where(.text-\[8px\], .text-\[9px\], .text-\[10px\]),
-.bioflow-modal :where(.text-\[8px\], .text-\[9px\], .text-\[10px\]),
-.surface-popover :where(.text-\[8px\], .text-\[9px\], .text-\[10px\]) {
-  font-size: var(--text-xs) !important;
-  line-height: var(--space-4);
 }
 
 .bioflow-modal-overlay {
@@ -367,6 +356,16 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   overflow-x: hidden;
 }
 
+.bioflow-tool-palette-surface :where(.interactive-button, .interactive-row, [draggable]) {
+  font-size: 0.6875rem !important;
+  line-height: 1rem;
+}
+
+.bioflow-tool-palette-surface :where(.text-\[10px\]) {
+  font-size: 0.625rem !important;
+  line-height: 0.875rem;
+}
+
 .bioflow-sidebar-content {
   width: var(--panel-sidebar-width);
   max-width: var(--panel-sidebar-width);
@@ -428,6 +427,49 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   scrollbar-gutter: stable;
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
+  font-size: 0.6875rem;
+  line-height: 0.9375rem;
+}
+
+.bioflow-inspector-popover {
+  font-size: 0.6875rem;
+  line-height: 0.9375rem;
+}
+
+.bioflow-inspector-scroll :where(.text-xs),
+.bioflow-inspector-popover :where(.text-xs),
+.bioflow-inspector-scroll :where(.text-\[11px\]),
+.bioflow-inspector-popover :where(.text-\[11px\]) {
+  font-size: 0.6875rem !important;
+  line-height: 0.9375rem !important;
+}
+
+.bioflow-inspector-scroll :where(.text-sm),
+.bioflow-inspector-popover :where(.text-sm) {
+  font-size: 0.75rem !important;
+  line-height: 1rem !important;
+}
+
+.bioflow-inspector-scroll :where(.bioflow-field, input:not([type='checkbox']):not([type='radio']), select, textarea) {
+  font-size: 0.6875rem !important;
+  line-height: 1rem !important;
+}
+
+.bioflow-inspector-scroll :where(.text-\[10px\]),
+.bioflow-inspector-popover :where(.text-\[10px\]) {
+  font-size: 0.625rem !important;
+  line-height: 0.875rem !important;
+}
+
+.bioflow-inspector-scroll :where(button, .interactive-button),
+.bioflow-inspector-popover :where(button, .interactive-button) {
+  font-size: 0.6875rem !important;
+  line-height: 0.9375rem !important;
+}
+
+.bioflow-inspector-scroll :where(h4, h5, label, p) {
+  font-size: 0.6875rem;
+  line-height: 0.9375rem;
 }
 
 .bioflow-bottom-panel {
@@ -471,6 +513,11 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   white-space: normal;
 }
 
+.bioflow-script-list {
+  width: 17rem;
+  flex: 0 0 17rem;
+}
+
 .bioflow-script-preview :where(.bioflow-script-card, .bioflow-script-row, .bioflow-script-value) {
   overflow: visible !important;
   text-overflow: clip !important;
@@ -483,6 +530,11 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 
 .bioflow-script-preview :where(pre, code) {
   white-space: pre-wrap !important;
+}
+
+.bioflow-script-preview .bioflow-script-raw {
+  overflow: auto !important;
+  white-space: pre !important;
 }
 
 .bioflow-modal .bioflow-modal-body {
@@ -580,7 +632,10 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 }
 
 .bioflow-port-handle {
+  --bioflow-port-color: var(--color-accent);
+  --bioflow-port-top: 50%;
   position: absolute !important;
+  top: calc(var(--bioflow-port-top) - 6px) !important;
   width: 12px !important;
   height: 12px !important;
   min-width: 12px !important;
@@ -590,6 +645,38 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   box-sizing: border-box;
   transform: none !important;
   transition: box-shadow var(--panel-transition), background var(--panel-transition), border-color var(--panel-transition);
+}
+
+.bioflow-port-handle[data-port-side='left'] {
+  left: -6px !important;
+  right: auto !important;
+}
+
+.bioflow-port-handle[data-port-side='right'] {
+  left: auto !important;
+  right: -6px !important;
+}
+
+.bioflow-port-handle[data-port-tone='input'] {
+  --bioflow-port-color: var(--color-accent);
+}
+
+.bioflow-port-handle[data-port-tone='output'] {
+  --bioflow-port-color: var(--color-success);
+}
+
+.bioflow-port-handle[data-port-tone='file'] {
+  --bioflow-port-color: var(--color-warning);
+}
+
+.bioflow-port-handle[data-port-connected='true'] {
+  background: var(--bioflow-port-color) !important;
+  border: 2px solid var(--color-bg-secondary) !important;
+}
+
+.bioflow-port-handle[data-port-connected='false'] {
+  background: var(--color-bg-secondary) !important;
+  border: 2px solid var(--bioflow-port-color) !important;
 }
 
 .bioflow-port-handle:hover {

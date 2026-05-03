@@ -339,5 +339,5 @@ pre,
 }
 
 .react-flow__node.selected {
-  transform: translateY(calc(var(--space-1) / -2));
+  filter: drop-shadow(0 0 0.75rem color-mix(in srgb, var(--color-accent) 18%, transparent));
 }
