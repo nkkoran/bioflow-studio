@@ -14,6 +14,7 @@ interface RemotePathInputProps {
   minPrefixChars?: number
   origin?: FileOrigin
   projectId?: string | null
+  tailBiasWhenBlurred?: boolean
 }
 
 export function RemotePathInput({
@@ -25,6 +26,7 @@ export function RemotePathInput({
   minPrefixChars = 2,
   origin,
   projectId,
+  tailBiasWhenBlurred = false,
 }: RemotePathInputProps) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
@@ -111,6 +113,18 @@ export function RemotePathInput({
     displayPath: collapseHomePath(entry.path, homeDir),
   })), [homeDir, suggestions])
 
+  const biasTail = tailBiasWhenBlurred && !focused && value.length > 0
+
+  useEffect(() => {
+    if (!biasTail) return
+    const frame = window.requestAnimationFrame(() => {
+      const input = inputRef.current
+      if (!input) return
+      input.scrollLeft = input.scrollWidth
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [biasTail, value])
+
   const applySuggestion = (entry: RemoteFileEntry) => {
     const next = collapseHomePath(
       entry.isDirectory && mode === 'directory' ? entry.path : entry.path,
@@ -128,9 +142,31 @@ export function RemotePathInput({
         type="text"
         value={value}
         placeholder={placeholder}
-        onFocus={() => setFocused(true)}
+        onFocus={() => {
+          setFocused(true)
+          if (!tailBiasWhenBlurred) return
+          window.requestAnimationFrame(() => {
+            const input = inputRef.current
+            if (!input) return
+            const end = input.value.length
+            try {
+              input.setSelectionRange(end, end)
+            } catch {
+              // Ignore non-text selection failures.
+            }
+            input.scrollLeft = input.scrollWidth
+          })
+        }}
         onBlur={() => window.setTimeout(() => setFocused(false), 120)}
         onChange={(e) => onChange(e.target.value)}
+        onWheel={(e) => {
+          const input = e.currentTarget
+          if (input.scrollWidth <= input.clientWidth) return
+          const horizontalDelta = Math.abs(e.deltaX) > 0 ? e.deltaX : (e.shiftKey ? e.deltaY : 0)
+          if (!horizontalDelta) return
+          input.scrollLeft += horizontalDelta
+          e.preventDefault()
+        }}
         onKeyDown={(e) => {
           if (suggestions.length === 0) return
           if (e.key === 'ArrowDown') {
@@ -159,6 +195,7 @@ export function RemotePathInput({
           }
         }}
         className={`bioflow-field h-8 w-full rounded-md px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors ${className ?? ''}`}
+        style={biasTail ? { direction: 'rtl', textAlign: 'left' } : undefined}
       />
       {focused && renderedSuggestions.length > 0 && (
         <div className="surface-popover absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md py-1">

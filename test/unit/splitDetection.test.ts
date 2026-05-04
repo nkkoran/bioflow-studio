@@ -115,6 +115,41 @@ describe('splitDetection', () => {
     expect(detected.items.every((item) => item.path.endsWith('.pgen'))).toBe(true)
     expect(detected.summary).toContain('chromosome 1-23')
   })
+
+  it('expands the full folder split when nested filenames vary and some child listings fail once', async () => {
+    const rootEntries = Array.from({ length: 23 }, (_, index) => {
+      const chrom = index + 1
+      return entry(`chr${chrom}`, `/ukb/nested/chr${chrom}`, true)
+    })
+    const flakyFolders = new Set(['/ukb/nested/chr15', '/ukb/nested/chr23'])
+    const attempts = new Map<string, number>()
+
+    const detected = await detectSplitInFolder({
+      listFolder: async (folder) => {
+        if (folder === '/ukb/nested') return rootEntries
+        const attempt = (attempts.get(folder) ?? 0) + 1
+        attempts.set(folder, attempt)
+        if (flakyFolders.has(folder) && attempt === 1) {
+          throw new Error(`temporary failure for ${folder}`)
+        }
+        const chrom = folder.match(/chr(\d+)$/)?.[1]
+        return chrom
+          ? [entry(`ukb_chr${chrom}.pgen`, `${folder}/ukb_chr${chrom}.pgen`, false)]
+          : []
+      },
+      folder: '/ukb/nested',
+      mode: 'auto',
+      axis: 'chromosome',
+      fileType: 'pgen',
+      seedPath: '/ukb/nested',
+    })
+
+    expect(detected.pattern).toEqual({ kind: 'manual' })
+    expect(detected.items).toHaveLength(23)
+    expect(detected.items.map((item) => item.key)).toEqual(Array.from({ length: 23 }, (_, index) => String(index + 1)))
+    expect(detected.items[14]?.path).toBe('/ukb/nested/chr15/ukb_chr15.pgen')
+    expect(detected.items[22]?.path).toBe('/ukb/nested/chr23/ukb_chr23.pgen')
+  })
 })
 
 function entry(name: string, path: string, isDirectory: boolean): RemoteFileEntry {

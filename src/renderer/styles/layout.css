@@ -499,13 +499,23 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 }
 
 .bioflow-split-items-list,
-.bioflow-split-preview {
+.bioflow-split-preview,
+.bioflow-split-preview-list {
   white-space: normal !important;
-  overflow: auto;
 }
 
-.bioflow-split-items-list :where(div, span, label),
-.bioflow-split-preview :where(div, span, label) {
+.bioflow-split-preview {
+  overflow: hidden;
+}
+
+.bioflow-split-preview-list {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.bioflow-split-items-list :where(div, span, label):not(.scroll-region),
+.bioflow-split-preview :where(div, span, label):not(.scroll-region),
+.bioflow-split-preview-list :where(div, span, label):not(.scroll-region) {
   min-width: 0;
   white-space: normal !important;
   overflow: visible !important;
@@ -513,7 +523,8 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 }
 
 .bioflow-split-items-list :where(input, button),
-.bioflow-split-preview :where(input, button) {
+.bioflow-split-preview :where(input, button),
+.bioflow-split-preview-list :where(input, button) {
   min-width: 0;
 }
 

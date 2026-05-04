@@ -68,7 +68,7 @@ async function statRemotePathViaShell(connectionId: string, path: string): Promi
   try {
     const result = await window.api.ssh.exec(
       connectionId,
-      `p=${shellQuote(path)}; if [ ! -e "$p" ] && [ ! -L "$p" ]; then exit 1; fi; kind=file; [ -d "$p" ] && kind=dir; meta=$(stat -Lc '%s %Y %A' -- "$p" 2>/dev/null) || exit 1; printf '%s %s' "$meta" "$kind"`,
+      `p=${shellQuote(path)}; if [ ! -e "$p" ] && [ ! -L "$p" ]; then exit 1; fi; kind=file; [ -d "$p" ] && kind=dir; meta=$(stat -Lc '%s %Y %A' -- "$p" 2>/dev/null || true); if [ -n "$meta" ]; then printf '%s %s' "$meta" "$kind"; elif [ "$kind" = dir ]; then printf '0 0 d--------- %s' "$kind"; else printf '0 0 ---------- %s' "$kind"; fi`,
     )
     if (result.exitCode !== 0) return null
     const [sizeRaw, modifiedRaw, permissions = '', kind = 'file'] = result.stdout.trim().split(/\s+/)
@@ -375,10 +375,13 @@ export const useWorkflowReadinessStore = create<WorkflowReadinessStoreState>((se
       const probesByPath: Record<string, FileProbeResult> = {}
 
       await Promise.all(nodes.map(async ({ path, fileType, origin, projectId }) => {
-        const cacheKey = origin === 'dnx' ? fileProbeCacheKey(`dnx:${projectId ?? 'unknown'}`, path) : fileProbeCacheKey(connectionId, path)
+        const effectiveConnectionId = origin === 'local' ? LOCAL_CONNECTION_ID : connectionId
+        const cacheKey = origin === 'dnx'
+          ? fileProbeCacheKey(`dnx:${projectId ?? 'unknown'}`, path)
+          : fileProbeCacheKey(effectiveConnectionId, path)
         const probe = origin === 'dnx'
           ? await probeDnxPath(projectId, path, fileType, options?.force ? undefined : nextCache[cacheKey])
-          : await probePath(connectionId, path, homeDir, fileType, options?.force ? undefined : nextCache[cacheKey])
+          : await probePath(effectiveConnectionId, path, homeDir, fileType, options?.force ? undefined : nextCache[cacheKey])
         nextCache[cacheKey] = probe
         probesByPath[probePathKey(path)] = probe
       }))

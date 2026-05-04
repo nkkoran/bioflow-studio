@@ -78,7 +78,7 @@ export function pathForSplitKey(pattern: SplitPattern, key: string): string {
   return ''
 }
 
-function inferPathTemplate(items: FileNodeSplit['items']): ((key: string) => string) | null {
+export function inferPathTemplate(items: FileNodeSplit['items']): ((key: string) => string) | null {
   const candidates: Array<{ render: (key: string) => string; score: number }> = []
   const usable = items.filter((item) => item.key.trim() && item.path.trim())
 

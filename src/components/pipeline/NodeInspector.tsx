@@ -20,6 +20,7 @@ import { AnalysisOptionsPanel } from '@/components/pipeline/inspector/AnalysisOp
 import { UkbFieldBuilder } from '@/components/pipeline/inspector/UkbFieldBuilder'
 import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
 import { RemotePathField } from '@/components/file-browser/RemotePathField'
+import { RemotePathInput } from '@/components/file-browser/RemotePathInput'
 import { LocalPathField } from '@/components/file-browser/LocalPathField'
 import { usePipelineStore, useSelectedNode } from '@/stores/pipelineStore'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
@@ -2515,6 +2516,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const splitListingCacheRef = useRef(new Map<string, RemoteFileEntry[]>())
   const [rangeDraft, setRangeDraft] = useState('')
   const [refreshNonce, setRefreshNonce] = useState(0)
+  const [splitBrowseRow, setSplitBrowseRow] = useState<number | null>(null)
   const setSplit = useCallback(
     (next: FileNodeSplit | undefined) => {
       updateNodeData(nodeId, { split: next })
@@ -2563,6 +2565,12 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   useEffect(() => {
     setRangeDraft(acceptedRange)
   }, [acceptedRange])
+
+  useEffect(() => {
+    if (splitBrowseRow === null) return
+    if (split && split.items[splitBrowseRow]) return
+    setSplitBrowseRow(null)
+  }, [split, splitBrowseRow])
 
   useEffect(() => {
     if (!split) return
@@ -3087,56 +3095,82 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               </p>
             </div>
 
-            <div data-wrap className="flex items-center justify-between mt-1">
-              <label className="text-text-secondary text-xs font-medium">
-                Accepted items ({split.items.length})
-              </label>
-              <button
-                onClick={addRow}
-                className="flex items-center gap-1 text-[11px] text-accent hover:underline"
-              >
-                <Plus size={10} /> Add
-              </button>
-            </div>
-            <div data-wrap className="bioflow-split-items-list scroll-region flex max-h-60 min-h-0 flex-col gap-1 overflow-y-auto rounded border border-border bg-bg-primary p-1 pr-1.5">
-              {split.items.map((row, i) => (
-                <div key={i} data-wrap className="grid min-h-8 grid-cols-[2.75rem_minmax(0,1fr)_1.5rem] items-center gap-1 rounded bg-bg-tertiary/50 p-1">
-                  <input
-                    type="text"
-                    value={row.key}
-                    onChange={(e) => updateRow(i, { key: e.target.value })}
-                    className="bioflow-field h-6 min-w-0 rounded border border-border bg-bg-tertiary px-1.5 font-mono text-[11px] text-text-primary outline-none"
-                    placeholder="1"
-                    title="Item key: this becomes the Slurm array item label."
-                  />
-                  <RemotePathField
-                    value={row.path}
-                    onChange={(value) => updateRow(i, { path: value })}
-                    placeholder="/path/to/item/file"
-                    title={`Choose file for split item ${row.key || i + 1}`}
-                    mode="file"
-                    buttonLabel=""
-                    className="min-w-0"
-                    compact
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeRow(i)}
-                    className="flex h-6 items-center justify-center rounded text-text-muted transition-colors hover:bg-error/20 hover:text-error"
-                    title="Remove"
-                  >
-                    <X size={10} />
-                  </button>
+            <div data-wrap className="overflow-hidden rounded border border-border bg-bg-primary">
+              <div data-wrap className="flex items-start justify-between gap-2 border-b border-border px-2 py-1.5">
+                <div className="min-w-0">
+                  <label className="text-text-secondary text-xs font-medium">
+                    Accepted items ({split.items.length})
+                  </label>
+                  <div className="mt-0.5 truncate text-[10px] font-mono text-text-muted" title={acceptedRange || 'No accepted items yet'}>
+                    {acceptedRange || 'No accepted items yet'}
+                  </div>
                 </div>
-              ))}
-              {split.items.length === 0 && (
-                <div className="px-1 py-1 text-[11px] italic text-text-muted">
-                  No accepted items yet. Fill a recipe above, check the preview, then click Accept preview.
-                </div>
-              )}
+                <button
+                  onClick={addRow}
+                  className="flex shrink-0 items-center gap-1 text-[11px] text-accent hover:underline"
+                >
+                  <Plus size={10} /> Add
+                </button>
+              </div>
+              <div data-wrap className="bioflow-split-items-list scroll-region max-h-56 min-h-0 overflow-y-auto px-1.5 py-1.5 space-y-1">
+                {split.items.map((row, i) => (
+                  <div key={i} data-wrap className="grid shrink-0 grid-cols-[2.75rem_minmax(0,1fr)_1.75rem_1.5rem] items-center gap-1 rounded bg-bg-tertiary/50 p-1">
+                    <input
+                      type="text"
+                      value={row.key}
+                      onChange={(e) => updateRow(i, { key: e.target.value })}
+                      className="bioflow-field h-6 min-w-0 rounded border border-border bg-bg-tertiary px-1.5 font-mono text-[11px] text-text-primary outline-none"
+                      placeholder="1"
+                      title="Item key: this becomes the Slurm array item label."
+                    />
+                    <RemotePathInput
+                      value={row.path}
+                      onChange={(value) => updateRow(i, { path: value })}
+                      placeholder="/path/to/item/file"
+                      mode="file"
+                      className="h-6 px-2 text-[10px]"
+                      tailBiasWhenBlurred
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setSplitBrowseRow(i)}
+                      className="flex h-6 items-center justify-center rounded bg-bg-tertiary text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      title={activeConnectionId ? `Choose file for split item ${row.key || i + 1}` : 'Connect first to browse remote paths'}
+                      disabled={!activeConnectionId}
+                    >
+                      <FolderOpen size={10} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeRow(i)}
+                      className="flex h-6 items-center justify-center rounded text-text-muted transition-colors hover:bg-error/20 hover:text-error"
+                      title="Remove"
+                    >
+                      <X size={10} />
+                    </button>
+                  </div>
+                ))}
+                {split.items.length === 0 && (
+                  <div className="px-1 py-1 text-[11px] italic text-text-muted">
+                    No accepted items yet. Fill a recipe above, check the preview, then click Accept preview.
+                  </div>
+                )}
+              </div>
+              <RemoteFileBrowser
+                open={splitBrowseRow !== null}
+                onClose={() => setSplitBrowseRow(null)}
+                title={`Choose file for split item ${(splitBrowseRow !== null ? split.items[splitBrowseRow]?.key : '') || ''}`}
+                mode="file"
+                initialPath={splitBrowseRow !== null ? split.items[splitBrowseRow]?.path ?? '' : ''}
+                onSelect={(paths) => {
+                  if (splitBrowseRow === null || !paths[0]) return
+                  updateRow(splitBrowseRow, { path: paths[0] })
+                  setSplitBrowseRow(null)
+                }}
+              />
             </div>
-            <div data-wrap className="bioflow-split-preview rounded border border-border bg-bg-primary">
-              <div data-wrap className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-border px-2 py-1">
+            <div data-wrap className="bioflow-split-preview overflow-hidden rounded border border-border bg-bg-primary">
+              <div data-wrap className="flex flex-wrap items-start justify-between gap-2 border-b border-border px-2 py-1.5">
                 <div className="min-w-0">
                   <span className="text-[9px] uppercase tracking-wide text-text-muted">Preview before accepting</span>
                   {!preview.loading && !preview.error && preview.items.length > 0 && (
@@ -3145,7 +3179,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex shrink-0 items-center gap-1">
                   <Button
                     variant="ghost"
                     size="sm"
@@ -3170,7 +3204,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                   </Button>
                 </div>
               </div>
-              <div data-wrap className="scroll-region max-h-60 min-h-0 overflow-y-auto overflow-x-auto">
+              <div data-wrap className="bioflow-split-preview-list scroll-region max-h-64 min-h-0 overflow-y-auto overflow-x-hidden">
                 {preview.loading && <div className="px-2 py-2 text-[11px] text-text-muted">Checking files...</div>}
                 {preview.error && <div className="px-2 py-2 text-[11px] text-error">{preview.error}</div>}
                 {!preview.loading && !preview.error && preview.items.length === 0 && (
@@ -3179,7 +3213,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                   </div>
                 )}
                 {!preview.loading && !preview.error && preview.items.length > 0 && (
-                  <div data-wrap className="flex min-w-[18rem] flex-col gap-px p-1 text-[10px]">
+                  <div data-wrap className="min-w-[18rem] space-y-px p-1 text-[10px]">
                     {preview.items.map((item) => {
                       const missing = preview.missing.has(item.key)
                       return (
@@ -3187,7 +3221,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                           key={`${item.key}:${item.path}`}
                           data-wrap
                           className={classNames(
-                            'grid grid-cols-[2.75rem_minmax(0,1fr)_3.5rem] items-start gap-2 rounded px-1.5 py-1',
+                            'grid shrink-0 grid-cols-[2.75rem_minmax(0,1fr)_3.5rem] items-start gap-2 rounded px-1.5 py-1.5',
                             missing ? 'bg-error/10 text-error' : 'text-text-secondary',
                           )}
                         >

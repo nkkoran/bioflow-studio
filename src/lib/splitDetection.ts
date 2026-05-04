@@ -1,5 +1,6 @@
 import type { RemoteFileEntry } from '@/types/files'
 import type { FileNodeSplit, FileType, SplitPattern } from '@/types/pipeline'
+import { inferPathTemplate } from '@/lib/splitRange'
 import { pathBasename } from '@/lib/utils'
 
 export type SplitDetectMode = 'auto' | 'files' | 'folders'
@@ -89,7 +90,7 @@ async function detectFoldersInFolder(
     .slice(0, 100)
   const listings = await Promise.all(folderEntries.map(async (entry) => {
     try {
-      return { folder: entry, entries: await listFolder(entry.path) }
+      return { folder: entry, entries: await listFolderWithRetry(listFolder, entry.path) }
     } catch {
       return { folder: entry, entries: [] as RemoteFileEntry[] }
     }
@@ -98,13 +99,14 @@ async function detectFoldersInFolder(
   if (!fileName) {
     const fallbackItems = detectOneNestedFilePerFolder(listings, fileType)
     if (fallbackItems.length < 2) return null
+    const expandedItems = expandDetectedFolderSubset(group.items, fallbackItems)
     return {
       folderPath: folder,
       pattern: { kind: 'manual' },
-      items: fallbackItems,
+      items: expandedItems,
       missing: [],
-      summary: `Detected ${fallbackItems.length} item folders (${axis} ${rangeTextFromItems(fallbackItems)}). The accepted rows are editable below.`,
-      quality: 45 + fallbackItems.length + averageFileScore(fallbackItems.map((item) => item.path), fileType),
+      summary: `Detected ${expandedItems.length} item folders (${axis} ${rangeTextFromItems(expandedItems)}). The accepted rows are editable below.`,
+      quality: 45 + expandedItems.length + averageFileScore(expandedItems.map((item) => item.path), fileType),
     }
   }
 
@@ -144,6 +146,46 @@ function detectOneNestedFilePerFolder(
     items.push({ key, rawKey: rawKeyFromName(listing.folder.name), path: picked.path })
   }
   return sortSplitRows(items)
+}
+
+async function listFolderWithRetry(
+  listFolder: (path: string) => Promise<RemoteFileEntry[]>,
+  path: string,
+): Promise<RemoteFileEntry[]> {
+  try {
+    return await listFolder(path)
+  } catch (firstError) {
+    try {
+      return await listFolder(path)
+    } catch {
+      throw firstError
+    }
+  }
+}
+
+function expandDetectedFolderSubset(
+  folders: FileNodeSplit['items'],
+  detected: FileNodeSplit['items'],
+): FileNodeSplit['items'] {
+  const render = inferPathTemplate(detected.map((item) => ({
+    ...item,
+    key: item.rawKey || item.key,
+  })))
+  if (!render) return detected
+
+  const matchesDetected = detected.every((item) => render(item.rawKey || item.key) === item.path)
+  if (!matchesDetected) return detected
+
+  const detectedByKey = new Map(detected.map((item) => [item.key, item]))
+  return sortSplitRows(folders.map((folder) => {
+    const existing = detectedByKey.get(folder.key)
+    if (existing) return existing
+    return {
+      key: folder.key,
+      rawKey: folder.rawKey,
+      path: render(folder.rawKey || folder.key),
+    }
+  }))
 }
 
 function preferredFiles(files: RemoteFileEntry[], fileType: FileType): RemoteFileEntry[] {
