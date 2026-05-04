@@ -36,9 +36,12 @@ async function listDirectory(path: string, opts: { force?: boolean; connectionId
     throw new Error(`Connection is ${connection?.status ?? 'not available'}; reconnect before browsing files.`)
   }
 
+  const listPath = connectionId === LOCAL_CONNECTION_ID
+    ? path
+    : await expandRemoteHomeForListing(connectionId, path)
   const request = connectionId === LOCAL_CONNECTION_ID
-    ? window.api.local.ls(path)
-    : window.api.sftp.ls(connectionId, path, opts)
+    ? window.api.local.ls(listPath)
+    : window.api.sftp.ls(connectionId, listPath, { force: opts.force })
 
   const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
     window.setTimeout(() => {
@@ -51,6 +54,15 @@ async function listDirectory(path: string, opts: { force?: boolean; connectionId
   } else {
     return Promise.race([request, timeout])
   }
+}
+
+async function expandRemoteHomeForListing(connectionId: string, path: string): Promise<string> {
+  if (path !== '~' && !path.startsWith('~/')) return path
+  const result = await window.api.ssh.exec(connectionId, 'printf %s "$HOME"')
+  const home = result.stdout.trim()
+  if (!home) return path
+  if (path === '~') return home
+  return `${home.replace(/\/+$/, '')}/${path.slice(2)}`
 }
 
 export async function headFile(filePath: string, lines: number): Promise<string> {
@@ -146,7 +158,7 @@ export const useFileStore = create<FileStore>((set, get) => ({
     } catch (err: unknown) {
       if (seq !== navigationSeq) return
       const message = err instanceof Error ? err.message : 'Failed to list directory'
-      set({ error: message, loading: false })
+      set({ cwd: path, error: message, loading: false, cwdConnectionId: connectionId ?? null })
     }
   },
 

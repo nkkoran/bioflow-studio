@@ -18,9 +18,11 @@ import {
   type AnalysisOptionDef,
 } from '@/lib/analysisOptions'
 import { parseToolCommand } from '@/lib/commandEditing'
-import { columnParamValues, connectedInputPath, type SchemaCache } from '@/lib/schemaResolver'
+import { columnParamValues, connectedInputPath, type ColumnSchema, type SchemaCache } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
 import { classNames } from '@/lib/utils'
+import { optionDisplayLabel } from '@/lib/optionLabels'
+import { useSettingsStore } from '@/stores/settingsStore'
 import type { AnalysisOptionState, PipelineSnapshot, ToolDef, ToolNodeData, ValueSource } from '@/types/pipeline'
 
 interface AnalysisOptionsPanelProps {
@@ -38,10 +40,26 @@ interface AnalysisOptionsPanelProps {
 
 const RECOMMENDED_BY_TOOL: Record<string, string[]> = {
   'plink2.assoc': ['pheno-name', 'covar', 'covar-name', 'keep'],
+  'plink2.phewas': ['phenotypes', 'input:phenoList', 'input:covar', 'covar-name', 'input:keep'],
   'plink2.qc': ['keep', 'maf', 'geno', 'mind', 'hwe'],
   'plink2.clump': ['clump-snp-field', 'clump-field', 'keep'],
   'plink2.score': ['score', 'extract', 'keep'],
   'plink2.pca': ['keep', 'chr'],
+  'r.plot': ['xColumn', 'yColumn', 'colorColumn', 'facetColumn', 'groupColumn'],
+  'table.gtsummary': ['includeColumns', 'byColumn', 'labelMap'],
+  'r.regression': ['phenotypeCovariates', 'input:covar', 'covariateColumns', 'referenceLevels'],
+  'bcftools.view': ['regions', 'targets', 'samples', 'include', 'exclude', 'types'],
+  'bcftools.merge': ['force-samples', 'missing-to-ref'],
+  'crossmap.liftover': ['input:reference'],
+}
+
+const OPTION_GROUP_ORDER: Record<string, number> = {
+  Input: 0,
+  Model: 1,
+  Filters: 2,
+  Output: 3,
+  Resources: 4,
+  Advanced: 5,
 }
 
 function optionValue(option: AnalysisOptionState): string {
@@ -54,6 +72,34 @@ function sourceValue(option: AnalysisOptionState, fallbackKind: ValueSource['kin
   if (option.source) return { ...option.source, portId: option.source.portId ?? portId }
   if (isValueSource(option.value)) return { ...option.value, portId: option.value.portId ?? portId }
   return { kind: fallbackKind, value: option.value === undefined || option.value === null ? '' : String(option.value), portId }
+}
+
+function preferredColumnForAnalysisOption(tool: ToolDef, def: AnalysisOptionDef, schema: ColumnSchema | null): string | null {
+  if (!schema?.columns.length) return null
+  const sourcePortId = def.sourcePortId ?? 'input'
+  const input = tool.inputs.find((port) => port.id === sourcePortId)
+  const role = input?.contract?.tabular?.roles?.find((candidate) => {
+    const binding = candidate.binding
+    return binding?.kind === 'param' && binding.key === (def.paramName ?? def.id)
+  })
+  if (role) {
+    const mapped = schema.roles?.find((candidate) => candidate.roleId === role.id)?.column
+    if (mapped && schema.columns.includes(mapped)) return mapped
+    const alias = findColumnAlias(schema.columns, [role.label, ...(role.aliases ?? [])])
+    if (alias) return alias
+  }
+  return findColumnAlias(schema.columns, [String(def.defaultValue ?? ''), def.label])
+}
+
+function findColumnAlias(columns: string[], aliases: string[]): string | null {
+  const normalized = new Map(columns.map((column) => [column.toLowerCase(), column]))
+  for (const alias of aliases) {
+    const key = alias.trim().toLowerCase()
+    if (!key) continue
+    const exact = normalized.get(key)
+    if (exact) return exact
+  }
+  return null
 }
 
 function helpLabel(def: AnalysisOptionDef) {
@@ -106,6 +152,40 @@ function optionSearchText(def: AnalysisOptionDef): string {
   ].filter(Boolean).join(' ').toLowerCase()
 }
 
+function supportsOptionLibrary(tool: ToolDef): boolean {
+  if (tool.command === 'plink2' || tool.command === 'plink') return true
+  if (tool.command === 'bcftools' || tool.command === 'samtools' || tool.command === 'regenie') return true
+  if (tool.id.startsWith('annovar.') || tool.id === 'vep' || tool.id === 'crossmap.liftover') return true
+  if (tool.id === 'custom.shell') return true
+  return false
+}
+
+function isRecommendedDefSatisfied(def: AnalysisOptionDef, connectedPortIds: Set<string>): boolean {
+  const portId = def.filePortId ?? (def.kind === 'file' || def.kind === 'compound' ? def.sourcePortId : undefined)
+  return Boolean(portId && connectedPortIds.has(portId))
+}
+
+function commandPreviewTokenClass(token: string): string {
+  if (/^\s+$/.test(token)) return ''
+  if (/^--?[\w.-]+$/.test(token)) return 'text-sky-300'
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(token)) return 'text-emerald-300'
+  if (/^['"].*['"]$/.test(token)) return 'text-amber-200'
+  if (/^[|&;()<>]+$/.test(token)) return 'text-fuchsia-300'
+  if (token.includes('/') || /\.(pgen|pvar|psam|bed|bim|fam|tsv|csv|txt|gz|png|pdf|out)$/i.test(token)) return 'text-violet-200'
+  return 'text-slate-100'
+}
+
+function CommandPreview({ command }: { command: string }) {
+  const tokens = command.match(/\s+|--?[\w.-]+|\$[A-Za-z_][A-Za-z0-9_]*|['"][^'"]*['"]|[|&;()<>]+|[^\s]+/g) ?? []
+  return (
+    <code>
+      {tokens.map((token, index) => /^\s+$/.test(token)
+        ? token
+        : <span key={`${token}-${index}`} className={commandPreviewTokenClass(token)}>{token}</span>)}
+    </code>
+  )
+}
+
 interface ReadablePreviewItem {
   label: string
   detail: string
@@ -148,10 +228,11 @@ function optionPreviewDetail(def: AnalysisOptionDef, option: AnalysisOptionState
   if (def.kind === 'compound') {
     const main = optionValue(option)
     const extras = subOptionPreview(option, def)
-    return [main ? `Mode: ${main}` : '', ...extras].filter(Boolean).join('; ') || 'Enabled'
+    return [main ? `Mode: ${optionDisplayLabel(String(main), def.id)}` : '', ...extras].filter(Boolean).join('; ') || 'Enabled'
   }
   const value = optionValue(option)
-  return value || 'Needs a value'
+  if (!value) return 'Needs a value'
+  return def.options?.includes(String(value)) ? optionDisplayLabel(String(value), def.id) : String(value)
 }
 
 function readablePreviewItems(
@@ -178,7 +259,7 @@ function readablePreviewItems(
     return [{
       label: def.label,
       detail: optionPreviewDetail(def, option, connectedPathForPort),
-      meta: def.flag ?? def.id,
+      meta: def.flag,
     }]
   })
 }
@@ -233,6 +314,7 @@ function compoundSubOptionEditor(
 function ColumnOptionEditor(props: {
   nodeId: string
   snapshot: PipelineSnapshot
+  tool: ToolDef
   def: AnalysisOptionDef
   option: AnalysisOptionState
   schemas: SchemaCache
@@ -240,13 +322,13 @@ function ColumnOptionEditor(props: {
   onLoadSchema: (path: string, options?: { force?: boolean }) => Promise<void>
   onPatch: (patch: Partial<AnalysisOptionState>) => void
 }) {
-  const { nodeId, snapshot, def, option, schemas, refreshingSchemaPath, onLoadSchema, onPatch } = props
+  const { nodeId, snapshot, tool, def, option, schemas, refreshingSchemaPath, onLoadSchema, onPatch } = props
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [focused, setFocused] = useState(false)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
   const [draft, setDraft] = useState('')
-  const [suggestionRect, setSuggestionRect] = useState<{ top: number; left: number; width: number } | null>(null)
+  const [suggestionRect, setSuggestionRect] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null)
   const source = sourceValue(option, 'literal', def.sourcePortId)
   const inputPath = connectedInputPath(snapshot, nodeId, def.sourcePortId ?? 'input')
   const schema = resolveUpstreamSchema(snapshot, nodeId, def.sourcePortId ?? 'input', schemas)
@@ -258,7 +340,18 @@ function ColumnOptionEditor(props: {
   const suggestions = columns
     .filter((column) => !allowsMultiple || !selected.includes(column))
     .filter((column) => column.toLowerCase().includes(token))
-    .slice(0, 12)
+  const preferredColumn = preferredColumnForAnalysisOption(tool, def, schema)
+
+  useEffect(() => {
+    if (!schema || !option.enabled || !preferredColumn) return
+    const currentValue = (source.value ?? '').trim()
+    if (allowsMultiple && option.value === '' && !currentValue) return
+    const currentIsDefault = def.defaultValue !== undefined && currentValue === String(def.defaultValue)
+    const currentExists = columns.some((column) => column === currentValue)
+    if (currentValue && (!currentIsDefault || currentExists)) return
+    onPatch({ source: { ...source, value: preferredColumn } })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns, def.defaultValue, option.enabled, preferredColumn, schema])
 
   useEffect(() => {
     setActiveSuggestionIndex((index) => Math.min(index, Math.max(suggestions.length - 1, 0)))
@@ -270,7 +363,23 @@ function ColumnOptionEditor(props: {
 
   const updateSuggestionRect = useCallback(() => {
     const rect = inputRef.current?.getBoundingClientRect()
-    setSuggestionRect(rect ? { top: rect.bottom + 4, left: rect.left, width: rect.width } : null)
+    if (!rect) {
+      setSuggestionRect(null)
+      return
+    }
+    const gap = 4
+    const viewportPadding = 12
+    const preferredMaxHeight = 320
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding
+    const spaceAbove = rect.top - viewportPadding
+    const openAbove = spaceBelow < 180 && spaceAbove > spaceBelow
+    const maxHeight = Math.max(140, Math.min(preferredMaxHeight, (openAbove ? spaceAbove : spaceBelow) - gap))
+    setSuggestionRect({
+      top: openAbove ? Math.max(viewportPadding, rect.top - maxHeight - gap) : rect.bottom + gap,
+      left: Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - rect.width - viewportPadding)),
+      width: rect.width,
+      maxHeight,
+    })
   }, [])
 
   useEffect(() => {
@@ -292,12 +401,14 @@ function ColumnOptionEditor(props: {
   }, [columns.length, focused])
 
   const removeColumn = (column: string) => {
-    onPatch({ source: { ...source, value: selected.filter((value) => value !== column).join(' ') } })
+    const next = selected.filter((value) => value !== column).join(' ')
+    onPatch({ source: { ...source, value: next }, value: next })
   }
 
   const addColumn = (column: string) => {
     if (selected.includes(column)) return
-    onPatch({ source: { ...source, value: [...selected, column].join(' ') } })
+    const next = [...selected, column].join(' ')
+    onPatch({ source: { ...source, value: next }, value: next })
     setDraft('')
     setShowSuggestions(false)
     window.setTimeout(() => inputRef.current?.focus(), 0)
@@ -330,7 +441,9 @@ function ColumnOptionEditor(props: {
             top: suggestionRect.top,
             left: suggestionRect.left,
             width: suggestionRect.width,
+            maxHeight: suggestionRect.maxHeight,
           }}
+          onWheel={(event) => event.stopPropagation()}
         >
           {suggestions.map((column, index) => (
             <button
@@ -465,6 +578,7 @@ function ColumnOptionEditor(props: {
 function optionEditor(props: {
   nodeId: string
   snapshot: PipelineSnapshot
+  tool: ToolDef
   def: AnalysisOptionDef
   option: AnalysisOptionState
   schemas: SchemaCache
@@ -472,7 +586,7 @@ function optionEditor(props: {
   onLoadSchema: (path: string, options?: { force?: boolean }) => Promise<void>
   onPatch: (patch: Partial<AnalysisOptionState>) => void
 }) {
-  const { nodeId, snapshot, def, option, schemas, refreshingSchemaPath, onLoadSchema, onPatch } = props
+  const { nodeId, snapshot, tool, def, option, schemas, refreshingSchemaPath, onLoadSchema, onPatch } = props
   if (!option.enabled) return null
 
   if (def.kind === 'switch') {
@@ -487,7 +601,7 @@ function optionEditor(props: {
         className="bioflow-field h-8 rounded-md px-2 text-xs text-text-primary outline-none"
       >
         <option value="">-- select --</option>
-        {def.options?.map((value) => <option key={value} value={value}>{value}</option>)}
+        {def.options?.map((value) => <option key={value} value={value}>{optionDisplayLabel(value, def.id)}</option>)}
       </select>
     )
   }
@@ -502,7 +616,7 @@ function optionEditor(props: {
             className="bioflow-field h-8 rounded-md px-2 text-xs text-text-primary outline-none"
           >
             <option value="">-- select --</option>
-            {def.options.map((value) => <option key={value} value={value}>{value}</option>)}
+            {def.options.map((value) => <option key={value} value={value}>{optionDisplayLabel(value, def.id)}</option>)}
           </select>
         ) : (
           <Input
@@ -580,6 +694,7 @@ function optionEditor(props: {
       <ColumnOptionEditor
         nodeId={nodeId}
         snapshot={snapshot}
+        tool={tool}
         def={def}
         option={option}
         schemas={schemas}
@@ -623,11 +738,14 @@ export function AnalysisOptionsPanel({
   const [commandDraft, setCommandDraft] = useState(nodeData.commandOverride?.trim() ?? '')
   const [disconnectNotice, setDisconnectNotice] = useState<{ count: number; portId: string } | null>(null)
   const [validationOpen, setValidationOpen] = useState(false)
+  const showInlineValidateSettings = useSettingsStore((s) => s.settings.showInlineValidateSettings)
   const connectedPortIds = useMemo(
     () => snapshot.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.targetHandle ?? 'input'),
     [snapshot.edges, nodeId],
   )
+  const connectedPortIdSet = useMemo(() => new Set(connectedPortIds), [connectedPortIds])
   const defs = useMemo(() => getAnalysisOptionDefs(tool), [tool])
+  const defOrder = useMemo(() => new Map(defs.map((def, index) => [def.id, index])), [defs])
   const options = useMemo(() => normalizeAnalysisOptions(tool, nodeData, { connectedPortIds }), [tool, nodeData, connectedPortIds])
   const issues = validateAnalysisOptions(tool, { ...nodeData, analysisOptions: options }, connectedPortIds)
   const issueByOption = new Map(issues.map((issue) => [issue.optionId, issue.message]))
@@ -644,6 +762,8 @@ export function AnalysisOptionsPanel({
     ? connectedInputPath(snapshot, nodeId, 'input')
     : null
   const supportsCommandApply = tool.command === 'plink2' || tool.command === 'plink'
+  const showCommandEditing = supportsCommandApply || Boolean(nodeData.commandOverride?.trim())
+  const showOptionLibrary = supportsOptionLibrary(tool)
 
   useEffect(() => {
     setCommandDraft(nodeData.commandOverride?.trim() ?? preview)
@@ -693,20 +813,27 @@ export function AnalysisOptionsPanel({
     setCustomValue('')
   }
 
-  const term = search.trim().toLowerCase()
+  const term = showOptionLibrary ? search.trim().toLowerCase() : ''
   const selectedOptionIds = new Set(options.filter((option) => option.enabled).map((option) => option.optionId))
   const selectedDefs = defs
     .filter((def) => selectedOptionIds.has(def.id) && !isCanvasInputOption(def))
-    .sort((a, b) => Number(Boolean(b.required)) - Number(Boolean(a.required)) || a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
+    .sort((a, b) =>
+      (OPTION_GROUP_ORDER[a.group] ?? 99) - (OPTION_GROUP_ORDER[b.group] ?? 99)
+      || Number(Boolean(b.required)) - Number(Boolean(a.required))
+      || (defOrder.get(a.id) ?? 0) - (defOrder.get(b.id) ?? 0)
+      || a.label.localeCompare(b.label))
   const recommendedDefs = defs
-    .filter((def) => !selectedOptionIds.has(def.id) && !isCanvasInputOption(def) && (RECOMMENDED_BY_TOOL[tool.id] ?? []).includes(def.id))
+    .filter((def) =>
+      !selectedOptionIds.has(def.id) &&
+      !isRecommendedDefSatisfied(def, connectedPortIdSet) &&
+      (RECOMMENDED_BY_TOOL[tool.id] ?? []).includes(def.id))
     .sort((a, b) => (RECOMMENDED_BY_TOOL[tool.id] ?? []).indexOf(a.id) - (RECOMMENDED_BY_TOOL[tool.id] ?? []).indexOf(b.id))
   const commonSelectedDefs = selectedDefs.filter((def) => !def.advanced && def.group !== 'Advanced')
   const advancedSelectedDefs = selectedDefs.filter((def) => def.advanced || def.group === 'Advanced')
   const searchResults = term
     ? defs
         .filter((def) => !selectedOptionIds.has(def.id) && optionSearchText(def).includes(term))
-        .sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
+        .sort((a, b) => (OPTION_GROUP_ORDER[a.group] ?? 99) - (OPTION_GROUP_ORDER[b.group] ?? 99) || a.label.localeCompare(b.label))
         .slice(0, 8)
     : []
   const selectedCustomOptions = options.filter((option) => option.enabled && (option.customFlag !== undefined || option.customInputKind !== undefined))
@@ -747,23 +874,29 @@ export function AnalysisOptionsPanel({
         </div>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="min-w-0 flex-[1_1_10rem]">
-          <Input
-            label=""
-            value={search}
-            placeholder="Search options"
-            className="text-xs"
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </div>
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setCustomDialogOpen(true)}>
-          <Plus size={13} />
-          Custom
-        </Button>
-        <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setValidationOpen((value) => !value)}>
-          <ListChecks size={13} />
-          Validate settings
-        </Button>
+        {showOptionLibrary && (
+          <>
+            <div className="min-w-0 flex-[1_1_10rem]">
+              <Input
+                label=""
+                value={search}
+                placeholder="Search options"
+                className="text-xs"
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+            <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setCustomDialogOpen(true)}>
+              <Plus size={13} />
+              Custom
+            </Button>
+          </>
+        )}
+        {showInlineValidateSettings && (
+          <Button variant="secondary" size="sm" className="h-8 shrink-0 px-2 text-[11px]" onClick={() => setValidationOpen((value) => !value)}>
+            <ListChecks size={13} />
+            Validate settings
+          </Button>
+        )}
       </div>
       {validationOpen && (
         <div className={classNames('rounded-md px-3 py-2 text-[11px] shadow-sm', errorCount > 0 ? 'bg-error/10' : 'bg-success/10')}>
@@ -785,7 +918,7 @@ export function AnalysisOptionsPanel({
           )}
         </div>
       )}
-      {recommendedDefs.length > 0 && !term && (
+      {showOptionLibrary && recommendedDefs.length > 0 && !term && (
         <div className="rounded-md bg-bg-tertiary/30 p-2 shadow-inner">
           <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">Recommended</div>
           <div className="flex flex-wrap gap-1.5">
@@ -806,7 +939,7 @@ export function AnalysisOptionsPanel({
           </div>
         </div>
       )}
-      {term && (
+      {showOptionLibrary && term && (
         <div className="surface-popover rounded-md bg-bg-tertiary/30 p-1.5 shadow-inner">
           {searchResults.length > 0 ? (
             <div className="flex flex-col gap-1">
@@ -849,7 +982,7 @@ export function AnalysisOptionsPanel({
                 <div className="min-w-0">
                   <div className="text-xs font-medium leading-4 text-text-primary">{helpLabel(def)}</div>
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-nowrap font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
+                    {def.flag && <span className="text-nowrap font-mono text-[10px] text-text-muted">{def.flag}</span>}
                     <span className="bioflow-badge text-nowrap rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-muted">{def.group}</span>
                   </div>
                 </div>
@@ -867,6 +1000,7 @@ export function AnalysisOptionsPanel({
               {optionEditor({
                 nodeId,
                 snapshot,
+                tool,
                 def,
                 option,
                 schemas,
@@ -880,13 +1014,13 @@ export function AnalysisOptionsPanel({
         })}
         {selectedDefs.length === 0 && selectedCustomOptions.length === 0 && (
           <div className="rounded-md bg-bg-tertiary/30 px-3 py-3 text-xs text-text-muted shadow-inner">
-            Search above to add analysis options. File options are added to the Inputs section.
+            {showOptionLibrary ? 'Search above to add analysis options. File options are added to the Inputs section.' : 'No optional guided settings are enabled for this node.'}
           </div>
         )
         }
       </div>
 
-      {(advancedSelectedDefs.length > 0 || term.length > 0) && (
+      {(advancedSelectedDefs.length > 0 || (showOptionLibrary && term.length > 0)) && (
         <div className="rounded-md bg-bg-tertiary/20 shadow-inner">
           <button
             type="button"
@@ -913,7 +1047,7 @@ export function AnalysisOptionsPanel({
                         <div className="min-w-0">
                           <div className="text-xs font-medium text-text-primary">{helpLabel(def)}</div>
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-mono text-[10px] text-text-muted">{def.flag ?? def.id}</span>
+                            {def.flag && <span className="font-mono text-[10px] text-text-muted">{def.flag}</span>}
                             <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-muted">{def.group}</span>
                           </div>
                         </div>
@@ -926,6 +1060,7 @@ export function AnalysisOptionsPanel({
                       {optionEditor({
                         nodeId,
                         snapshot,
+                        tool,
                         def,
                         option,
                         schemas,
@@ -980,6 +1115,7 @@ export function AnalysisOptionsPanel({
               optionEditor({
                 nodeId,
                 snapshot,
+                tool,
                 def: customFileDef,
                 option: {
                   ...option,
@@ -1027,28 +1163,28 @@ export function AnalysisOptionsPanel({
             <div className="text-text-muted">No optional analysis settings are enabled yet.</div>
           )}
         </div>
-        <details className="mt-2 rounded-md bg-bg-secondary px-3 py-2 text-[11px] text-text-muted shadow-sm">
-          <summary className="cursor-pointer text-text-secondary">Raw command</summary>
-          <pre className="mt-2 overflow-x-auto rounded-md bg-bg-primary px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-100 shadow-inner">
-            <code>{preview}</code>
+        <div data-wrap className="mt-2 rounded-md bg-bg-secondary px-3 py-2 text-[11px] text-text-muted shadow-sm">
+          <h5 className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">Command preview</h5>
+          <pre className="overflow-x-hidden whitespace-pre-wrap break-words rounded-md bg-bg-primary px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-100 shadow-inner">
+            <CommandPreview command={preview} />
           </pre>
-        </details>
+        </div>
       </div>
 
-      <div className="rounded-md bg-bg-secondary p-2 shadow-sm">
+      {showCommandEditing && <div className="rounded-md bg-bg-secondary p-2 shadow-sm">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <div>
+          <div className="min-w-0">
             <div className="text-[10px] uppercase tracking-wide text-text-muted">Command editing</div>
             <div className="text-[11px] text-text-secondary">Edit the generated command directly, then either sync fields or keep it as an override.</div>
           </div>
-          <label className="flex items-center gap-2 text-[11px] text-text-secondary">
+          <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-text-secondary">
             <input
               type="checkbox"
               checked={Boolean(nodeData.commandOverride?.trim())}
               onChange={(event) => onChange({ commandOverride: event.target.checked ? commandDraft : undefined })}
               className="accent-accent"
             />
-            Use override
+            Override
           </label>
         </div>
         <textarea
@@ -1073,7 +1209,7 @@ export function AnalysisOptionsPanel({
             </div>
           </div>
         )}
-      </div>
+      </div>}
 
       <Dialog
         open={customDialogOpen}

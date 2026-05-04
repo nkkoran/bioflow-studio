@@ -39,6 +39,8 @@ interface Props {
 
 export function LogViewer({ run, connectionId }: Props) {
   const selectedNodeId = useRunStore((s) => s.selectedNodeId)
+  const selectedArrayTaskId = useRunStore((s) => s.selectedArrayTaskId)
+  const setSelectedArrayTask = useRunStore((s) => s.setSelectedArrayTask)
   const setLog = useRunStore((s) => s.setLog)
   const replaceLog = useRunStore((s) => s.replaceLog)
   const ns = selectedNodeId ? run.nodes[selectedNodeId] : null
@@ -46,7 +48,6 @@ export function LogViewer({ run, connectionId }: Props) {
   const [stream, setStream] = useState<Stream>('stdout')
   const sharedSlurmLog = Boolean(ns?.stdoutPath && ns.stdoutPath === ns.stderrPath)
   const effectiveStream: Stream = sharedSlurmLog ? 'stdout' : stream
-  const [taskIdx, setTaskIdx] = useState(0)
   const [loading, setLoading] = useState(false)
   const [diagnosing, setDiagnosing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -65,7 +66,13 @@ export function LogViewer({ run, connectionId }: Props) {
   const stderrLineCount = useRunStore((s) => ns ? (s.logs[ns.nodeId]?.stderr?.length ?? 0) : 0)
 
   // The concrete log file path (null when not yet known or array-with-placeholder).
-  const resolvedPath = ns ? resolveLogPath(ns, effectiveStream, taskIdx) : null
+  const taskOptions = useMemo(() => ns ? arrayTaskOptions(ns) : [], [ns])
+  const effectiveArrayTaskId = ns?.isArray
+    ? selectedArrayTaskId && taskOptions.some((task) => task.taskId === selectedArrayTaskId)
+      ? selectedArrayTaskId
+      : taskOptions[0]?.taskId ?? null
+    : null
+  const resolvedPath = ns ? resolveLogPath(ns, effectiveStream, effectiveArrayTaskId) : null
 
   // ── SFTP read ────────────────────────────────────────────────────────────
   // Used for: array jobs (all reads), non-array jobs (manual Refresh only).
@@ -104,7 +111,7 @@ export function LogViewer({ run, connectionId }: Props) {
   useEffect(() => {
     if (ns?.isArray) replaceLog(ns.nodeId, effectiveStream, [])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskIdx, ns?.nodeId, effectiveStream])
+  }, [effectiveArrayTaskId, ns?.nodeId, effectiveStream])
 
   // Load via SFTP on initial selection AND when a non-array job transitions
   // into a terminal state — streaming (tail -F) may have ended before the
@@ -116,7 +123,7 @@ export function LogViewer({ run, connectionId }: Props) {
       void sftpRefresh()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ns?.nodeId, ns?.status, effectiveStream, taskIdx])
+  }, [ns?.nodeId, ns?.status, effectiveStream, effectiveArrayTaskId])
 
   // Array jobs: auto-refresh while running.
   useEffect(() => {
@@ -186,12 +193,12 @@ export function LogViewer({ run, connectionId }: Props) {
           <>
             <span className="text-[10px] text-text-muted ml-2">task:</span>
             <select
-              value={taskIdx}
-              onChange={(e) => setTaskIdx(Number(e.target.value))}
+              value={effectiveArrayTaskId ?? ''}
+              onChange={(e) => setSelectedArrayTask(e.target.value || null)}
               className="bioflow-field rounded px-1.5 py-0.5 text-[10px] text-text-primary focus:outline-none"
             >
-              {Array.from({ length: ns.arraySize ?? 0 }, (_, i) => (
-                <option key={i} value={i}>{i}</option>
+              {taskOptions.map((task) => (
+                <option key={task.taskId} value={task.taskId}>{task.label}</option>
               ))}
             </select>
           </>
@@ -269,9 +276,14 @@ function StreamTab({ label, count, active, onClick }: { label: string; count: nu
  * Resolve the `%a` placeholder in array log paths to a concrete task index.
  * Non-array paths are returned unchanged.
  */
-function resolveLogPath(ns: NodeRunState, stream: Stream, taskIdx: number): string | null {
+function resolveLogPath(ns: NodeRunState, stream: Stream, taskId: string | null): string | null {
   const raw = stream === 'stdout' ? ns.stdoutPath : ns.stderrPath
   if (!raw) return null
   if (!ns.isArray) return raw
-  return raw.replace('%a', String(taskIdx))
+  return raw.replace('%a', taskId ?? '0')
+}
+
+function arrayTaskOptions(ns: NodeRunState): Array<{ taskId: string; label: string }> {
+  if (ns.arrayTaskMap?.length) return ns.arrayTaskMap.map((task) => ({ taskId: task.taskId, label: task.label }))
+  return Array.from({ length: ns.arraySize ?? 0 }, (_, index) => ({ taskId: String(index), label: `task ${index}` }))
 }

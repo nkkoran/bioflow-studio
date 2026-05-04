@@ -10,6 +10,7 @@ import {
   Code2,
   Copy,
   EyeOff,
+  FilePlus2,
   FileText,
   FolderOpen,
   FolderPlus,
@@ -23,6 +24,7 @@ import {
   RefreshCw,
   Search,
   Server,
+  SlidersHorizontal,
   Star,
   Table2,
   TerminalSquare,
@@ -33,6 +35,7 @@ import {
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { MenuSelect } from '@/components/ui/MenuSelect'
+import { ContextMenu } from '@/components/ui/ContextMenu'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
 import { useDnxStore } from '@/stores/dnxStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -103,7 +106,8 @@ export function RemoteFileBrowser({
   const connections = useConnectionStore((s) => s.connections)
   const setActiveConnection = useConnectionStore((s) => s.setActiveConnection)
   const connectLocal = useConnectionStore((s) => s.connectLocal)
-  const defaultDirectory = useConnectionStore((s) => activeConnectionId ? s.connections[activeConnectionId]?.config.defaultDirectory ?? '' : '')
+  const defaultDirectory = useConnectionStore((s) => activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID ? s.connections[activeConnectionId]?.config.defaultDirectory ?? '' : '')
+  const localDefaultDirectory = useConnectionStore((s) => s.connections[LOCAL_CONNECTION_ID]?.config.defaultDirectory ?? '')
   const dnxDefaultProjectId = useDnxStore((s) => s.defaultProjectId)
   const dnxAvailableProjects = useDnxStore((s) => s.availableProjects)
   const devMode = useSettingsStore((s) => s.devMode)
@@ -113,18 +117,21 @@ export function RemoteFileBrowser({
   const openPreview = useDataPreviewStore((s) => s.openFile)
   const setBottomPanelMode = useUIStore((s) => s.setBottomPanelMode)
   const exportSnapshot = usePipelineStore((s) => s.exportSnapshot)
+  const addFileNode = usePipelineStore((s) => s.addFileNode)
   const refreshDnxProjects = useDnxStore((s) => s.refreshProjects)
   const confirmDialog = useDialogStore((s) => s.confirm)
   const promptDialog = useDialogStore((s) => s.prompt)
   const [cwd, setCwd] = useState(initialPath ?? '')
   const [origin, setOrigin] = useState<FileOrigin>('local')
   const [homeDir, setHomeDir] = useState<string | null>(null)
+  const [localHomeDir, setLocalHomeDir] = useState<string | null>(null)
   const [entries, setEntries] = useState<RemoteFileEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string[]>([])
   const [hideDotfiles, setHideDotfiles] = useState(true)
   const [typeFilter, setTypeFilter] = useState<string>('all')
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [sortMode, setSortMode] = useState<'name' | 'size' | 'modified'>('name')
@@ -133,7 +140,7 @@ export function RemoteFileBrowser({
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [pathCopied, setPathCopied] = useState(false)
-  const [contextMenuPath, setContextMenuPath] = useState<string | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ path: string; position: { x: number; y: number } } | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [recents, setRecents] = useState<string[]>([])
   const [favoritePaths, setFavoritePaths] = useState<string[]>([])
@@ -143,6 +150,7 @@ export function RemoteFileBrowser({
   const [splitOpen, setSplitOpen] = useState(false)
   const [actionBusy, setActionBusy] = useState(false)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
+  const effectiveHomeDir = origin === 'local' ? (localHomeDir ?? homeDir) : homeDir
 
   useEffect(() => {
     if (!open) return
@@ -155,11 +163,23 @@ export function RemoteFileBrowser({
 
   useEffect(() => {
     if (!open) return
+    let cancelled = false
+    void window.api.local.homedir().then((home) => {
+      if (!cancelled) setLocalHomeDir(home)
+    }).catch(() => {
+      if (!cancelled) setLocalHomeDir(null)
+    })
+    return () => { cancelled = true }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
     setSearchOpen(false)
     setSearchQuery('')
     setPreview({ path: '', name: '', kind: 'empty', text: '' })
     setEditMode(false)
-    setContextMenuPath(null)
+    setContextMenu(null)
+    setFiltersOpen(false)
   }, [open])
 
   useEffect(() => {
@@ -209,7 +229,9 @@ export function RemoteFileBrowser({
     if (!open) return
     const defaultPath = origin === 'dnx'
       ? '/'
-      : defaultDirectory || (homeDir ? collapseHomePath(homeDir, homeDir) : '')
+      : origin === 'local'
+        ? (localDefaultDirectory || localHomeDir || '')
+        : defaultDirectory || (homeDir ? collapseHomePath(homeDir, homeDir) : '')
     if (initialPath) {
       setCwd(mode === 'directory' ? initialPath : pathDirname(initialPath) || initialPath)
       setBackStack([])
@@ -221,7 +243,7 @@ export function RemoteFileBrowser({
       setBackStack([])
       setForwardStack([])
     }
-  }, [defaultDirectory, homeDir, initialPath, open, origin])
+  }, [defaultDirectory, homeDir, initialPath, localDefaultDirectory, localHomeDir, open, origin])
 
   useEffect(() => {
     if (!open || !cwd) return
@@ -231,8 +253,14 @@ export function RemoteFileBrowser({
       setError('Connect to SSH before browsing remote files.')
       return
     }
+    if (origin === 'ssh' && (cwd === '~' || cwd.startsWith('~/')) && !effectiveHomeDir) {
+      setEntries([])
+      setLoading(true)
+      setError(null)
+      return
+    }
     if (origin === 'dnx' && !dnxDefaultProjectId) return
-    const path = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, homeDir)
+    const path = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, effectiveHomeDir)
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -240,7 +268,7 @@ export function RemoteFileBrowser({
       ? window.api.local.ls(path)
       : origin === 'dnx'
         ? window.api.dnx.listFiles({ projectId: dnxDefaultProjectId!, path })
-        : window.api.sftp.ls(activeConnectionId!, path)
+        : window.api.sftp.ls(activeConnectionId!, path, { force: reloadNonce > 0 })
     const timeout = new Promise<RemoteFileEntry[]>((_, reject) => {
       window.setTimeout(() => reject(new Error('Listing timed out. Try Refresh.')), 15000)
     })
@@ -255,19 +283,19 @@ export function RemoteFileBrowser({
       setLoading(false)
     })
     return () => { cancelled = true }
-  }, [activeConnectionId, cwd, dnxDefaultProjectId, homeDir, open, origin, reloadNonce])
+  }, [activeConnectionId, cwd, dnxDefaultProjectId, effectiveHomeDir, open, origin, reloadNonce])
 
   const favorites = useMemo(() => {
     const base = origin === 'dnx'
       ? ['/']
       : [
-          homeDir ? collapseHomePath(homeDir, homeDir) : '',
-          defaultDirectory ? collapseHomePath(defaultDirectory, homeDir) : '',
+          effectiveHomeDir ? collapseHomePath(effectiveHomeDir, effectiveHomeDir) : '',
+          (origin === 'local' ? localDefaultDirectory : defaultDirectory) ? collapseHomePath(origin === 'local' ? localDefaultDirectory : defaultDirectory, effectiveHomeDir) : '',
           '~/scratch',
           '~/projects',
         ].filter(Boolean)
-    return [...new Set([...favoritePaths.map((path) => collapseHomePath(path, homeDir)), ...base])]
-  }, [defaultDirectory, favoritePaths, homeDir, origin])
+    return [...new Set([...favoritePaths.map((path) => collapseHomePath(path, effectiveHomeDir)), ...base])]
+  }, [defaultDirectory, effectiveHomeDir, favoritePaths, homeDir, localDefaultDirectory, origin])
 
   const toggleFavorite = async (path: string) => {
     const next = favoritePaths.includes(path)
@@ -300,7 +328,9 @@ export function RemoteFileBrowser({
       if (sortMode === 'modified') return b.modified - a.modified
       return a.name.localeCompare(b.name, undefined, { numeric: true })
   }), [accept, entries, hideDotfiles, searchQuery, sortMode, typeFilter])
-  const selectedEntry = useMemo(() => entries.find((entry) => selected.includes(entry.path)) ?? null, [entries, selected])
+  const selectedEntries = useMemo(() => selected.map((path) => entries.find((entry) => entry.path === path)).filter((entry): entry is RemoteFileEntry => Boolean(entry)), [entries, selected])
+  const selectedEntry = selectedEntries[0] ?? null
+  const contextEntry = useMemo(() => contextMenu ? entries.find((entry) => entry.path === contextMenu.path) ?? null : null, [contextMenu, entries])
   const filterChips = useMemo(() => {
     const accepted = accept?.filter(Boolean) ?? []
     if (accepted.length > 0) return ['all', ...accepted]
@@ -316,7 +346,7 @@ export function RemoteFileBrowser({
       return
     }
     let cancelled = false
-    const normalizedPath = normalizeSelectedPath(selectedEntry.path, origin, homeDir)
+    const normalizedPath = normalizeSelectedPath(selectedEntry.path, origin, effectiveHomeDir)
     const connectionId = origin === 'local' ? LOCAL_CONNECTION_ID : activeConnectionId
     setPreview({ path: normalizedPath, name: selectedEntry.name, kind: 'loading', text: '' })
     setEditMode(false)
@@ -374,12 +404,12 @@ export function RemoteFileBrowser({
       })
     })
     return () => { cancelled = true }
-  }, [activeConnectionId, homeDir, open, origin, selectedEntry])
+  }, [activeConnectionId, effectiveHomeDir, open, origin, selectedEntry])
 
   const navigateTo = (nextPath: string, opts: { pushHistory?: boolean } = {}) => {
     const normalized = origin === 'dnx'
       ? normalizeDnxPath(nextPath)
-      : collapseHomePath(expandHomePath(nextPath, homeDir), homeDir)
+      : collapseHomePath(expandHomePath(nextPath, effectiveHomeDir), effectiveHomeDir)
     setSelected([])
     setCwd((current) => {
       if (current !== normalized && opts.pushHistory !== false) {
@@ -413,7 +443,7 @@ export function RemoteFileBrowser({
   }
 
   const goUp = () => {
-    const currentPath = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, homeDir)
+    const currentPath = origin === 'dnx' ? normalizeDnxPath(cwd) : expandHomePath(cwd, effectiveHomeDir)
     const parent = pathDirname(currentPath)
     if (!parent || parent === currentPath) return
     navigateTo(parent)
@@ -424,27 +454,27 @@ export function RemoteFileBrowser({
       navigateTo('/')
       return
     }
-    if (!homeDir) return
-    navigateTo(homeDir)
+    if (!effectiveHomeDir) return
+    navigateTo(effectiveHomeDir)
   }
 
   const refreshCurrentFolder = () => setReloadNonce((value) => value + 1)
 
   const splitInitialPanes = useMemo(() => {
     const baseOrigin = activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID ? 'ssh' : 'local'
-    const rawBase = baseOrigin === 'ssh' ? (defaultDirectory || homeDir || '/') : (homeDir || '/')
-    const basePath = expandHomePath(rawBase, homeDir)
+    const rawBase = baseOrigin === 'ssh' ? (defaultDirectory || homeDir || '/') : (localDefaultDirectory || localHomeDir || '/')
+    const basePath = expandHomePath(rawBase, baseOrigin === 'ssh' ? homeDir : localHomeDir)
     const currentOrigin = origin === 'ssh' ? 'ssh' : 'local'
     const selectedFolder = selectedEntry?.isDirectory ? selectedEntry.path : ''
     const currentPath = origin === 'dnx'
       ? basePath
-      : normalizeSelectedPath(selectedFolder || cwd, origin, homeDir)
-    const base = { origin: baseOrigin as 'local' | 'ssh', cwd: basePath }
-    const current = { origin: currentOrigin as 'local' | 'ssh', cwd: currentPath || basePath }
+      : normalizeSelectedPath(selectedFolder || cwd, origin, effectiveHomeDir)
+    const base = { origin: baseOrigin as 'local' | 'ssh', connectionId: baseOrigin === 'ssh' ? activeConnectionId : null, cwd: basePath }
+    const current = { origin: currentOrigin as 'local' | 'ssh', connectionId: currentOrigin === 'ssh' ? activeConnectionId : null, cwd: currentPath || basePath }
     return splitExplorerBasePane === 'left'
-      ? [base, current] as [{ origin: 'local' | 'ssh'; cwd: string }, { origin: 'local' | 'ssh'; cwd: string }]
-      : [current, base] as [{ origin: 'local' | 'ssh'; cwd: string }, { origin: 'local' | 'ssh'; cwd: string }]
-  }, [activeConnectionId, cwd, defaultDirectory, homeDir, origin, selectedEntry, splitExplorerBasePane])
+      ? [base, current] as [{ origin: 'local' | 'ssh'; connectionId: string | null; cwd: string }, { origin: 'local' | 'ssh'; connectionId: string | null; cwd: string }]
+      : [current, base] as [{ origin: 'local' | 'ssh'; connectionId: string | null; cwd: string }, { origin: 'local' | 'ssh'; connectionId: string | null; cwd: string }]
+  }, [activeConnectionId, cwd, defaultDirectory, effectiveHomeDir, homeDir, localDefaultDirectory, localHomeDir, origin, selectedEntry, splitExplorerBasePane])
 
   const breadcrumbs = useMemo(() => {
     if (origin === 'dnx') {
@@ -458,9 +488,9 @@ export function RemoteFileBrowser({
       }
       return crumbs
     }
-    const expanded = expandHomePath(cwd, homeDir)
-    const prefix = homeDir && expanded.startsWith(homeDir) ? '~' : ''
-    const relative = prefix && homeDir ? expanded.slice(homeDir.length).replace(/^\/+/, '') : expanded.replace(/^\/+/, '')
+    const expanded = expandHomePath(cwd, effectiveHomeDir)
+    const prefix = effectiveHomeDir && expanded.startsWith(effectiveHomeDir) ? '~' : ''
+    const relative = prefix && effectiveHomeDir ? expanded.slice(effectiveHomeDir.length).replace(/^\/+/, '') : expanded.replace(/^\/+/, '')
     const parts = relative ? relative.split('/').filter(Boolean) : []
     const crumbs: Array<{ label: string; path: string }> = [{ label: prefix || '/', path: prefix || '/' }]
     let running = prefix || ''
@@ -469,7 +499,7 @@ export function RemoteFileBrowser({
       crumbs.push({ label: part, path: running })
     }
     return crumbs
-  }, [cwd, homeDir, origin])
+  }, [cwd, effectiveHomeDir, origin])
 
   const originLabel = useMemo(() => {
     if (origin === 'dnx') {
@@ -504,25 +534,54 @@ export function RemoteFileBrowser({
     onClose()
   }
 
-  const copySelected = async () => {
-    if (!selectedEntry || origin === 'dnx' || actionBusy) return
-    if (origin === 'local' && selectedEntry.isDirectory) {
+  const copyEntry = async (entry: RemoteFileEntry) => {
+    if (origin === 'dnx' || actionBusy) return
+    if (origin === 'local' && entry.isDirectory) {
       setActionMessage('Local folder copy is not available here. Use the split transfer view for file moves.')
       return
     }
     const destination = await promptDialog({
       title: 'Copy path',
       message: 'Choose the destination path.',
-      defaultValue: `${normalizeSelectedPath(cwd, origin, homeDir).replace(/\/+$/, '')}/${selectedEntry.name}`,
+      defaultValue: `${normalizeSelectedPath(cwd, origin, effectiveHomeDir).replace(/\/+$/, '')}/${entry.name}`,
       confirmLabel: 'Copy',
     })
     if (!destination?.trim()) return
     setActionBusy(true)
     setActionMessage(null)
     try {
-      if (origin === 'local') await window.api.local.copy(selectedEntry.path, destination.trim())
-      else await window.api.ssh.exec(activeConnectionId!, `cp -R ${shellQuote(selectedEntry.path)} ${shellQuote(destination.trim())}`)
-      setActionMessage(`Copied ${selectedEntry.name}`)
+      if (origin === 'local') await window.api.local.copy(entry.path, destination.trim())
+      else await window.api.ssh.exec(activeConnectionId!, `cp -R ${shellQuote(entry.path)} ${shellQuote(destination.trim())}`)
+      setActionMessage(`Copied ${entry.name}`)
+      refreshCurrentFolder()
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const copySelected = async () => {
+    if (!selectedEntry) return
+    await copyEntry(selectedEntry)
+  }
+
+  const moveEntry = async (entry: RemoteFileEntry) => {
+    if (origin === 'dnx' || actionBusy) return
+    const destination = await promptDialog({
+      title: 'Move or rename path',
+      message: 'Choose the new path.',
+      defaultValue: `${normalizeSelectedPath(cwd, origin, effectiveHomeDir).replace(/\/+$/, '')}/${entry.name}`,
+      confirmLabel: 'Move',
+    })
+    if (!destination?.trim()) return
+    setActionBusy(true)
+    setActionMessage(null)
+    try {
+      if (origin === 'local') await window.api.local.rename(entry.path, destination.trim())
+      else await window.api.sftp.rename(activeConnectionId!, entry.path, destination.trim())
+      setSelected([])
+      setActionMessage(`Moved ${entry.name}`)
       refreshCurrentFolder()
     } catch (err) {
       setActionMessage(err instanceof Error ? err.message : String(err))
@@ -532,22 +591,19 @@ export function RemoteFileBrowser({
   }
 
   const moveSelected = async () => {
-    if (!selectedEntry || origin === 'dnx' || actionBusy) return
-    const destination = await promptDialog({
-      title: 'Move or rename path',
-      message: 'Choose the new path.',
-      defaultValue: `${normalizeSelectedPath(cwd, origin, homeDir).replace(/\/+$/, '')}/${selectedEntry.name}`,
-      confirmLabel: 'Move',
-    })
-    if (!destination?.trim()) return
+    if (!selectedEntry) return
+    await moveEntry(selectedEntry)
+  }
+
+  const downloadEntry = async (entry: RemoteFileEntry) => {
+    if (origin !== 'ssh' || !activeConnectionId || actionBusy) return
+    const folder = await window.api.dialog.openDirectory()
+    if (!folder) return
     setActionBusy(true)
     setActionMessage(null)
     try {
-      if (origin === 'local') await window.api.local.rename(selectedEntry.path, destination.trim())
-      else await window.api.sftp.rename(activeConnectionId!, selectedEntry.path, destination.trim())
-      setSelected([])
-      setActionMessage(`Moved ${selectedEntry.name}`)
-      refreshCurrentFolder()
+      await window.api.sftp.download(activeConnectionId, entry.path, `${folder.replace(/\/+$/, '')}/${entry.name}`)
+      setActionMessage(`Downloaded ${entry.name}`)
     } catch (err) {
       setActionMessage(err instanceof Error ? err.message : String(err))
     } finally {
@@ -556,27 +612,16 @@ export function RemoteFileBrowser({
   }
 
   const downloadSelected = async () => {
-    if (!selectedEntry || origin !== 'ssh' || !activeConnectionId || actionBusy) return
-    const folder = await window.api.dialog.openDirectory()
-    if (!folder) return
-    setActionBusy(true)
-    setActionMessage(null)
-    try {
-      await window.api.sftp.download(activeConnectionId, selectedEntry.path, `${folder.replace(/\/+$/, '')}/${selectedEntry.name}`)
-      setActionMessage(`Downloaded ${selectedEntry.name}`)
-    } catch (err) {
-      setActionMessage(err instanceof Error ? err.message : String(err))
-    } finally {
-      setActionBusy(false)
-    }
+    if (!selectedEntry) return
+    await downloadEntry(selectedEntry)
   }
 
-  const deleteSelected = async () => {
-    if (!selectedEntry || origin === 'dnx' || actionBusy) return
+  const deleteEntry = async (entry: RemoteFileEntry) => {
+    if (origin === 'dnx' || actionBusy) return
     const confirmed = await confirmDialog({
-      title: selectedEntry.isDirectory ? 'Delete folder' : 'Delete file',
-      message: `Delete ${selectedEntry.path}?`,
-      detail: selectedEntry.isDirectory ? 'This deletes the folder and everything inside it.' : undefined,
+      title: entry.isDirectory ? 'Delete folder' : 'Delete file',
+      message: `Delete ${entry.path}?`,
+      detail: entry.isDirectory ? 'This deletes the folder and everything inside it.' : undefined,
       confirmLabel: 'Delete',
       cancelLabel: 'Cancel',
       danger: true,
@@ -585,9 +630,9 @@ export function RemoteFileBrowser({
     setActionBusy(true)
     setActionMessage(null)
     try {
-      if (origin === 'local') await window.api.local.delete(selectedEntry.path)
-      else await window.api.sftp.delete(activeConnectionId!, selectedEntry.path)
-      setActionMessage(`Deleted ${selectedEntry.name}`)
+      if (origin === 'local') await window.api.local.delete(entry.path)
+      else await window.api.sftp.delete(activeConnectionId!, entry.path)
+      setActionMessage(`Deleted ${entry.name}`)
       setSelected([])
       refreshCurrentFolder()
     } catch (err) {
@@ -595,6 +640,11 @@ export function RemoteFileBrowser({
     } finally {
       setActionBusy(false)
     }
+  }
+
+  const deleteSelected = async () => {
+    if (!selectedEntry) return
+    await deleteEntry(selectedEntry)
   }
 
   const uploadToCurrentFolder = async () => {
@@ -612,7 +662,7 @@ export function RemoteFileBrowser({
     }))) {
       return
     }
-    const destination = `${normalizeSelectedPath(cwd, origin, homeDir).replace(/\/+$/, '')}/${name}`
+    const destination = `${normalizeSelectedPath(cwd, origin, effectiveHomeDir).replace(/\/+$/, '')}/${name}`
     setActionBusy(true)
     setActionMessage(null)
     try {
@@ -628,7 +678,7 @@ export function RemoteFileBrowser({
 
   const createFolderInCurrent = async () => {
     if (origin === 'dnx' || actionBusy) return
-    const basePath = normalizeSelectedPath(cwd, origin, homeDir).replace(/\/+$/, '')
+    const basePath = normalizeSelectedPath(cwd, origin, effectiveHomeDir).replace(/\/+$/, '')
     const next = await promptDialog({
       title: 'New folder',
       message: 'Choose the folder path.',
@@ -696,10 +746,64 @@ export function RemoteFileBrowser({
     }
   }
 
+  const addEntriesToCanvas = (entriesToAdd: RemoteFileEntry[]) => {
+    if (entriesToAdd.length === 0) return
+    const itemOrigin: FileOrigin = origin
+    const source = itemOrigin === 'local' ? 'local' : 'remote'
+    const offset = Date.now() % 80
+    if (entriesToAdd.length === 1) {
+      const entry = entriesToAdd[0]
+      addFileNode(
+        { x: 120 + offset, y: 140 + offset },
+        {
+          isInput: true,
+          label: entry.name,
+          path: normalizeSelectedPath(entry.path, origin, effectiveHomeDir),
+          pathKind: entry.isDirectory ? 'directory' : 'file',
+          fileType: entry.isDirectory ? 'any' : inferFileType(entry.name),
+          source,
+          origin: itemOrigin,
+        },
+      )
+      setActionMessage(`Added ${entry.name} to the canvas`)
+      return
+    }
+
+    const fileEntries = entriesToAdd.filter((entry) => !entry.isDirectory)
+    const entriesForSplit = fileEntries.length > 0 ? collapseBrowserPlinkFileEntries(fileEntries) : entriesToAdd
+    if (entriesForSplit.length === 1) {
+      addEntriesToCanvas(entriesForSplit)
+      return
+    }
+    const splitGuess = inferBrowserSplitKeys(entriesForSplit)
+    const types = [...new Set(entriesForSplit.map((entry) => entry.isDirectory ? 'any' : inferFileType(entry.name)))]
+    addFileNode(
+      { x: 120 + offset, y: 140 + offset },
+      {
+        isInput: true,
+        label: `${entriesForSplit.length} selected files`,
+        path: '',
+        fileType: types.length === 1 ? types[0] : 'any',
+        source,
+        origin: itemOrigin,
+        split: {
+          axis: splitGuess.axis,
+          items: entriesForSplit.map((entry, index) => ({
+            key: splitGuess.keys[index] ?? entry.name,
+            rawKey: splitGuess.rawKeys[index] ?? entry.name,
+            path: normalizeSelectedPath(entry.path, origin, effectiveHomeDir),
+          })),
+          pattern: { kind: 'manual' },
+        },
+      },
+    )
+    setActionMessage(`Added ${entriesForSplit.length} selected paths as a split input`)
+  }
+
   const confirmSelection = async () => {
     const picked = mode === 'directory'
-      ? [selected[0] ? normalizeSelectedPath(selected[0], origin, homeDir) : normalizeSelectedPath(cwd, origin, homeDir)]
-      : selected.length > 0 ? selected.map((path) => normalizeSelectedPath(path, origin, homeDir)) : []
+      ? [selected[0] ? normalizeSelectedPath(selected[0], origin, effectiveHomeDir) : normalizeSelectedPath(cwd, origin, effectiveHomeDir)]
+      : selected.length > 0 ? selected.map((path) => normalizeSelectedPath(path, origin, effectiveHomeDir)) : []
     if (browseOnly || picked.length === 0) {
       onClose()
       return
@@ -723,19 +827,21 @@ export function RemoteFileBrowser({
       <div className="bioflow-file-browser-grid">
         <aside className="bioflow-file-browser-sidebar scroll-region p-2">
           <SourceRailRow
-            icon={<HardDrive size={14} />}
+            icon={<HardDrive size={12} />}
             label="Local"
             active={origin === 'local'}
             onClick={() => {
+              const target = localDefaultDirectory || localHomeDir || undefined
               setOrigin('local')
-              void connectLocal(homeDir ?? undefined)
+              void connectLocal(target)
+              if (target) navigateTo(target, { pushHistory: false })
             }}
           />
           <div className="bioflow-section-label mt-3 px-2 py-1">SSH connections</div>
           {Object.entries(connections).filter(([id]) => id !== LOCAL_CONNECTION_ID).map(([id, connection]) => (
             <SourceRailRow
               key={id}
-              icon={<Server size={14} />}
+              icon={<Server size={12} />}
               label={connection.config.name || connection.config.host}
               active={origin === 'ssh' && activeConnectionId === id}
               disabled={connection.status !== 'connected'}
@@ -750,7 +856,7 @@ export function RemoteFileBrowser({
             <>
               <div className="bioflow-section-label mt-3 px-2 py-1">DNAnexus</div>
               <SourceRailRow
-                icon={<Server size={14} />}
+                icon={<Server size={12} />}
                 label={originLabel}
                 active={origin === 'dnx'}
                 disabled={!dnxDefaultProjectId}
@@ -760,14 +866,14 @@ export function RemoteFileBrowser({
           )}
           <div className="bioflow-section-label mt-3 px-2 py-1">Favorites</div>
           {favorites.map((path) => (
-            <SourceRailRow key={path} icon={<Star size={14} />} label={collapseHomePath(path, homeDir)} onClick={() => navigateTo(path)} />
+            <SourceRailRow key={path} icon={<Star size={12} />} label={collapseHomePath(path, effectiveHomeDir)} onClick={() => navigateTo(path)} />
           ))}
           <div className="bioflow-section-label mt-3 px-2 py-1">Recents</div>
           {recents.length > 0 ? recents.map((path) => (
             <SourceRailRow
               key={path}
-              icon={<Clock3 size={14} />}
-              label={collapseHomePath(path, homeDir)}
+              icon={<Clock3 size={12} />}
+              label={collapseHomePath(path, effectiveHomeDir)}
               onClick={() => {
                 if (mode === 'directory') navigateTo(path)
                 else setSelected([path])
@@ -776,13 +882,13 @@ export function RemoteFileBrowser({
           )) : <div className="px-2 py-1 text-[11px] text-text-muted">No recent picks yet.</div>}
           <div className="mt-auto flex flex-col gap-1 pt-3">
             {showTransfer && (
-              <button type="button" onClick={() => setSplitOpen(true)} className="interactive-row flex h-8 items-center gap-2 px-2 text-xs text-text-secondary hover:text-text-primary">
-                <PanelsLeftRight size={14} />
+              <button type="button" onClick={() => setSplitOpen(true)} className="interactive-row flex h-7 items-center gap-1.5 px-2 text-[11px] text-text-secondary hover:text-text-primary">
+                <PanelsLeftRight size={12} />
                 <span className="text-nowrap">Split transfer</span>
               </button>
             )}
-            <button type="button" onClick={() => void toggleFavorite(normalizeSelectedPath(cwd, origin, homeDir))} className="interactive-row flex h-8 items-center gap-2 px-2 text-xs text-text-secondary hover:text-text-primary">
-              <Star size={14} />
+            <button type="button" onClick={() => void toggleFavorite(normalizeSelectedPath(cwd, origin, effectiveHomeDir))} className="interactive-row flex h-7 items-center gap-1.5 px-2 text-[11px] text-text-secondary hover:text-text-primary">
+              <Star size={12} />
               <span className="text-nowrap">Add favorite</span>
             </button>
           </div>
@@ -793,37 +899,37 @@ export function RemoteFileBrowser({
             <div className="flex shrink-0 items-center gap-1">
               <BrowserToolbarIconButton
                 label="Back"
-                icon={<ArrowLeft size={14} />}
+                icon={<ArrowLeft size={12} />}
                 onClick={goBack}
                 disabled={backStack.length === 0}
               />
               <BrowserToolbarIconButton
                 label="Forward"
-                icon={<ArrowRight size={14} />}
+                icon={<ArrowRight size={12} />}
                 onClick={goForward}
                 disabled={forwardStack.length === 0}
               />
               <BrowserToolbarIconButton
                 label="Parent folder"
-                icon={<ArrowUp size={14} />}
+                icon={<ArrowUp size={12} />}
                 onClick={goUp}
                 disabled={!cwd || cwd === '/' || cwd === '~'}
               />
               <BrowserToolbarIconButton
                 label="Home"
-                icon={<Home size={14} />}
+                icon={<Home size={12} />}
                 onClick={goHome}
-                disabled={origin !== 'dnx' && !homeDir}
+                disabled={origin !== 'dnx' && !effectiveHomeDir}
               />
             </div>
             <div className="min-w-0 flex-1 overflow-hidden">
-              <div className="flex min-w-0 items-center gap-1 text-xs text-text-secondary">
+              <div className="flex min-w-0 items-center gap-1 text-[11px] text-text-secondary">
                 {breadcrumbs.map((crumb, index) => (
                   <span key={`${crumb.path}-${index}`} className="flex min-w-0 items-center gap-1">
                     {index > 0 && <ChevronRight size={11} className="shrink-0 text-text-muted" />}
                     <button
                       type="button"
-                      className="text-nowrap min-w-0 rounded px-1 py-0.5 hover:bg-bg-hover hover:text-text-primary"
+                      className="text-nowrap min-w-0 max-w-28 truncate rounded px-1 py-0.5 font-mono hover:bg-bg-hover hover:text-text-primary"
                       onClick={() => navigateTo(crumb.path)}
                       title={crumb.path}
                     >
@@ -835,11 +941,11 @@ export function RemoteFileBrowser({
             </div>
             <button
               type="button"
-              className="interactive-button flex h-7 min-w-7 items-center justify-center text-text-muted hover:text-text-primary"
+              className="interactive-button flex h-6 min-w-6 items-center justify-center text-text-muted hover:text-text-primary"
               title={fileExplorerViewMode === 'icons' ? 'Show list view' : 'Show grid view'}
               onClick={() => void setSetting('settings:fileExplorerViewMode', fileExplorerViewMode === 'icons' ? 'list' : 'icons')}
             >
-              {fileExplorerViewMode === 'icons' ? <List size={14} /> : <Grid2X2 size={14} />}
+              {fileExplorerViewMode === 'icons' ? <List size={12} /> : <Grid2X2 size={12} />}
             </button>
             <MenuSelect
               value={sortMode}
@@ -851,49 +957,49 @@ export function RemoteFileBrowser({
               ]}
               ariaLabel="Sort files"
               className="w-24"
-              buttonClassName="h-7 text-[11px]"
+              buttonClassName="h-6 text-[10px]"
               menuClassName="w-32"
             />
             <button
               type="button"
-              className="interactive-button flex h-7 min-w-7 items-center justify-center text-text-muted hover:text-text-primary"
+              className="interactive-button flex h-6 min-w-6 items-center justify-center text-text-muted hover:text-text-primary"
               title="Search files"
               onClick={() => setSearchOpen((value) => !value)}
             >
-              <Search size={14} />
+              <Search size={12} />
             </button>
             <button
               type="button"
-              className="interactive-button flex h-7 min-w-7 items-center justify-center text-text-muted hover:text-text-primary"
+              className="interactive-button flex h-6 min-w-6 items-center justify-center text-text-muted hover:text-text-primary"
               title="New folder"
               disabled={origin === 'dnx' || actionBusy}
               onClick={() => void createFolderInCurrent()}
             >
-              <FolderPlus size={14} />
+              <FolderPlus size={12} />
             </button>
             <button
               type="button"
-              className="interactive-button flex h-7 min-w-7 items-center justify-center text-text-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+              className="interactive-button flex h-6 min-w-6 items-center justify-center text-text-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
               title="Upload"
               disabled={origin !== 'ssh' || !activeConnectionId || actionBusy}
               onClick={() => void uploadToCurrentFolder()}
             >
-              <Upload size={14} />
+              <Upload size={12} />
             </button>
             <button
               type="button"
-              className="interactive-button flex h-7 min-w-7 items-center justify-center text-text-muted hover:text-text-primary"
+              className="interactive-button flex h-6 min-w-6 items-center justify-center text-text-muted hover:text-text-primary"
               title="Refresh"
               onClick={refreshCurrentFolder}
             >
-              <RefreshCw size={14} className={loading ? 'animate-fade-in' : ''} />
+              <RefreshCw size={12} className={loading ? 'animate-fade-in' : ''} />
             </button>
           </header>
 
           {searchOpen && (
             <div className="animate-fade-up px-3 py-2">
-              <div className="bioflow-field flex h-8 items-center gap-2 rounded-md px-2">
-                <Search size={14} className="text-text-muted" />
+              <div className="bioflow-field flex h-7 items-center gap-1.5 rounded-md px-2">
+                <Search size={12} className="text-text-muted" />
                 <input
                   ref={searchInputRef}
                   value={searchQuery}
@@ -905,7 +1011,7 @@ export function RemoteFileBrowser({
                     }
                   }}
                   placeholder="Filter files..."
-                  className="min-w-0 flex-1 bg-transparent text-xs text-text-primary placeholder:text-text-muted outline-none"
+                  className="min-w-0 flex-1 bg-transparent text-[11px] text-text-primary placeholder:text-text-muted outline-none"
                 />
                 {searchQuery && (
                   <button type="button" onClick={() => setSearchQuery('')} className="interactive-button flex h-5 w-5 items-center justify-center text-text-muted">
@@ -941,7 +1047,7 @@ export function RemoteFileBrowser({
                 <p className="text-wrap text-xs text-text-muted">No matching files in this location.</p>
               </div>
             ) : fileExplorerViewMode === 'icons' ? (
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(6.75rem,6.75rem))] justify-start gap-x-4 gap-y-3 p-3">
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(6rem,6rem))] justify-start gap-x-3 gap-y-2.5 p-3">
                 {visibleEntries.map((entry) => (
                   <BrowserGridCard
                     key={entry.path}
@@ -959,51 +1065,98 @@ export function RemoteFileBrowser({
                     key={entry.path}
                     entry={entry}
                     selected={selected.includes(entry.path)}
-                    menuOpen={contextMenuPath === entry.path}
                     onSelect={selectEntry}
                     onActivate={activateEntry}
-                    onMenu={() => {
+                    onMenu={(position) => {
                       setSelected([entry.path])
-                      setContextMenuPath((current) => current === entry.path ? null : entry.path)
+                      setContextMenu((current) => current?.path === entry.path ? null : { path: entry.path, position })
                     }}
-                    onCloseMenu={() => setContextMenuPath(null)}
-                    onCopyPath={() => void navigator.clipboard.writeText(entry.path)}
-                    onCopy={() => void copySelected()}
-                    onDownload={origin === 'ssh' ? () => void downloadSelected() : undefined}
-                    onMove={() => void moveSelected()}
-                    onDelete={() => void deleteSelected()}
                   />
                 ))}
               </div>
             )}
           </main>
 
+          {contextEntry && contextMenu && (
+            <ContextMenu
+              position={contextMenu.position}
+              onClose={() => setContextMenu(null)}
+              items={[
+                { label: 'Open', onClick: () => activateEntry(contextEntry) },
+                { label: 'Copy path', onClick: () => void navigator.clipboard.writeText(contextEntry.path) },
+                ...(browseOnly
+                  ? [{ label: 'Add to canvas', onClick: () => addEntriesToCanvas([contextEntry]) }]
+                  : []),
+                { label: 'Copy to...', onClick: () => void copyEntry(contextEntry), disabled: origin === 'dnx' },
+                ...(origin === 'ssh' ? [{ label: 'Download', onClick: () => void downloadEntry(contextEntry) }] : []),
+                { label: 'Rename', onClick: () => void moveEntry(contextEntry), disabled: origin === 'dnx' || contextEntry.isDirectory },
+                { label: 'Move to...', onClick: () => void moveEntry(contextEntry), disabled: origin === 'dnx' },
+                { label: '', onClick: () => undefined, separator: true },
+                { label: 'Delete', onClick: () => void deleteEntry(contextEntry), disabled: origin === 'dnx', danger: true },
+              ]}
+            />
+          )}
+
           <footer className="bioflow-file-browser-footer">
-            <div className="flex min-w-0 flex-1 items-center gap-1">
-              {filterChips.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => setTypeFilter(option)}
-                  className={classNames(
-                    'interactive-row h-7 px-2 text-[11px]',
-                    typeFilter === option ? 'bg-accent/10 text-text-primary' : 'text-text-muted',
-                  )}
-                >
-                  <span className="text-nowrap">{option}</span>
-                </button>
-              ))}
+            <div className="relative flex min-w-0 flex-1 items-center gap-2">
+              <span className="text-nowrap text-[11px] text-text-muted">
+                {selectedEntries.length > 0 ? `${selectedEntries.length} selected` : `${visibleEntries.length} shown`}
+              </span>
               <button
                 type="button"
-                onClick={() => setHideDotfiles((prev) => !prev)}
-                className="interactive-row flex h-7 items-center gap-1 px-2 text-[11px] text-text-muted"
+                onClick={() => setFiltersOpen((open) => !open)}
+                className={classNames(
+                  'interactive-row flex h-7 items-center gap-1.5 px-2 text-[11px]',
+                  filtersOpen || typeFilter !== 'all' || !hideDotfiles ? 'text-text-primary' : 'text-text-muted',
+                )}
               >
-                <EyeOff size={11} />
-                <span className="text-nowrap">{hideDotfiles ? 'Hidden off' : 'Hidden on'}</span>
+                <SlidersHorizontal size={12} />
+                <span className="text-nowrap">Filters</span>
               </button>
+              {filtersOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setFiltersOpen(false)} />
+                  <div className="surface-popover absolute bottom-full left-0 z-50 mb-2 w-64 rounded-md p-2 shadow-xl">
+                    <div className="mb-1 px-1 text-[10px] uppercase tracking-wide text-text-muted">File types</div>
+                    <div className="flex flex-wrap gap-1">
+                      {filterChips.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          onClick={() => setTypeFilter(option)}
+                          className={classNames(
+                            'interactive-row h-7 px-2 text-[11px]',
+                            typeFilter === option ? 'bg-accent/10 text-text-primary' : 'text-text-muted',
+                          )}
+                        >
+                          <span className="text-nowrap">{filterLabel(option)}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setHideDotfiles((prev) => !prev)}
+                      className="interactive-row mt-2 flex h-7 w-full items-center gap-2 px-2 text-[11px] text-text-muted"
+                    >
+                      <EyeOff size={12} />
+                      <span className="text-nowrap">{hideDotfiles ? 'Hidden files are hidden' : 'Hidden files are visible'}</span>
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <Button variant="ghost" onClick={onClose}>{browseOnly ? 'Close' : 'Cancel'}</Button>
+              {browseOnly && (
+                <Button
+                  variant="primary"
+                  onClick={() => addEntriesToCanvas(selectedEntries)}
+                  disabled={selectedEntries.length === 0}
+                >
+                  <FilePlus2 size={12} />
+                  Add to canvas{selectedEntries.length > 1 ? ` (${selectedEntries.length})` : ''}
+                </Button>
+              )}
               {!browseOnly && (
                 <Button variant="primary" onClick={() => void confirmSelection()} disabled={!canSelect}>
                   Select{selected.length > 0 ? ` (${selected.length})` : ''}
@@ -1057,12 +1210,12 @@ function SourceRailRow({
       disabled={disabled}
       onClick={onClick}
       className={classNames(
-        'interactive-row flex h-8 w-full items-center gap-2 border-l-2 px-2 text-left text-xs disabled:cursor-not-allowed disabled:opacity-40',
+        'interactive-row flex h-7 w-full items-center gap-1.5 border-l-2 px-2 text-left text-[10px] disabled:cursor-not-allowed disabled:opacity-40',
         active ? 'border-accent bg-accent/10 text-text-primary' : 'border-transparent text-text-secondary hover:text-text-primary',
       )}
     >
       <span className={active ? 'text-accent' : 'text-text-muted'}>{icon}</span>
-      <span className="text-nowrap min-w-0 flex-1">{label}</span>
+      <span className="text-nowrap min-w-0 flex-1 truncate" title={label}>{label}</span>
     </button>
   )
 }
@@ -1085,7 +1238,7 @@ function BrowserToolbarIconButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="interactive-button flex h-7 min-w-7 items-center justify-center text-text-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+      className="interactive-button flex h-6 min-w-6 items-center justify-center text-text-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
     >
       {icon}
     </button>
@@ -1095,29 +1248,15 @@ function BrowserToolbarIconButton({
 function BrowserFileRow({
   entry,
   selected,
-  menuOpen,
   onSelect,
   onActivate,
   onMenu,
-  onCloseMenu,
-  onCopyPath,
-  onCopy,
-  onDownload,
-  onMove,
-  onDelete,
 }: {
   entry: RemoteFileEntry
   selected: boolean
-  menuOpen: boolean
   onSelect: (entry: RemoteFileEntry) => void
   onActivate: (entry: RemoteFileEntry) => void
-  onMenu: () => void
-  onCloseMenu: () => void
-  onCopyPath: () => void
-  onCopy: () => void
-  onDownload?: () => void
-  onMove: () => void
-  onDelete: () => void
+  onMenu: (position: { x: number; y: number }) => void
 }) {
   return (
     <div className="group relative px-2">
@@ -1126,7 +1265,7 @@ function BrowserFileRow({
         onClick={() => onSelect(entry)}
         onDoubleClick={() => onActivate(entry)}
         className={classNames(
-          'bioflow-file-browser-row interactive-row w-full text-left text-xs',
+          'bioflow-file-browser-row interactive-row w-full text-left text-[11px]',
           selected ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:text-text-primary',
         )}
         title={entry.path}
@@ -1139,52 +1278,22 @@ function BrowserFileRow({
         </span>
         <FileGlyph entry={entry} size="row" selected={selected} />
         <span className="text-nowrap min-w-0 flex-1">{entry.name}{entry.isDirectory ? '/' : ''}</span>
-        <span className="text-nowrap w-[3.75rem] shrink-0 text-right font-mono text-[11px] text-text-muted">{entry.isDirectory ? '-' : formatBytes(entry.size)}</span>
-        <span className="text-nowrap w-20 shrink-0 text-right text-[11px] text-text-muted">{formatFileDate(entry.modified)}</span>
+        <span className="text-nowrap w-[3.5rem] shrink-0 text-right font-mono text-[10px] text-text-muted">{entry.isDirectory ? '-' : formatBytes(entry.size)}</span>
+        <span className="text-nowrap w-[4.5rem] shrink-0 text-right text-[10px] text-text-muted">{formatFileDate(entry.modified)}</span>
         <button
           type="button"
           onClick={(event) => {
             event.stopPropagation()
-            onMenu()
+            const rect = event.currentTarget.getBoundingClientRect()
+            onMenu({ x: rect.right - 180, y: rect.bottom + 6 })
           }}
-          className="interactive-button flex h-6 w-6 shrink-0 items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+          className="interactive-button flex h-5 w-5 shrink-0 items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
           aria-label={`Open actions for ${entry.name}`}
         >
-          <MoreHorizontal size={13} />
+          <MoreHorizontal size={12} />
         </button>
       </button>
-      {menuOpen && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={onCloseMenu} />
-          <div className="surface-popover absolute right-4 top-7 z-50 w-36 rounded-md py-1">
-            <ContextAction label="Open" onClick={() => { onCloseMenu(); onActivate(entry) }} />
-            <ContextAction label="Copy path" onClick={() => { onCloseMenu(); onCopyPath() }} />
-            <ContextAction label="Copy to..." onClick={() => { onCloseMenu(); onCopy() }} />
-            {onDownload && <ContextAction label="Download" onClick={() => { onCloseMenu(); onDownload() }} />}
-            <ContextAction label="Rename" onClick={() => { onCloseMenu(); onMove() }} disabled={entry.isDirectory} />
-            <ContextAction label="Move to..." onClick={() => { onCloseMenu(); onMove() }} />
-            <div className="my-1 h-px bg-border-light" />
-            <ContextAction label="Delete" danger onClick={() => { onCloseMenu(); onDelete() }} />
-          </div>
-        </>
-      )}
     </div>
-  )
-}
-
-function ContextAction({ label, onClick, disabled, danger = false }: { label: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={classNames(
-        'interactive-row flex h-7 w-full items-center px-3 text-left text-xs disabled:cursor-not-allowed disabled:opacity-40',
-        danger ? 'text-error' : 'text-text-primary',
-      )}
-    >
-      <span className="text-nowrap">{label}</span>
-    </button>
   )
 }
 
@@ -1205,7 +1314,7 @@ function BrowserGridCard({
       onClick={() => onSelect(entry)}
       onDoubleClick={() => onActivate(entry)}
       className={classNames(
-        'flex h-[7rem] w-[6.75rem] flex-col items-center justify-start gap-1.5 rounded-md px-1.5 py-2 text-center text-xs transition-colors',
+        'flex h-[5.75rem] w-[5.75rem] flex-col items-center justify-start gap-1.5 rounded-md px-1.5 py-2 text-center text-[10px] transition-colors',
         selected ? 'bg-accent/10 text-text-primary' : 'text-text-secondary hover:bg-bg-hover/70 hover:text-text-primary',
       )}
       title={entry.path}
@@ -1213,7 +1322,7 @@ function BrowserGridCard({
       <FileGlyph entry={entry} size="grid" selected={selected} />
       <span
         className={classNames(
-          'bioflow-file-grid-name w-full rounded px-1 leading-4',
+          'bioflow-file-grid-name w-full rounded px-1 leading-3',
           selected && 'bg-accent text-white',
         )}
       >
@@ -1387,6 +1496,57 @@ function normalizeDnxPath(path: string): string {
 
 function normalizeSelectedPath(path: string, origin: FileOrigin, homeDir: string | null): string {
   return origin === 'dnx' ? normalizeDnxPath(path) : expandHomePath(path, homeDir)
+}
+
+function filterLabel(value: string): string {
+  if (value === 'all') return 'All'
+  if (value === 'tabular') return 'Tabular'
+  if (value === 'variants') return 'Variants'
+  if (value === 'plink') return 'PLINK'
+  return value
+}
+
+function inferBrowserSplitKeys(entries: RemoteFileEntry[]): { axis: string; keys: string[]; rawKeys: string[] } {
+  const chrKeys = entries.map((entry) => {
+    const match = entry.name.match(/(?:^|[^A-Za-z0-9])(?:chr|chrom|chromosome)[._-]?([0-9]+|x|y|xy|m|mt)(?=$|[^A-Za-z0-9])/i)
+    return match?.[1] ? { key: normalizeSplitKey(match[1]), rawKey: match[1] } : null
+  })
+  if (chrKeys.every(Boolean) && new Set(chrKeys.map((item) => item?.key)).size === chrKeys.length) {
+    return { axis: 'chrom', keys: chrKeys.map((item) => item!.key), rawKeys: chrKeys.map((item) => item!.rawKey) }
+  }
+  const numericKeys = entries.map((entry) => entry.name.match(/(\d+)/)?.[1] ?? null)
+  const normalizedNumeric = numericKeys.map((key) => key ? normalizeSplitKey(key) : null)
+  if (numericKeys.every(Boolean) && new Set(normalizedNumeric).size === numericKeys.length) {
+    return { axis: 'item', keys: normalizedNumeric as string[], rawKeys: numericKeys as string[] }
+  }
+  return { axis: 'file', keys: entries.map((entry) => entry.name), rawKeys: entries.map((entry) => entry.name) }
+}
+
+function collapseBrowserPlinkFileEntries(entries: RemoteFileEntry[]): RemoteFileEntry[] {
+  const passthrough: RemoteFileEntry[] = []
+  const byPrefix = new Map<string, RemoteFileEntry[]>()
+  for (const entry of entries) {
+    const match = entry.name.match(/^(.*)\.(pgen|pvar|psam|bed|bim|fam)$/i)
+    if (!match) {
+      passthrough.push(entry)
+      continue
+    }
+    const family = /^(pgen|pvar|psam)$/i.test(match[2]) ? 'pgen' : 'bed'
+    const key = `${family}:${match[1]}`
+    byPrefix.set(key, [...(byPrefix.get(key) ?? []), entry])
+  }
+  return [
+    ...passthrough,
+    ...[...byPrefix.values()].map((group) =>
+      group.find((entry) => /\.pgen$/i.test(entry.name)) ??
+      group.find((entry) => /\.bed$/i.test(entry.name)) ??
+      group[0]),
+  ]
+}
+
+function normalizeSplitKey(key: string): string {
+  const numeric = Number(key)
+  return Number.isFinite(numeric) ? String(numeric) : key.toLowerCase()
 }
 
 function shellQuote(value: string): string {

@@ -11,7 +11,7 @@
  *   the SFTP-refresh path in LogViewer (array jobs / manual reload).
  */
 import { create } from 'zustand'
-import type { PipelineSnapshot, RunState, RunStatus, ToolNodeData } from '@/types/pipeline'
+import type { ArrayTaskStatus, PipelineSnapshot, RunState, RunStatus, ToolNodeData } from '@/types/pipeline'
 import type { RunReadinessReport } from '@/types/workspace'
 import { usePipelineStore } from '@/stores/pipelineStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -35,6 +35,8 @@ interface RunStoreState {
   activeRunId: string | null
   /** Which node the Jobs panel is focused on (for log view). */
   selectedNodeId: string | null
+  /** Which Slurm array task is focused inside the selected node. */
+  selectedArrayTaskId: string | null
   runs: Record<string, RunState>
   /** Per-node log ring buffers. Keyed by nodeId. */
   logs: Record<string, NodeLogBuffer>
@@ -46,6 +48,7 @@ interface RunStoreState {
   rerunNode: (runId: string, nodeId: string, snapshot: PipelineSnapshot) => Promise<void>
   setActiveRun: (runId: string | null) => void
   setSelectedNode: (nodeId: string | null) => void
+  setSelectedArrayTask: (taskId: string | null) => void
   refreshRuns: () => Promise<void>
 
   /** Append streaming log chunks (called by subscribeToEvents). Ring-capped at 500 lines. */
@@ -64,6 +67,7 @@ interface RunStoreState {
 export const useRunStore = create<RunStoreState>((set, get) => ({
   activeRunId: null,
   selectedNodeId: null,
+  selectedArrayTaskId: null,
   runs: {},
   logs: {},
   diagnostics: {},
@@ -90,7 +94,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     } : null, runReadiness ?? null)
     // Clear old logs before a new run so stale output doesn't bleed through.
     get().clearLogs()
-    set({ activeRunId: runId, selectedNodeId: null })
+    set({ activeRunId: runId, selectedNodeId: null, selectedArrayTaskId: null })
     // Reset statuses on runnable nodes to 'idle' locally for instant feedback;
     // authoritative state arrives via the node-status event channel moments later.
     const pipelineStore = usePipelineStore.getState()
@@ -119,12 +123,14 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   },
 
   setActiveRun: (runId) => {
-    set({ activeRunId: runId, selectedNodeId: null })
+    set({ activeRunId: runId, selectedNodeId: null, selectedArrayTaskId: null })
     const run = runId ? get().runs[runId] : null
     if (run) applyCanvasStatuses(run)
   },
 
-  setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
+  setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId, selectedArrayTaskId: null }),
+
+  setSelectedArrayTask: (taskId) => set({ selectedArrayTaskId: taskId }),
 
   refreshRuns: async () => {
     const list = await window.api.pipeline.listRuns()
@@ -254,7 +260,62 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
         })
       : noop
 
-    return () => { offNode(); offRun(); offLog() }
+    const offArray = api.onArrayTaskStatus
+      ? api.onArrayTaskStatus(({ runId, nodeId, tasks, taskMap }) => {
+          set((state) => {
+            const run = state.runs[runId]
+            if (!run) return state
+            const previous = run.nodes[nodeId] ?? { nodeId, status: 'idle' as const }
+            const nextNode = {
+              ...previous,
+              arrayTasks: tasks as Record<string, ArrayTaskStatus>,
+              arrayTaskMap: taskMap ?? previous.arrayTaskMap,
+            }
+            return {
+              runs: {
+                ...state.runs,
+                [runId]: {
+                  ...run,
+                  nodes: {
+                    ...run.nodes,
+                    [nodeId]: nextNode,
+                  },
+                  updatedAt: Date.now(),
+                },
+              },
+            }
+          })
+        })
+      : noop
+
+    const offTransfer = api.onTransferProgress
+      ? api.onTransferProgress(({ runId, nodeId, progress }) => {
+          set((state) => {
+            const run = state.runs[runId]
+            if (!run) return state
+            const previous = run.nodes[nodeId] ?? { nodeId, status: 'idle' as const }
+            const nextNode = {
+              ...previous,
+              transferProgress: progress,
+            }
+            return {
+              runs: {
+                ...state.runs,
+                [runId]: {
+                  ...run,
+                  nodes: {
+                    ...run.nodes,
+                    [nodeId]: nextNode,
+                  },
+                  updatedAt: Date.now(),
+                },
+              },
+            }
+          })
+        })
+      : noop
+
+    return () => { offNode(); offRun(); offLog(); offArray(); offTransfer() }
   },
 }))
 

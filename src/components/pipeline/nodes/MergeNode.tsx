@@ -13,6 +13,7 @@ import type { MergeNodeData, ToolNodeData } from '@/types/pipeline'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
 import { PortHandle } from './PortHandle'
+import { useSyncNodeHandles } from './useSyncNodeHandles'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -42,6 +43,15 @@ function MergeNodeInner({ id, data, selected }: NodeProps) {
   const convergeLabel = (nodeData.convergeMode ?? 'axed-fan-in') === 'parallel-branches' ? 'branches' : 'axis'
   const handles = nodeData.inputHandles?.length ? nodeData.inputHandles : [{ id: 'input', label: 'input' }]
   const tone = nodeTypeTone('merge')
+
+  useSyncNodeHandles(id, [
+    selected,
+    nodeData.label,
+    nodeData.status,
+    nodeData.strategy,
+    nodeData.convergeMode,
+    handles.length,
+  ])
 
   return (
     <div

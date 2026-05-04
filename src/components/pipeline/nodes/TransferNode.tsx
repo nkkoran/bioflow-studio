@@ -6,6 +6,7 @@ import type { ToolNodeData, TransferNodeData } from '@/types/pipeline'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
 import { PortHandle } from './PortHandle'
+import { useSyncNodeHandles } from './useSyncNodeHandles'
 
 function StatusBadge({ status = 'idle' }: { status?: ToolNodeData['status'] }) {
   const map: Record<NonNullable<ToolNodeData['status']>, { icon: React.ReactNode; label: string; cls: string }> = {
@@ -35,6 +36,15 @@ function TransferNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as TransferNodeData
   const successAnimating = useSuccessAnimation(nodeData.status)
   const tone = nodeTypeTone('transfer')
+
+  useSyncNodeHandles(id, [
+    selected,
+    nodeData.label,
+    nodeData.status,
+    nodeData.from,
+    nodeData.to,
+    nodeData.outputName,
+  ])
 
   return (
     <div

@@ -12,6 +12,12 @@ export interface PathSettings {
 export interface AppSettings {
   paths: PathSettings
   toolsRoot: string
+  moduleDefaults: {
+    plink: string
+    r: string
+    bcftools: string
+    regenie: string
+  }
   annovarScriptsPath: string
   annovarDbPath: string
   vepPath: string
@@ -27,6 +33,8 @@ export interface AppSettings {
   notifySoundEnabled: boolean
   clusterLoginPolicyWarnSeconds: number
   plinkFlagBuilderEnabled: boolean
+  toolPaletteWorkflowPacksCollapsed: boolean
+  rPackageInstallMode: 'prompt-on-run' | 'auto-on-run' | 'manual'
   arrayChainMode: 'task-level' | 'job-level'
   fileLifecyclePolicy: 'keep-all' | 'keep-outputs-only' | 'delete-intermediates-on-success'
   skipPreRunFileCheck: boolean
@@ -40,6 +48,7 @@ export interface AppSettings {
   workflowGuideEnabled: boolean
   fileExplorerViewMode: 'list' | 'icons'
   showInputGenomeBuild: boolean
+  showInlineValidateSettings: boolean
   splitExplorerBasePane: 'left' | 'right'
 }
 
@@ -55,6 +64,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
     runFolderTemplate: 'runs/{pipelineSlug}-{timestamp}',
   },
   toolsRoot: '~/bioflow/tools',
+  moduleDefaults: {
+    plink: '',
+    r: '',
+    bcftools: '',
+    regenie: '',
+  },
   annovarScriptsPath: '',
   annovarDbPath: '',
   vepPath: '',
@@ -70,6 +85,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notifySoundEnabled: false,
   clusterLoginPolicyWarnSeconds: 600,
   plinkFlagBuilderEnabled: false,
+  toolPaletteWorkflowPacksCollapsed: true,
+  rPackageInstallMode: 'prompt-on-run',
   arrayChainMode: 'task-level',
   fileLifecyclePolicy: 'keep-all',
   skipPreRunFileCheck: false,
@@ -83,6 +100,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   workflowGuideEnabled: false,
   fileExplorerViewMode: 'list',
   showInputGenomeBuild: true,
+  showInlineValidateSettings: false,
   splitExplorerBasePane: 'left',
 }
 
@@ -118,6 +136,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         runFolderTemplate: await readSetting('settings:paths:runFolderTemplate', DEFAULT_SETTINGS.paths.runFolderTemplate),
       },
       toolsRoot: await readSetting('settings:toolsRoot', DEFAULT_SETTINGS.toolsRoot),
+      moduleDefaults: {
+        plink: await readSetting('settings:modules:plink', DEFAULT_SETTINGS.moduleDefaults.plink),
+        r: await readSetting('settings:modules:r', DEFAULT_SETTINGS.moduleDefaults.r),
+        bcftools: await readSetting('settings:modules:bcftools', DEFAULT_SETTINGS.moduleDefaults.bcftools),
+        regenie: await readSetting('settings:modules:regenie', DEFAULT_SETTINGS.moduleDefaults.regenie),
+      },
       annovarScriptsPath: await readSetting('settings:annovarScriptsPath', DEFAULT_SETTINGS.annovarScriptsPath),
       annovarDbPath: await readSetting('settings:annovarDbPath', DEFAULT_SETTINGS.annovarDbPath),
       vepPath: await readSetting('settings:vepPath', DEFAULT_SETTINGS.vepPath),
@@ -133,6 +157,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       notifySoundEnabled: await readSetting('settings:notifySoundEnabled', DEFAULT_SETTINGS.notifySoundEnabled),
       clusterLoginPolicyWarnSeconds: await readSetting('settings:cluster:loginPolicyWarnSeconds', DEFAULT_SETTINGS.clusterLoginPolicyWarnSeconds),
       plinkFlagBuilderEnabled: await readSetting('settings:experimental:plinkFlagBuilderEnabled', DEFAULT_SETTINGS.plinkFlagBuilderEnabled),
+      toolPaletteWorkflowPacksCollapsed: await readSetting('settings:toolPalette:workflowPacksCollapsed', DEFAULT_SETTINGS.toolPaletteWorkflowPacksCollapsed),
+      rPackageInstallMode: normalizeRPackageInstallMode(await readSetting('settings:rPackages:installMode', DEFAULT_SETTINGS.rPackageInstallMode)),
       arrayChainMode: await readSetting('settings:execution:arrayChainMode', DEFAULT_SETTINGS.arrayChainMode),
       fileLifecyclePolicy: await readSetting('settings:fileLifecyclePolicy', DEFAULT_SETTINGS.fileLifecyclePolicy),
       skipPreRunFileCheck: await readSetting('settings:skipPreRunFileCheck', DEFAULT_SETTINGS.skipPreRunFileCheck),
@@ -146,6 +172,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       workflowGuideEnabled: await readSetting('settings:workflowGuideEnabled', DEFAULT_SETTINGS.workflowGuideEnabled),
       fileExplorerViewMode: (await readSetting('settings:fileExplorerViewMode', DEFAULT_SETTINGS.fileExplorerViewMode)) === 'icons' ? 'icons' : 'list',
       showInputGenomeBuild: await readSetting('settings:showInputGenomeBuild', DEFAULT_SETTINGS.showInputGenomeBuild),
+      showInlineValidateSettings: await readSetting('settings:inspector:showInlineValidateSettings', DEFAULT_SETTINGS.showInlineValidateSettings),
       splitExplorerBasePane: (await readSetting('settings:splitExplorerBasePane', DEFAULT_SETTINGS.splitExplorerBasePane)) === 'right' ? 'right' : 'left',
     }
     set({ settings, loaded: true })
@@ -166,6 +193,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:paths:createSubfolders': next.paths.createSubfolders = Boolean(value); break
       case 'settings:paths:runFolderTemplate': next.paths.runFolderTemplate = String(value); break
       case 'settings:toolsRoot': next.toolsRoot = String(value); break
+      case 'settings:modules:plink': next.moduleDefaults.plink = String(value); break
+      case 'settings:modules:r': next.moduleDefaults.r = String(value); break
+      case 'settings:modules:bcftools': next.moduleDefaults.bcftools = String(value); break
+      case 'settings:modules:regenie': next.moduleDefaults.regenie = String(value); break
       case 'settings:annovarScriptsPath': next.annovarScriptsPath = String(value); break
       case 'settings:annovarDbPath': next.annovarDbPath = String(value); break
       case 'settings:vepPath': next.vepPath = String(value); break
@@ -188,6 +219,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       }
       case 'settings:experimental:plinkFlagBuilderEnabled':
         next.plinkFlagBuilderEnabled = Boolean(value)
+        break
+      case 'settings:toolPalette:workflowPacksCollapsed':
+        next.toolPaletteWorkflowPacksCollapsed = Boolean(value)
+        break
+      case 'settings:rPackages:installMode':
+        next.rPackageInstallMode = normalizeRPackageInstallMode(value)
         break
       case 'settings:execution:arrayChainMode':
         next.arrayChainMode = value === 'job-level' ? 'job-level' : 'task-level'
@@ -216,6 +253,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       case 'settings:workflowGuideEnabled': next.workflowGuideEnabled = Boolean(value); break
       case 'settings:fileExplorerViewMode': next.fileExplorerViewMode = value === 'icons' ? 'icons' : 'list'; break
       case 'settings:showInputGenomeBuild': next.showInputGenomeBuild = Boolean(value); break
+      case 'settings:inspector:showInlineValidateSettings': next.showInlineValidateSettings = Boolean(value); break
       case 'settings:splitExplorerBasePane': next.splitExplorerBasePane = value === 'right' ? 'right' : 'left'; break
     }
     set({ settings: next, loaded: true })
@@ -227,3 +265,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
   lockDevMode: () => set({ devMode: false }),
 }))
+
+function normalizeRPackageInstallMode(value: unknown): AppSettings['rPackageInstallMode'] {
+  return value === 'auto-on-run' || value === 'manual' ? value : 'prompt-on-run'
+}

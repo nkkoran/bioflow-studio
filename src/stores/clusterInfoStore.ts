@@ -73,7 +73,7 @@ export const useClusterInfoStore = create<ClusterInfoState>((set, get) => ({
       set((state) => ({
         modulesByConnection: {
           ...state.modulesByConnection,
-          [connectionId]: needle ? (state.modulesByConnection[connectionId] ?? { ...result, modules: [] }) : result,
+          [connectionId]: needle ? mergeModuleResults(state.modulesByConnection[connectionId], result) : result,
         },
         loadingModules: { ...state.loadingModules, [connectionId]: false },
       }))
@@ -113,3 +113,21 @@ export const useClusterInfoStore = create<ClusterInfoState>((set, get) => ({
       }
     }),
 }))
+
+function mergeModuleResults(cached: ClusterModulesResult | undefined, result: ClusterModulesResult): ClusterModulesResult {
+  if (!cached) return result
+  const byName = new Map(cached.modules.map((entry) => [entry.name, { ...entry, versions: [...entry.versions] }]))
+  for (const entry of result.modules) {
+    const current = byName.get(entry.name)
+    if (!current) {
+      byName.set(entry.name, { ...entry, versions: [...entry.versions] })
+      continue
+    }
+    current.versions = [...new Set([...current.versions, ...entry.versions])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  }
+  return {
+    ...result,
+    modules: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    cachedAt: Date.now(),
+  }
+}

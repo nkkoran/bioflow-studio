@@ -21,6 +21,8 @@ export function computeNodeOutputPreview(
     const tool = getTool((node.data as ToolNodeData).toolId)
     const port = tool?.outputs[0]
     if (!port) return null
+    const physicalPreviews = computeToolPortPhysicalOutputPreviews(nodeId, port.id, snapshot, pathSettings)
+    if (physicalPreviews.length > 0) return physicalPreviews.join(' + ')
     return computeToolPortOutputPreview(nodeId, port.id, snapshot, pathSettings)
   }
 
@@ -60,7 +62,8 @@ export function computeToolPortOutputPreview(
   if (!node || node.type !== 'tool') return null
   const data = node.data as ToolNodeData
   const tool = getTool(data.toolId)
-  const port = tool?.outputs.find((candidate) => candidate.id === portId)
+  if (!tool) return null
+  const port = tool.outputs.find((candidate) => candidate.id === portId)
   if (!port) return null
 
   const slug = buildNodeSlugs(snapshot).get(nodeId) ?? nodeId
@@ -76,8 +79,22 @@ export function computeToolPortOutputPreview(
   const hasSplitInput = toolHasSplitInput(snapshot, nodeId)
   const fallback = autoMergeEnabled && hasSplitInput && mergeStrategy
     ? joinRemotePath(outputDir, `${slug}.${port.id}.merged${mergeOutputExtPreview(mergeStrategy)}`)
-    : defaultOutputPath(outputDir, slug, port.id, port.fileType)
+    : defaultToolOutputPath(tool, data, outputDir, slug, port.id, port.fileType, connectedInputFilePath(snapshot, nodeId, 'input'))
   return sink ? sinkPath(sink, outputDir, fallback) : fallback
+}
+
+export function computeToolPortPhysicalOutputPreviews(
+  nodeId: string,
+  portId: string,
+  snapshot: PipelineSnapshot,
+  pathSettings: PathSettings,
+): string[] {
+  const node = snapshot.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node || node.type !== 'tool') return []
+  const data = node.data as ToolNodeData
+  const logical = computeToolPortOutputPreview(nodeId, portId, snapshot, pathSettings)
+  if (!logical || !isLogicalPlotPort(data.toolId, portId)) return logical ? [logical] : []
+  return physicalPlotOutputPaths(logical, data.paramValues?.outputFormats)
 }
 
 export function computeFileOutputPreview(
@@ -97,7 +114,96 @@ export function computeFileOutputPreview(
 }
 
 function defaultOutputPath(outputDir: string, slug: string, portId: string, fileType: FileType): string {
-  return joinRemotePath(outputDir, `${slug}.${portId}${extForFileType(fileType)}`)
+  const ext = extForFileType(fileType)
+  const stem = outputStem(slug, portId, fileType, ext)
+  return joinRemotePath(outputDir, `${stem}${ext}`)
+}
+
+function defaultToolOutputPath(
+  tool: NonNullable<ReturnType<typeof getTool>>,
+  data: ToolNodeData,
+  outputDir: string,
+  slug: string,
+  portId: string,
+  fileType: FileType,
+  inputPath: string,
+): string {
+  if (tool.id === 'fastqc' && portId === 'output') return outputDir
+  if (tool.id === 'multiqc' && portId === 'output') {
+    const filename = String(data.paramValues?.filename ?? '').trim() || `${slug}.multiqc_report.html`
+    return joinRemotePath(outputDir, filename)
+  }
+
+  const dynamicExt = dynamicToolOutputExt(tool.id, data, portId, inputPath)
+  if (!dynamicExt) return defaultOutputPath(outputDir, slug, portId, fileType)
+  return joinRemotePath(outputDir, `${outputStem(slug, portId, fileType, dynamicExt)}${dynamicExt}`)
+}
+
+function isLogicalPlotPort(toolId: string, portId: string): boolean {
+  return portId === 'plot' && (toolId === 'plot.manhattan' || toolId === 'plot.qq' || toolId === 'r.plot')
+}
+
+export function physicalPlotOutputPaths(plotManifestPath: string, rawFormats: unknown): string[] {
+  const base = plotManifestPath.toLowerCase().endsWith('.txt')
+    ? plotManifestPath.slice(0, -4)
+    : plotManifestPath
+  const formats = String(rawFormats ?? 'both').trim().toLowerCase()
+  if (formats === 'png') return [`${base}.png`]
+  if (formats === 'pdf') return [`${base}.pdf`]
+  return [`${base}.png`, `${base}.pdf`]
+}
+
+function dynamicToolOutputExt(toolId: string, data: ToolNodeData, portId: string, inputPath: string): string | null {
+  if ((toolId === 'bcftools.view' || toolId === 'bcftools.merge') && portId === 'output') {
+    const outputType = String(data.paramValues?.['output-type'] ?? 'z')
+    if (outputType === 'v') return '.vcf'
+    if (outputType === 'b' || outputType === 'u') return '.bcf'
+    return '.vcf.gz'
+  }
+  if (toolId === 'crossmap.liftover' && portId === 'output') {
+    const format = normalizeCrossMapFormat(data.paramValues?.format, inputPath)
+    if (format === 'vcf' || format === 'gvcf') return data.paramValues?.compress === false ? '.vcf' : '.vcf.gz'
+    if (format === 'bed') return '.bed'
+    if (format === 'gff') return '.gff'
+    if (format === 'gtf') return '.gtf'
+    if (format === 'bam') return '.bam'
+    if (format === 'cram') return '.cram'
+    if (format === 'sam') return '.sam'
+  }
+  if (toolId === 'regenie.step1' && portId === 'output') return '.pred.list'
+  if (toolId === 'vep' && portId === 'output') return '.vcf.gz'
+  return null
+}
+
+function normalizeCrossMapFormat(rawFormat: unknown, inputPath: string): string {
+  const explicit = rawFormat === undefined || rawFormat === null ? '' : String(rawFormat).trim().toLowerCase()
+  if (explicit && explicit !== 'auto') return explicit
+  const lower = inputPath.toLowerCase()
+  if (lower.endsWith('.vcf') || lower.endsWith('.vcf.gz')) return 'vcf'
+  if (lower.endsWith('.gvcf') || lower.endsWith('.gvcf.gz')) return 'gvcf'
+  if (lower.endsWith('.bed') || lower.endsWith('.bed.gz')) return 'bed'
+  if (lower.endsWith('.bam')) return 'bam'
+  if (lower.endsWith('.cram')) return 'cram'
+  if (lower.endsWith('.sam')) return 'sam'
+  if (lower.endsWith('.gff') || lower.endsWith('.gff.gz')) return 'gff'
+  if (lower.endsWith('.gtf') || lower.endsWith('.gtf.gz')) return 'gtf'
+  return 'bed'
+}
+
+function connectedInputFilePath(snapshot: PipelineSnapshot, nodeId: string, portId: string): string {
+  const edge = snapshot.edges.find((candidate) => candidate.target === nodeId && (candidate.targetHandle ?? 'input') === portId)
+  if (!edge) return ''
+  const source = snapshot.nodes.find((candidate) => candidate.id === edge.source)
+  if (source?.type !== 'file') return ''
+  return (source.data as FileNodeData).path ?? ''
+}
+
+function outputStem(slug: string, portId: string, fileType: FileType, ext: string): string {
+  const extWithoutDot = ext.replace(/^\./, '')
+  const compressedBase = extWithoutDot.replace(/\.gz$/, '')
+  return portId === fileType || portId === extWithoutDot || portId === compressedBase
+    ? slug
+    : `${slug}.${portId}`
 }
 
 function toolHasSplitInput(snapshot: PipelineSnapshot, nodeId: string): boolean {
@@ -195,6 +301,7 @@ function extForFileType(ft: FileType): string {
     case 'tsv': return '.tsv'
     case 'csv': return '.csv'
     case 'txt': return '.txt'
+    case 'xlsx': return '.xlsx'
     case 'json': return '.json'
     case 'yaml': return '.yaml'
     case 'bgen': return '.bgen'

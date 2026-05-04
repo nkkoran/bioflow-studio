@@ -283,6 +283,7 @@ function resultKind(label: string, paths: string[]): NonNullable<RunManifest['re
   if (text.includes('gwas') || text.includes('glm') || text.includes('assoc')) return 'gwas-summary'
   if (text.includes('profile') || text.includes('score') || text.includes('prs') || text.includes('grs')) return 'prs-profile'
   if (text.includes('annovar') || text.includes('vep') || text.includes('annotation')) return 'variant-annotation'
+  if (/\.(png|pdf)$/.test(text) || text.includes('plot')) return 'generic'
   if (text.endsWith('.log') || text.endsWith('.out') || text.endsWith('.err')) return 'log'
   if (/\.(tsv|csv|txt)(\.gz)?$/.test(text)) return 'tabular'
   return 'generic'
@@ -296,6 +297,7 @@ function fileTypeFromPath(path: string): ArtifactRef['fileType'] {
   if (lower.endsWith('.cram')) return 'cram'
   if (lower.endsWith('.tsv') || lower.endsWith('.tsv.gz')) return 'tsv'
   if (lower.endsWith('.csv')) return 'csv'
+  if (lower.endsWith('.xlsx')) return 'xlsx'
   if (lower.endsWith('.txt') || lower.endsWith('.log') || lower.endsWith('.out') || lower.endsWith('.err')) return 'txt'
   return 'any'
 }

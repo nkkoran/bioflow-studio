@@ -23,10 +23,8 @@ export function registerFsHandlers(): void {
       const items = await resolveSplitPattern(pool, connectionId, resolvedPattern, resolvedManual)
       const missing: string[] = []
       await Promise.all(items.map(async (item) => {
-        try {
-          const stat = await pool.stat(connectionId, item.path)
-          if (stat.isDirectory) missing.push(item.key)
-        } catch {
+        const exists = await pathExistsForSplit(pool, ssh, connectionId, item.path)
+        if (!exists) {
           missing.push(item.key)
         }
       }))
@@ -57,6 +55,28 @@ function expandHome(path: string, home: string): string {
   if (path === '~') return home
   if (path.startsWith('~/')) return `${home}/${path.slice(2)}`
   return path
+}
+
+async function pathExistsForSplit(
+  pool: SftpPool,
+  ssh: SshManager,
+  connectionId: string,
+  path: string,
+): Promise<boolean> {
+  try {
+    const stat = await pool.stat(connectionId, path)
+    return !stat.isDirectory
+  } catch {
+    try {
+      const result = await ssh.exec(
+        connectionId,
+        `p=${shellQuote(path)}; if [ -e "$p" ] && [ ! -d "$p" ]; then printf yes; else printf no; fi`,
+      )
+      return result.exitCode === 0 && result.stdout.trim() === 'yes'
+    } catch {
+      return false
+    }
+  }
 }
 
 async function resolveSplitPattern(
@@ -218,4 +238,8 @@ function sortSplitItems(items: SplitItem[]): SplitItem[] {
     if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
     return a.key.localeCompare(b.key)
   })
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
 }

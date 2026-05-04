@@ -189,6 +189,23 @@ describe('analysisOptions', () => {
     expect(byName.get('by-name')?.enabled).toBe(false)
   })
 
+  it('exposes optional generic inputs even when column options target the same port', () => {
+    const phewas = toolOrThrow('plink2.phewas')
+    const regression = toolOrThrow('r.regression')
+    const crossmap = toolOrThrow('crossmap.liftover')
+
+    expect(getAnalysisOptionDefs(phewas).some((def) => def.id === 'input:covar' && def.filePortId === 'covar')).toBe(true)
+    expect(getAnalysisOptionDefs(regression).some((def) => def.id === 'input:covar' && def.filePortId === 'covar')).toBe(true)
+    expect(getAnalysisOptionDefs(crossmap).some((def) => def.id === 'input:reference' && def.filePortId === 'reference')).toBe(true)
+
+    const options = normalizeAnalysisOptions(phewas, { paramValues: {} }).map((option) =>
+      option.optionId === 'input:covar'
+        ? { ...option, enabled: true, source: { kind: 'upstream-file' as const, portId: 'covar' } }
+        : option,
+    )
+    expect(getActiveToolInputs(phewas, { toolId: phewas.id, label: 'PheWAS', paramValues: {}, status: 'idle', analysisOptions: options }).map((port) => port.id)).toContain('covar')
+  })
+
   it('keeps column options for inactive optional PLINK inputs out of the default set', () => {
     const tool = toolOrThrow('plink2.assoc')
     const options = normalizeAnalysisOptions(tool, { paramValues: {} })

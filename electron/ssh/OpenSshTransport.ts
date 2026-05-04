@@ -169,11 +169,7 @@ export class OpenSshTransport {
   }
 
   async ls(handle: OpenSshConnectionHandle, remotePath: string): Promise<RemoteFileEntry[]> {
-    const command = [
-      `dir=${openSshShellQuote(remotePath)}`,
-      '[ -d "$dir" ] || exit 2',
-      'find "$dir" -mindepth 1 -maxdepth 1 -printf \'%f\\0%p\\0%y\\0%Y\\0%s\\0%T@\\0%M\\0\'',
-    ].join('; ')
+    const command = buildOpenSshLsCommand(remotePath)
     const result = await this.runRemoteBuffered(handle, command)
     assertRemoteSuccess('List remote directory', result)
     return parseOpenSshFindOutput(result.stdout)
@@ -621,6 +617,14 @@ export function extractOpenSshInteractivePrompt(transcript: string): string | nu
 export function openSshShellQuote(value: string): string {
   if (/^[A-Za-z0-9_\-./~:=,%+@]+$/.test(value)) return value
   return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+export function buildOpenSshLsCommand(remotePath: string): string {
+  return [
+    `dir=${openSshShellQuote(remotePath)}`,
+    '[ -d "$dir" ] || exit 2',
+    'find -H "$dir" -mindepth 1 -maxdepth 1 -printf \'%f\\0%p\\0%y\\0%Y\\0%s\\0%T@\\0%M\\0\'',
+  ].join('; ')
 }
 
 export function parseOpenSshFindOutput(buffer: Buffer): RemoteFileEntry[] {

@@ -40,6 +40,7 @@ import { artifactFromEntry, basename, collectProtectedInputPaths, isLargeGenetic
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { MenuSelect } from '@/components/ui/MenuSelect'
+import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { RemoteFileBrowser } from '@/components/file-browser/RemoteFileBrowser'
 import { Breadcrumb } from './Breadcrumb'
 import { FileTreeNode } from './FileTreeNode'
@@ -599,6 +600,17 @@ export function FileExplorer() {
     setActiveTabId(id)
   }, [activeConnectionId, currentExplorerLabel, cwd, origin])
 
+  const closeExplorerTab = useCallback((tabId: string) => {
+    if (tabs.length <= 1) return
+    const index = tabs.findIndex((tab) => tab.id === tabId)
+    const nextTabs = tabs.filter((tab) => tab.id !== tabId)
+    setTabs(nextTabs)
+    if (activeTabId === tabId) {
+      const fallback = nextTabs[Math.min(Math.max(index, 0), nextTabs.length - 1)]
+      if (fallback) switchTab(fallback.id)
+    }
+  }, [activeTabId, switchTab, tabs])
+
   const selectedPath = selectedPaths[0] ?? null
   const selectedPickEntry = filePickMode.active && filePickMode.target === 'file'
     ? selectedEntries.find((entry) => !entry.isDirectory && fileEntryMatchesAccept(filePickMode.accept, entry))
@@ -883,47 +895,49 @@ export function FileExplorer() {
   const recentTabs = tabs.filter((tab) => tab.id !== activeTabId).slice(-4).reverse()
 
   const sidebarHeader = (
-    <div className="shrink-0">
-      <div className="flex h-8 items-center gap-1.5 px-2">
+    <div className="shrink-0 overflow-visible">
+      <div className="flex h-7 items-center gap-1 overflow-visible px-1.5">
         <ToolbarIconButton
           label="Back"
-          icon={<ArrowLeft className="h-3.5 w-3.5" />}
+          icon={<ArrowLeft className="h-3 w-3" />}
           onClick={navigateBack}
           disabled={sidebarBackStack.length === 0 || loading}
         />
         <ToolbarIconButton
           label="Forward"
-          icon={<ArrowRight className="h-3.5 w-3.5" />}
+          icon={<ArrowRight className="h-3 w-3" />}
           onClick={navigateForward}
           disabled={sidebarForwardStack.length === 0 || loading}
         />
         <button
           type="button"
           onClick={() => setBrowserOpen(true)}
-          className="interactive-row flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-left text-xs text-text-secondary hover:text-text-primary"
+          className="interactive-row flex min-w-0 flex-1 items-center gap-1 px-1 text-left text-[10px] text-text-secondary hover:text-text-primary"
           title={origin === 'dnx' ? 'Open full file explorer' : `${cwd} - click to open full file explorer`}
         >
-          <FolderOpen size={14} className="shrink-0 text-text-muted" />
-          <span className="text-nowrap min-w-0 flex-1">{origin === 'dnx' ? currentExplorerLabel : compactPathLabel}</span>
+          <FolderOpen size={12} className="shrink-0 text-text-muted" />
+          <span className="min-w-0 flex-1 font-mono" title={origin === 'dnx' ? currentExplorerLabel : cwd}>
+            <MiddleEllipsis value={origin === 'dnx' ? currentExplorerLabel : compactPathLabel} max={30} />
+          </span>
         </button>
         <button
           type="button"
           onClick={() => setBrowserOpen(true)}
-          className="interactive-row flex h-7 w-7 shrink-0 items-center justify-center text-accent"
+          className="interactive-row flex h-6 w-6 shrink-0 items-center justify-center text-accent"
           title="Open full file explorer"
           aria-label="Open full file explorer"
         >
-          <FolderOpen size={13} className="shrink-0" />
+          <FolderOpen size={12} className="shrink-0" />
         </button>
         <ToolbarIconButton
           label="Parent folder"
-          icon={<ArrowUp className="h-3.5 w-3.5" />}
+          icon={<ArrowUp className="h-3 w-3" />}
           onClick={navigateUp}
           disabled={!isConnected || origin !== 'fs' || !cwd || cwd === '/' || cwd === '~' || loading}
         />
         <ToolbarIconButton
           label={sidebarSearchOpen ? 'Close search' : 'Filter files'}
-          icon={<Search className="h-3.5 w-3.5" />}
+          icon={<Search className="h-3 w-3" />}
           onClick={() => {
             setSidebarSearchOpen((open) => {
               if (open) {
@@ -936,20 +950,20 @@ export function FileExplorer() {
         />
         <ToolbarIconButton
           label="Refresh"
-          icon={<RefreshCw className={classNames('h-3.5 w-3.5', loading && 'animate-fade-in')} />}
+          icon={<RefreshCw className={classNames('h-3 w-3', loading && 'animate-fade-in')} />}
           onClick={() => void refresh()}
           disabled={!isConnected || origin !== 'fs' || loading}
         />
         <ToolbarIconButton
           label="Upload"
-          icon={<Upload className="h-3.5 w-3.5" />}
+          icon={<Upload className="h-3 w-3" />}
           onClick={() => void uploadLocalFile()}
           disabled={!canUploadLocal || uploading}
         />
-        <div className="relative">
+        <div className="relative overflow-visible">
           <ToolbarIconButton
             label="Explorer menu"
-            icon={<MoreHorizontal className="h-3.5 w-3.5" />}
+            icon={<MoreHorizontal className="h-3 w-3" />}
             onClick={() => setMoreActionsOpen((open) => !open)}
           />
           {moreActionsOpen && (
@@ -957,7 +971,7 @@ export function FileExplorer() {
               <div className="fixed inset-0 z-40" onClick={() => setMoreActionsOpen(false)} />
               <div className="surface-popover absolute right-0 top-full z-50 mt-1 w-56 rounded-lg py-1">
                 <MoreActionButton
-                  icon={<FolderOpen className="h-3.5 w-3.5" />}
+                  icon={<FolderOpen className="h-3 w-3" />}
                   label="Open full explorer"
                   onClick={() => {
                     setMoreActionsOpen(false)
@@ -965,7 +979,7 @@ export function FileExplorer() {
                   }}
                 />
                 <MoreActionButton
-                  icon={<Plus className="h-3.5 w-3.5" />}
+                  icon={<Plus className="h-3 w-3" />}
                   label="New explorer tab"
                   onClick={() => {
                     setMoreActionsOpen(false)
@@ -984,7 +998,7 @@ export function FileExplorer() {
                 )}
                 <div className="my-1 h-px bg-border-light" />
                 <MoreActionButton
-                  icon={<ArrowUp className="h-3.5 w-3.5" />}
+                  icon={<ArrowUp className="h-3 w-3" />}
                   label="Parent folder"
                   disabled={!isConnected || origin !== 'fs' || !cwd || cwd === '/' || cwd === '~'}
                   onClick={() => {
@@ -993,7 +1007,7 @@ export function FileExplorer() {
                   }}
                 />
                 <MoreActionButton
-                  icon={<Bookmark className={classNames('h-3.5 w-3.5', isCurrentBookmarked && 'fill-accent text-accent')} />}
+                  icon={<Bookmark className={classNames('h-3 w-3', isCurrentBookmarked && 'fill-accent text-accent')} />}
                   label={isCurrentBookmarked ? 'Remove bookmark' : 'Bookmark folder'}
                   disabled={!isConnected || origin !== 'fs'}
                   onClick={() => {
@@ -1002,7 +1016,7 @@ export function FileExplorer() {
                   }}
                 />
                 <MoreActionButton
-                  icon={<RefreshCw className={classNames('h-3.5 w-3.5', loading && 'animate-fade-in')} />}
+                  icon={<RefreshCw className={classNames('h-3 w-3', loading && 'animate-fade-in')} />}
                   label="Refresh"
                   disabled={!isConnected || origin !== 'fs' || loading}
                   onClick={() => {
@@ -1011,7 +1025,7 @@ export function FileExplorer() {
                   }}
                 />
                 <MoreActionButton
-                  icon={<FolderPlus className="h-3.5 w-3.5" />}
+                  icon={<FolderPlus className="h-3 w-3" />}
                   label="New folder"
                   disabled={!canManageCurrentFolder}
                   onClick={() => {
@@ -1020,7 +1034,7 @@ export function FileExplorer() {
                   }}
                 />
                 <MoreActionButton
-                  icon={<Upload className="h-3.5 w-3.5" />}
+                  icon={<Upload className="h-3 w-3" />}
                   label="Upload"
                   disabled={!canUploadLocal || uploading}
                   onClick={() => {
@@ -1032,7 +1046,7 @@ export function FileExplorer() {
                   <>
                     <div className="my-1 h-px bg-border-light" />
                     <MoreActionButton
-                      icon={<Copy className="h-3.5 w-3.5" />}
+                      icon={<Copy className="h-3 w-3" />}
                       label="Copy"
                       disabled={!canUploadLocal || !selectedPath}
                       onClick={() => {
@@ -1041,7 +1055,7 @@ export function FileExplorer() {
                       }}
                     />
                     <MoreActionButton
-                      icon={<MoveRight className="h-3.5 w-3.5" />}
+                      icon={<MoveRight className="h-3 w-3" />}
                       label="Move"
                       disabled={!canUploadLocal || !selectedPath}
                       onClick={() => {
@@ -1050,7 +1064,7 @@ export function FileExplorer() {
                       }}
                     />
                     <MoreActionButton
-                      icon={<FilePlus2 className="h-3.5 w-3.5" />}
+                      icon={<FilePlus2 className="h-3 w-3" />}
                       label={selectedEntries.length === 1 ? 'Add to canvas' : 'Add as split node'}
                       onClick={() => {
                         setMoreActionsOpen(false)
@@ -1058,7 +1072,7 @@ export function FileExplorer() {
                       }}
                     />
                     <MoreActionButton
-                      icon={<Plus className="h-3.5 w-3.5" />}
+                      icon={<Plus className="h-3 w-3" />}
                       label="Stage in cart"
                       onClick={() => {
                         setMoreActionsOpen(false)
@@ -1066,7 +1080,7 @@ export function FileExplorer() {
                       }}
                     />
                     <MoreActionButton
-                      icon={<Trash2 className="h-3.5 w-3.5" />}
+                      icon={<Trash2 className="h-3 w-3" />}
                       label="Delete"
                       disabled={!selectedPath}
                       danger
@@ -1096,10 +1110,59 @@ export function FileExplorer() {
         </div>
       </div>
 
+      <div className="flex h-7 items-center gap-1 overflow-hidden px-2 pb-1">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              title={`${tab.label}: ${tab.cwd}`}
+              className={classNames(
+                'interactive-row flex h-6 min-w-[4.5rem] max-w-[9rem] items-center gap-1 px-1 text-left text-[10px]',
+                tab.id === activeTabId ? 'bg-bg-tertiary text-text-primary shadow-sm' : 'text-text-muted hover:text-text-primary',
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => switchTab(tab.id)}
+                className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                aria-label={`Switch to ${tab.label}`}
+              >
+                <FolderOpen size={11} className="shrink-0" />
+                <span className="min-w-0 flex-1 font-mono" title={tab.cwd}>
+                  <MiddleEllipsis value={tab.origin === 'dnx' ? 'DNX' : compactSidebarPath(tab.cwd)} max={18} />
+                </span>
+              </button>
+              {tabs.length > 1 && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    closeExplorerTab(tab.id)
+                  }}
+                  className="rounded p-0.5 text-text-muted hover:bg-bg-hover hover:text-text-primary"
+                  aria-label={`Close ${tab.label}`}
+                >
+                  <X size={10} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={addExplorerTab}
+          className="interactive-button flex h-6 w-6 shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
+          title="New explorer tab"
+          aria-label="New explorer tab"
+        >
+          <Plus size={12} />
+        </button>
+      </div>
+
       {sidebarSearchOpen && (
         <div className="animate-fade-up px-2 pb-2">
-          <div className="bioflow-field flex h-8 items-center gap-2 rounded-md px-2">
-            <Search size={14} className="shrink-0 text-text-muted" />
+          <div className="bioflow-field flex h-7 items-center gap-1.5 rounded-md px-2">
+            <Search size={12} className="shrink-0 text-text-muted" />
             <input
               ref={sidebarSearchInputRef}
               type="text"
@@ -1114,7 +1177,7 @@ export function FileExplorer() {
                   setDeepSearchResults(null)
                 }
               }}
-              className="min-w-0 flex-1 bg-transparent text-xs text-text-primary placeholder:text-text-muted outline-none"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-text-primary placeholder:text-text-muted outline-none"
             />
             {searchQuery && (
               <button
@@ -1140,7 +1203,7 @@ export function FileExplorer() {
       open={browserOpen}
       onClose={() => setBrowserOpen(false)}
       title="File Explorer"
-      mode="file"
+      mode="multi-file"
       browseOnly
       onSelect={() => undefined}
     />
@@ -1242,11 +1305,14 @@ export function FileExplorer() {
               {bookmarks.map((bm) => (
                 <button
                   key={bm}
-                  className="interactive-row flex h-7 w-full items-center gap-2 px-2 text-left text-xs text-text-secondary hover:text-text-primary"
+                  className="interactive-row flex h-6 w-full items-center gap-1.5 px-2 text-left text-[10px] text-text-secondary hover:text-text-primary"
                   onClick={() => handleNavigate(bm)}
+                  title={bm}
                 >
-                  <FolderOpen size={14} className="shrink-0 text-text-muted" />
-                  <span className="text-nowrap min-w-0 flex-1">{compactSidebarPath(bm)}</span>
+                  <FolderOpen size={12} className="shrink-0 text-text-muted" />
+                  <span className="min-w-0 flex-1 font-mono">
+                    <MiddleEllipsis value={compactSidebarPath(bm)} max={28} />
+                  </span>
                 </button>
               ))}
             </div>
@@ -1270,10 +1336,10 @@ export function FileExplorer() {
                   key={tab.id}
                   type="button"
                   onClick={() => switchTab(tab.id)}
-                  className="interactive-row flex h-7 w-full items-center gap-2 px-2 text-left text-xs text-text-secondary hover:text-text-primary"
+                  className="interactive-row flex h-6 w-full items-center gap-1.5 px-2 text-left text-[9px] text-text-secondary hover:text-text-primary"
                 >
-                  <FolderOpen size={14} className="shrink-0 text-text-muted" />
-                  <span className="text-nowrap min-w-0 flex-1">{tab.label}</span>
+                  <FolderOpen size={12} className="shrink-0 text-text-muted" />
+                  <span className="text-nowrap min-w-0 flex-1 truncate font-mono">{tab.label}</span>
                 </button>
               ))}
             </div>
@@ -1376,20 +1442,25 @@ export function FileExplorer() {
                 </button>
                 <ToolbarIconButton
                   label="Download selected"
-                  icon={<Download className="h-3.5 w-3.5" />}
+                  icon={<Download className="h-3 w-3" />}
                   onClick={() => void downloadSelected()}
                   disabled={!canUploadLocal || !selectedPath}
                 />
                 <ToolbarIconButton
+                  label={selectedEntries.length === 1 ? 'Add selected to canvas' : 'Add selected as split node'}
+                  icon={<FilePlus2 className="h-3 w-3" />}
+                  onClick={addSelectedToCanvas}
+                />
+                <ToolbarIconButton
                   label="Delete selected"
-                  icon={<Trash2 className="h-3.5 w-3.5" />}
+                  icon={<Trash2 className="h-3 w-3" />}
                   onClick={() => void deleteSelectedEntries()}
                   disabled={!selectedPath}
                   danger
                 />
                 <ToolbarIconButton
                   label="Clear selection"
-                  icon={<X className="h-3.5 w-3.5" />}
+                  icon={<X className="h-3 w-3" />}
                   onClick={clearSelection}
                 />
               </div>
@@ -1399,6 +1470,7 @@ export function FileExplorer() {
                 key={entry.path}
                 entry={entry}
                 isSelected={selectedPaths.includes(entry.path)}
+                dragEntries={selectedPaths.includes(entry.path) && selectedEntries.length > 1 ? selectedEntries : [entry]}
                 onSelect={handleSelect}
                 onNavigate={handleNavigate}
                 onPreview={handlePreview}
@@ -1466,7 +1538,7 @@ function ToolbarIconButton({
         onClick={onClick}
         disabled={disabled}
         className={classNames(
-          'interactive-button flex h-7 min-w-7 items-center justify-center rounded-md text-text-muted disabled:cursor-not-allowed disabled:opacity-40',
+          'interactive-button flex h-6 min-w-6 items-center justify-center rounded text-text-muted disabled:cursor-not-allowed disabled:opacity-40',
           danger ? 'hover:text-error' : 'hover:text-text-primary',
         )}
       >
@@ -1497,7 +1569,7 @@ function MoreActionButton({
       onClick={onClick}
       disabled={disabled}
       className={classNames(
-        'interactive-row flex h-8 w-full items-center gap-2 px-3 text-left text-xs disabled:cursor-not-allowed disabled:opacity-40',
+        'interactive-row flex h-7 w-full items-center gap-1.5 px-2.5 text-left text-[11px] disabled:cursor-not-allowed disabled:opacity-40',
         active ? 'text-accent' : danger ? 'text-error' : 'text-text-primary',
       )}
     >
@@ -1510,6 +1582,7 @@ function MoreActionButton({
 function SidebarFileRow({
   entry,
   isSelected,
+  dragEntries,
   onSelect,
   onNavigate,
   onPreview,
@@ -1517,6 +1590,7 @@ function SidebarFileRow({
 }: {
   entry: RemoteFileEntry
   isSelected: boolean
+  dragEntries: RemoteFileEntry[]
   onSelect: (entry: RemoteFileEntry, event: React.MouseEvent) => void
   onNavigate: (path: string) => void
   onPreview: (entry: RemoteFileEntry) => void
@@ -1527,7 +1601,7 @@ function SidebarFileRow({
     <div
       data-file-path={entry.path}
       className={classNames(
-        'group flex h-7 min-w-0 items-center gap-1 rounded-sm border-l-2 pr-1 text-xs',
+        'group flex h-6 min-w-0 items-center gap-1 rounded-sm border-l-2 pr-1 text-[11px]',
         isSelected
           ? 'border-accent bg-bg-tertiary text-text-primary'
           : 'border-transparent text-text-secondary hover:bg-bg-hover hover:text-text-primary',
@@ -1549,20 +1623,26 @@ function SidebarFileRow({
         onContextMenu(event, entry)
       }}
       onDragStart={(event) => {
-        event.dataTransfer.setData('text/plain', entry.path)
-        event.dataTransfer.setData('application/x-bioflow-path', entry.path)
+        const primary = dragEntries[0] ?? entry
+        event.dataTransfer.setData('text/plain', primary.path)
+        event.dataTransfer.setData('application/x-bioflow-path', primary.path)
         event.dataTransfer.setData('application/x-bioflow-file-entry', JSON.stringify({
-          path: entry.path,
-          name: entry.name,
-          isDirectory: entry.isDirectory,
+          path: primary.path,
+          name: primary.name,
+          isDirectory: primary.isDirectory,
         }))
+        event.dataTransfer.setData('application/x-bioflow-file-entries', JSON.stringify(dragEntries.map((item) => ({
+          path: item.path,
+          name: item.name,
+          isDirectory: item.isDirectory,
+        }))))
         event.dataTransfer.effectAllowed = 'copyMove'
       }}
       title={entry.path}
     >
       <button
         type="button"
-        className="flex h-7 w-4 shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
+        className="flex h-6 w-4 shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
         onClick={(event) => {
           event.stopPropagation()
           if (entry.isDirectory) onNavigate(entry.path)
@@ -1570,25 +1650,25 @@ function SidebarFileRow({
         aria-label={entry.isDirectory ? `Open ${entry.name}` : entry.name}
         tabIndex={entry.isDirectory ? 0 : -1}
       >
-        {entry.isDirectory ? <ChevronRight size={12} /> : null}
+        {entry.isDirectory ? <ChevronRight size={11} /> : null}
       </button>
       <FileGlyph entry={entry} size="row" selected={isSelected} />
       <span className="text-nowrap min-w-0 flex-1">{entry.name}{entry.isDirectory ? '/' : ''}</span>
       {!entry.isDirectory && (
-        <span className="bioflow-badge text-nowrap max-w-12 shrink-0 rounded bg-bg-tertiary px-1 text-[10px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        <span className="bioflow-badge text-nowrap max-w-12 shrink-0 rounded bg-bg-tertiary px-1 text-[9px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           {fileType}
         </span>
       )}
       <button
         type="button"
-        className="interactive-button flex h-6 w-6 shrink-0 items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+        className="interactive-button flex h-5 w-5 shrink-0 items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
         onClick={(event) => {
           event.stopPropagation()
           onContextMenu(event, entry)
         }}
         aria-label={`Open actions for ${entry.name}`}
       >
-        <MoreHorizontal size={13} />
+        <MoreHorizontal size={12} />
       </button>
     </div>
   )
@@ -1597,6 +1677,7 @@ function SidebarFileRow({
 function FileIconNode({
   entry,
   isSelected,
+  dragEntries = [entry],
   onSelect,
   onNavigate,
   onPreview,
@@ -1604,6 +1685,7 @@ function FileIconNode({
 }: {
   entry: RemoteFileEntry
   isSelected: boolean
+  dragEntries?: RemoteFileEntry[]
   onSelect: (entry: RemoteFileEntry, event: React.MouseEvent) => void
   onNavigate: (path: string) => void
   onPreview: (entry: RemoteFileEntry) => void
@@ -1614,7 +1696,7 @@ function FileIconNode({
       <div
         data-file-path={entry.path}
         className={classNames(
-          'flex h-[108px] w-[92px] cursor-pointer flex-col items-center gap-1.5 rounded-md px-1.5 py-2 text-center transition-colors',
+          'flex h-[88px] w-[78px] cursor-pointer flex-col items-center gap-1.5 rounded-md px-1.5 py-2 text-center transition-colors',
           isSelected
             ? 'bg-accent/15'
             : 'hover:bg-bg-hover',
@@ -1630,19 +1712,25 @@ function FileIconNode({
           onContextMenu(event, entry)
         }}
         onDragStart={(event) => {
-          event.dataTransfer.setData('text/plain', entry.path)
-          event.dataTransfer.setData('application/x-bioflow-path', entry.path)
+          const primary = dragEntries[0] ?? entry
+          event.dataTransfer.setData('text/plain', primary.path)
+          event.dataTransfer.setData('application/x-bioflow-path', primary.path)
           event.dataTransfer.setData('application/x-bioflow-file-entry', JSON.stringify({
-            path: entry.path,
-            name: entry.name,
-            isDirectory: entry.isDirectory,
+            path: primary.path,
+            name: primary.name,
+            isDirectory: primary.isDirectory,
           }))
+          event.dataTransfer.setData('application/x-bioflow-file-entries', JSON.stringify(dragEntries.map((item) => ({
+            path: item.path,
+            name: item.name,
+            isDirectory: item.isDirectory,
+          }))))
           event.dataTransfer.effectAllowed = 'copyMove'
         }}
       >
         <FileGlyph entry={entry} size="grid" selected={isSelected} />
         <span
-          className="w-full overflow-hidden break-words text-[11px] leading-4 text-text-primary"
+          className="w-full overflow-hidden break-words text-[10px] leading-3 text-text-primary"
           title={entry.name}
           style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }}
         >

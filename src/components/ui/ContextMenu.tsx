@@ -1,4 +1,5 @@
-import React, { useEffect, useCallback } from 'react'
+import React, { useEffect, useCallback, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { classNames } from '@/lib/utils'
 
 interface MenuItem {
@@ -18,6 +19,14 @@ interface ContextMenuProps {
 }
 
 export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const clampedPosition = useMemo(() => {
+    if (!position || typeof window === 'undefined') return position
+    return {
+      x: Math.min(position.x, window.innerWidth - 220),
+      y: Math.min(position.y, window.innerHeight - Math.min(360, items.length * 36 + 16)),
+    }
+  }, [items.length, position])
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -25,7 +34,8 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
     [onClose],
   )
 
-  const handleClickOutside = useCallback(() => {
+  const handleClickOutside = useCallback((event: MouseEvent) => {
+    if (menuRef.current?.contains(event.target as Node)) return
     onClose()
   }, [onClose])
 
@@ -40,13 +50,15 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
     }
   }, [position, handleKeyDown, handleClickOutside])
 
-  if (!position) return null
+  if (!clampedPosition || typeof document === 'undefined') return null
 
-  return (
+  return createPortal(
     <div
-      className="fixed z-50 min-w-[180px] rounded-lg border border-border bg-bg-secondary py-1 shadow-xl"
-      style={{ left: position.x, top: position.y }}
+      ref={menuRef}
+      className="fixed z-[1400] max-h-[min(24rem,calc(100vh-1rem))] min-w-[180px] overflow-y-auto rounded-lg border border-border bg-bg-secondary py-1 shadow-xl"
+      style={{ left: Math.max(8, clampedPosition.x), top: Math.max(8, clampedPosition.y) }}
       onMouseDown={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
     >
       {items.map((item, i) => {
         if (item.separator) {
@@ -79,6 +91,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
           </button>
         )
       })}
-    </div>
+    </div>,
+    document.body,
   )
 }

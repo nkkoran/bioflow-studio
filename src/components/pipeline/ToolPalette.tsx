@@ -11,7 +11,7 @@ import { ChevronRight, Clock3, Plus, Search, Star } from 'lucide-react'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { classNames } from '@/lib/utils'
-import { TOOLS, CATEGORY_LABELS, getToolsByCategory } from '@/lib/toolRegistry'
+import { TOOLS, CATEGORY_LABELS, CATEGORY_ORDER } from '@/lib/toolRegistry'
 import { TOOL_BUNDLES } from '@/lib/toolBundles'
 import { iconForBundle, iconForCategory, iconForNodeType } from '@/lib/toolIcons'
 import type { ToolCategory, ToolDef } from '@/types/pipeline'
@@ -142,6 +142,8 @@ function SpecialItem({ type, label, icon }: SpecialItemProps) {
 export function ToolPalette() {
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const workflowPacksCollapsedDefault = useSettingsStore((s) => s.settings.toolPaletteWorkflowPacksCollapsed)
+  const [bundlesCollapsed, setBundlesCollapsed] = useState(workflowPacksCollapsedDefault)
   const [customBuilderOpen, setCustomBuilderOpen] = useState(false)
   const [favoriteToolIds, setFavoriteToolIds] = useState<string[]>([])
   const [recentToolIds, setRecentToolIds] = useState<string[]>([])
@@ -155,6 +157,10 @@ export function ToolPalette() {
   const TransferIcon = iconForNodeType('transfer')
   const NoteIcon = iconForNodeType('note')
   const BundleIcon = iconForBundle()
+
+  useEffect(() => {
+    if (!search.trim()) setBundlesCollapsed(workflowPacksCollapsedDefault)
+  }, [search, workflowPacksCollapsedDefault])
 
   useEffect(() => {
     if (!customLoaded) void loadCustomNodes()
@@ -212,13 +218,21 @@ export function ToolPalette() {
   }, [favoriteToolIds, persistPalettePreferences])
 
   const groups = useMemo(() => {
+    const sortGroups = (items: Array<{ category: string; tools: ToolDef[] }>) =>
+      items.sort((a, b) => {
+        const rankA = CATEGORY_ORDER.indexOf(a.category)
+        const rankB = CATEGORY_ORDER.indexOf(b.category)
+        const safeA = rankA === -1 ? CATEGORY_ORDER.length : rankA
+        const safeB = rankB === -1 ? CATEGORY_ORDER.length : rankB
+        return safeA - safeB || a.category.localeCompare(b.category)
+      })
     if (!search.trim()) {
       const groupMap = new Map<string, ToolDef[]>()
       for (const tool of visibleTools) {
         if (!groupMap.has(tool.category)) groupMap.set(tool.category, [])
         groupMap.get(tool.category)!.push(tool)
       }
-      return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
+      return sortGroups(Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools })))
     }
     const q = search.toLowerCase()
     const matches = visibleTools.filter(
@@ -233,7 +247,7 @@ export function ToolPalette() {
       if (!groupMap.has(t.category)) groupMap.set(t.category, [])
       groupMap.get(t.category)!.push(t)
     }
-    return Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools }))
+    return sortGroups(Array.from(groupMap.entries()).map(([category, tools]) => ({ category, tools })))
   }, [search, visibleTools])
 
   const bundles = useMemo(() => {
@@ -256,7 +270,7 @@ export function ToolPalette() {
   }
 
   return (
-    <div className="bioflow-tool-palette-surface surface-panel animate-fade-up">
+    <div className="bioflow-tool-palette-surface surface-panel animate-fade-up nowheel nopan nodrag">
       {/* Header */}
       <div className="px-3 py-3">
         <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">
@@ -279,18 +293,26 @@ export function ToolPalette() {
         </Button>
       </div>
 
-      {/* Special items */}
-      <div className="p-2 flex flex-col gap-0.5">
-        <SpecialItem type="file-input" label="Input File" icon={<FileIcon size={12} className="text-amber-400" />} />
-        <SpecialItem type="file-output" label="Output File" icon={<FileIcon size={12} className="text-amber-400" />} />
-        <SpecialItem type="transform" label="Transform" icon={<TransformIcon size={12} className="text-teal-400" />} />
-        <SpecialItem type="merge" label="Merge (fan-in)" icon={<MergeIcon size={12} className="text-indigo-400" />} />
-        <SpecialItem type="transfer" label="Transfer" icon={<TransferIcon size={12} className="text-cyan-400" />} />
-        <SpecialItem type="note" label="Note" icon={<NoteIcon size={12} className="text-amber-400" />} />
-      </div>
+      <div
+        className="bioflow-tool-palette-scroll scroll-region py-1"
+        onWheel={(event) => event.stopPropagation()}
+        onTouchMove={(event) => event.stopPropagation()}
+      >
+        {/* Special items */}
+        <div className="p-2 flex flex-col gap-0.5">
+          <div className="flex w-full items-center gap-1 px-1 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+            Core nodes
+            <span className="ml-auto text-text-muted">6</span>
+          </div>
+          <SpecialItem type="file-input" label="Input File" icon={<FileIcon size={12} className="text-amber-400" />} />
+          <SpecialItem type="file-output" label="Output File" icon={<FileIcon size={12} className="text-amber-400" />} />
+          <SpecialItem type="transform" label="Transform" icon={<TransformIcon size={12} className="text-teal-400" />} />
+          <SpecialItem type="merge" label="Merge (fan-in)" icon={<MergeIcon size={12} className="text-indigo-400" />} />
+          <SpecialItem type="transfer" label="Transfer" icon={<TransferIcon size={12} className="text-cyan-400" />} />
+          <SpecialItem type="note" label="Note" icon={<NoteIcon size={12} className="text-amber-400" />} />
+        </div>
 
-      {/* Tools grouped by category */}
-      <div className="bioflow-tool-palette-scroll scroll-region py-1">
+        {/* Tools grouped by category */}
         {!search.trim() && favoriteTools.length > 0 && (
           <div className="mb-1">
             <div className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
@@ -333,16 +355,26 @@ export function ToolPalette() {
         )}
         {bundles.length > 0 && (
           <div className="mb-1">
-            <div className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+            <button
+              type="button"
+              onClick={() => setBundlesCollapsed((value) => !value)}
+              className="flex w-full items-center gap-1 px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted transition-colors hover:text-text-primary"
+            >
+              <ChevronRight
+                size={10}
+                className={classNames('transition-transform', !bundlesCollapsed || search.trim() ? 'rotate-90' : '')}
+              />
               <BundleIcon size={10} />
               Workflow packs
               <span className="ml-auto text-text-muted">{bundles.length}</span>
-            </div>
-            <div className="px-2 flex flex-col gap-0.5">
-              {bundles.map((bundle) => (
-                <BundleItem key={bundle.id} bundle={bundle} />
-              ))}
-            </div>
+            </button>
+            {(!bundlesCollapsed || search.trim()) && (
+              <div className="px-2 flex flex-col gap-0.5">
+                {bundles.map((bundle) => (
+                  <BundleItem key={bundle.id} bundle={bundle} />
+                ))}
+              </div>
+            )}
           </div>
         )}
         {groups.length === 0 && bundles.length === 0 && (
@@ -408,11 +440,10 @@ export function ToolPalette() {
             </div>
           )
         })}
-      </div>
-
-      {/* Footer hint */}
-      <div className="px-3 py-2 text-[11px] text-text-muted">
-        Drag tools onto the canvas to build your pipeline.
+        {/* Footer hint */}
+        <div className="px-3 py-2 text-[11px] text-text-muted">
+          Drag tools onto the canvas to build your pipeline.
+        </div>
       </div>
       <CustomNodeBuilder open={customBuilderOpen} onClose={() => setCustomBuilderOpen(false)} />
     </div>

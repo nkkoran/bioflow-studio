@@ -8,9 +8,12 @@ interface NodeTone {
 
 const CATEGORY_TONES: Record<ToolCategory, NodeTone> = {
   gwas: { accent: 'rgb(79 140 255)', border: 'rgb(79 140 255 / 0.82)' },
+  stats: { accent: 'rgb(56 189 248)', border: 'rgb(56 189 248 / 0.76)' },
+  visualization: { accent: 'rgb(168 85 247)', border: 'rgb(168 85 247 / 0.74)' },
   qc: { accent: 'rgb(49 196 141)', border: 'rgb(49 196 141 / 0.76)' },
   annotation: { accent: 'rgb(244 114 182)', border: 'rgb(244 114 182 / 0.76)' },
   format: { accent: 'rgb(34 211 238)', border: 'rgb(34 211 238 / 0.74)' },
+  'file-ops': { accent: 'rgb(34 211 238)', border: 'rgb(34 211 238 / 0.74)' },
   utility: { accent: 'rgb(167 139 250)', border: 'rgb(167 139 250 / 0.76)' },
   custom: { accent: 'rgb(250 204 21)', border: 'rgb(250 204 21 / 0.72)' },
   'variant-calling': { accent: 'rgb(251 113 133)', border: 'rgb(251 113 133 / 0.76)' },

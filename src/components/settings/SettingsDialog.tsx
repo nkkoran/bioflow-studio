@@ -202,6 +202,11 @@ export function SettingsDialog({
                   onChange={(value) => toggle('settings:workflowGuideEnabled', value)}
                 />
                 <Checkbox
+                  label="Collapse workflow packs by default"
+                  checked={settings.toolPaletteWorkflowPacksCollapsed}
+                  onChange={(value) => toggle('settings:toolPalette:workflowPacksCollapsed', value)}
+                />
+                <Checkbox
                   label="Use icon grid in file explorers"
                   checked={settings.fileExplorerViewMode === 'icons'}
                   onChange={(value) => text('settings:fileExplorerViewMode', value ? 'icons' : 'list')}
@@ -370,6 +375,49 @@ export function SettingsDialog({
                 mode="directory"
                 title="Choose tools folder"
               />
+              <SettingsGroup title="Module defaults">
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    label="PLINK module"
+                    value={settings.moduleDefaults.plink}
+                    placeholder="plink/2.00a3"
+                    onChange={(e) => text('settings:modules:plink', e.target.value)}
+                  />
+                  <Input
+                    label="R module"
+                    value={settings.moduleDefaults.r}
+                    placeholder="r/4.4.0"
+                    onChange={(e) => text('settings:modules:r', e.target.value)}
+                  />
+                  <Input
+                    label="bcftools module"
+                    value={settings.moduleDefaults.bcftools}
+                    placeholder="bcftools/1.19"
+                    onChange={(e) => text('settings:modules:bcftools', e.target.value)}
+                  />
+                  <Input
+                    label="REGENIE module"
+                    value={settings.moduleDefaults.regenie}
+                    placeholder="regenie/3.4"
+                    onChange={(e) => text('settings:modules:regenie', e.target.value)}
+                  />
+                </div>
+              </SettingsGroup>
+              <SettingsGroup title="R packages">
+                <ChoiceGroup
+                  label="Install behavior"
+                  value={settings.rPackageInstallMode}
+                  options={[
+                    { value: 'prompt-on-run', label: 'Prompt on run' },
+                    { value: 'auto-on-run', label: 'Auto on run' },
+                    { value: 'manual', label: 'Manual' },
+                  ]}
+                  onChange={(value) => text('settings:rPackages:installMode', value)}
+                />
+                <div className="text-[11px] leading-relaxed text-text-muted" data-wrap>
+                  Prompt mode surfaces the package install in the run review, then the generated script installs only missing packages in the BioFlow R library.
+                </div>
+              </SettingsGroup>
               <SettingsGroup title="Tool-specific paths">
                 <div className="grid grid-cols-2 gap-2">
                   <RemotePathField
@@ -446,6 +494,13 @@ export function SettingsDialog({
                 <div className="text-[11px] text-text-muted" data-wrap>
                   Documented flags, custom fallback flags, and suggested rerun fixes are handled directly in the inspector.
                 </div>
+              </SettingsGroup>
+              <SettingsGroup title="Inspector actions">
+                <Checkbox
+                  label="Show inline Validate settings buttons"
+                  checked={settings.showInlineValidateSettings}
+                  onChange={(value) => toggle('settings:inspector:showInlineValidateSettings', value)}
+                />
               </SettingsGroup>
             </div>
           )}

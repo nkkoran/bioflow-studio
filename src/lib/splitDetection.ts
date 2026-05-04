@@ -151,10 +151,18 @@ function preferredFiles(files: RemoteFileEntry[], fileType: FileType): RemoteFil
     .map((file) => ({ file, score: dataFileScore(file.name, fileType) }))
     .sort((a, b) => b.score - a.score || a.file.name.localeCompare(b.file.name))
   const nonLog = ranked.filter((entry) => !isLogLikeFile(entry.file.name))
+  if (fileType === 'any') {
+    const primaryDataFiles = nonLog.filter((entry) => isPrimaryDataFile(entry.file.name))
+    if (primaryDataFiles.length > 0) return primaryDataFiles.map((entry) => entry.file)
+  }
   const matching = nonLog.filter((entry) => fileMatchesType(entry.file.name, fileType))
   if (matching.length > 0) return matching.map((entry) => entry.file)
   if (nonLog.length > 0) return nonLog.map((entry) => entry.file)
   return ranked.map((entry) => entry.file)
+}
+
+function isPrimaryDataFile(name: string): boolean {
+  return /\.(pgen|bed|bgen|bcf|bam|sam|cram|vcf|vcf\.gz|fastq|fastq\.gz|fq|fq\.gz)$/i.test(name)
 }
 
 function fileMatchesType(name: string, fileType: FileType): boolean {
@@ -224,17 +232,21 @@ function bestVariableGroup(values: Array<{ name: string; path: string }>): { pre
     }
   }
   if (groups.size === 0) return null
-  const best = [...groups.values()].sort((a, b) =>
-    b.items.length - a.items.length ||
-    b.score - a.score ||
-    a.prefix.length - b.prefix.length,
-  )[0]
-  return { ...best, items: sortSplitRows(best.items) }
+  const best = [...groups.values()]
+    .map((group) => ({ ...group, items: uniqueSplitRows(group.items) }))
+    .filter((group) => group.items.length >= 2)
+    .sort((a, b) =>
+      variableGroupScore(b) - variableGroupScore(a) ||
+      b.items.length - a.items.length ||
+      b.score - a.score ||
+      a.prefix.length - b.prefix.length,
+    )[0]
+  return best ? { ...best, items: sortSplitRows(best.items) } : null
 }
 
 function variableKeyCandidates(name: string): Array<{ prefix: string; key: string; suffix: string; score: number }> {
   const candidates: Array<{ prefix: string; key: string; suffix: string; score: number }> = []
-  const chrRegex = /(?:^|[^A-Za-z0-9])(?:chr|chrom|chromosome)[._-]?([0-9]+|x|y|xy|m|mt)(?=$|[^A-Za-z0-9])/ig
+  const chrRegex = /(?:^|[^A-Za-z0-9])(?:chr|chrom|chromosome|c)[._-]?([0-9]+|x|y|xy|m|mt)(?=$|[^A-Za-z0-9])/ig
   let match: RegExpExecArray | null
   while ((match = chrRegex.exec(name))) {
     const keyStart = match.index + match[0].lastIndexOf(match[1])
@@ -256,6 +268,31 @@ function variableKeyCandidates(name: string): Array<{ prefix: string; key: strin
     })
   }
   return candidates
+}
+
+function uniqueSplitRows(items: FileNodeSplit['items']): FileNodeSplit['items'] {
+  const rows = new Map<string, FileNodeSplit['items'][number]>()
+  for (const item of items) {
+    if (!rows.has(item.key)) rows.set(item.key, item)
+  }
+  return [...rows.values()]
+}
+
+function variableGroupScore(group: { items: FileNodeSplit['items']; score: number }): number {
+  const numericKeys = group.items
+    .map((item) => Number(item.key))
+    .filter((key) => Number.isInteger(key))
+    .sort((a, b) => a - b)
+  let rangeBonus = 0
+  if (numericKeys.length >= 2) {
+    const contiguous = numericKeys.every((key, index) => index === 0 || key === numericKeys[index - 1] + 1)
+    const plausibleChromosomes = numericKeys.every((key) => key >= 1 && key <= 26)
+    if (contiguous) rangeBonus += 250
+    if (plausibleChromosomes) rangeBonus += 200
+    if (numericKeys[0] === 1) rangeBonus += 100
+    if (numericKeys.includes(22) || numericKeys.includes(23)) rangeBonus += 100
+  }
+  return group.items.length * 1000 + group.score + rangeBonus
 }
 
 function chooseCommonNestedFile(

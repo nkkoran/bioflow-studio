@@ -1037,8 +1037,15 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
   },
 
   loadSnapshot: (snapshot) => {
+    const plotToolNodeIds = new Set(snapshot.nodes
+      .filter((node) => node.type === 'tool' && ['plot.manhattan', 'plot.qq', 'r.plot'].includes((node.data as ToolNodeData).toolId))
+      .map((node) => node.id))
+    const edges = snapshot.edges.map((edge) =>
+      plotToolNodeIds.has(edge.source) && (edge.sourceHandle === 'png' || edge.sourceHandle === 'pdf')
+        ? { ...edge, sourceHandle: 'plot' }
+        : edge)
     const connectedPortsByNode = new Map<string, Set<string>>()
-    for (const edge of snapshot.edges) {
+    for (const edge of edges) {
       if (!connectedPortsByNode.has(edge.target)) connectedPortsByNode.set(edge.target, new Set())
       connectedPortsByNode.get(edge.target)!.add(edge.targetHandle ?? 'input')
     }
@@ -1078,7 +1085,7 @@ export const usePipelineStore = create<PipelineState>()((set, get) => ({
         arrayChainMode: snapshot.execution?.arrayChainMode ?? executionDefaults().arrayChainMode,
         fileLifecyclePolicy: snapshot.execution?.fileLifecyclePolicy ?? executionDefaults().fileLifecyclePolicy,
         nodes,
-        edges: snapshot.edges,
+        edges,
         groups: snapshot.groups ?? [],
         selectedNodeId: null,
         past: restored.past,

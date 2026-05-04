@@ -28,6 +28,7 @@
     "src/lib/resourceLearning.ts",
     "src/lib/runReadiness.ts",
     "src/lib/runManifest.ts",
+    "src/lib/rPackages.ts",
     "src/lib/transferPlanner.ts",
     "src/lib/toolRegistry.ts"
   ]

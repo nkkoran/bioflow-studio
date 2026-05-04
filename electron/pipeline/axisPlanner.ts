@@ -81,6 +81,7 @@ function extForFileType(ft: string): string {
     case 'tsv': return '.tsv'
     case 'csv': return '.csv'
     case 'txt': return '.txt'
+    case 'xlsx': return '.xlsx'
     case 'json': return '.json'
     case 'yaml': return '.yaml'
     // PLINK filesets are prefix-based (no extension — plink2 appends .pgen/.pvar/.psam).
@@ -115,10 +116,18 @@ export function resolveNodeOutputDir(
 }
 
 /** Output path convention: <outputDir>/<slug>.<portId>[.<key>]<ext>. */
-function outputPath(outputDir: string, slug: string, portId: string, key: string | null, ft: string): string {
-  const ext = extForFileType(ft)
+function outputPath(outputDir: string, slug: string, portId: string, key: string | null, ft: string, extOverride?: string): string {
+  const ext = extOverride ?? extForFileType(ft)
   const keyPart = key !== null ? `.${key}` : ''
-  return `${outputDir}/${slug}.${portId}${keyPart}${ext}`
+  return `${outputDir}/${outputStem(slug, portId, ft, ext)}${keyPart}${ext}`
+}
+
+function outputStem(slug: string, portId: string, ft: string, ext: string): string {
+  const extWithoutDot = ext.replace(/^\./, '')
+  const compressedBase = extWithoutDot.replace(/\.gz$/, '')
+  return portId === ft || portId === extWithoutDot || portId === compressedBase
+    ? slug
+    : `${slug}.${portId}`
 }
 
 function outputPathFromTemplate(template: string, key: string | null): string {
@@ -127,6 +136,70 @@ function outputPathFromTemplate(template: string, key: string | null): string {
   const dotIdx = template.lastIndexOf('.')
   const insertIdx = dotIdx > slashIdx ? dotIdx : template.length
   return `${template.slice(0, insertIdx)}.${key}${template.slice(insertIdx)}`
+}
+
+function firstPath(value: AxedValue | undefined): string {
+  if (!value) return ''
+  if (value.kind === 'single') return value.path
+  return value.paths[0] ?? ''
+}
+
+function normalizeCrossMapFormat(rawFormat: unknown, inputPath: string): string {
+  const explicit = rawFormat === undefined || rawFormat === null ? '' : String(rawFormat).trim().toLowerCase()
+  if (explicit && explicit !== 'auto') return explicit
+  const lower = inputPath.toLowerCase()
+  if (lower.endsWith('.vcf') || lower.endsWith('.vcf.gz')) return 'vcf'
+  if (lower.endsWith('.gvcf') || lower.endsWith('.gvcf.gz')) return 'gvcf'
+  if (lower.endsWith('.bed') || lower.endsWith('.bed.gz')) return 'bed'
+  if (lower.endsWith('.bam')) return 'bam'
+  if (lower.endsWith('.cram')) return 'cram'
+  if (lower.endsWith('.sam')) return 'sam'
+  if (lower.endsWith('.gff') || lower.endsWith('.gff.gz')) return 'gff'
+  if (lower.endsWith('.gtf') || lower.endsWith('.gtf.gz')) return 'gtf'
+  return 'bed'
+}
+
+function dynamicOutputExt(tool: ToolDef, data: ToolNodeData, portId: string, resolvedInputs: Record<string, AxedValue>): string | undefined {
+  if ((tool.id === 'bcftools.view' || tool.id === 'bcftools.merge') && portId === 'output') {
+    const outputType = String(data.paramValues?.['output-type'] ?? 'z')
+    if (outputType === 'v') return '.vcf'
+    if (outputType === 'b' || outputType === 'u') return '.bcf'
+    return '.vcf.gz'
+  }
+
+  if (tool.id === 'crossmap.liftover' && portId === 'output') {
+    const format = normalizeCrossMapFormat(data.paramValues?.format, firstPath(resolvedInputs.input))
+    if (format === 'vcf' || format === 'gvcf') return data.paramValues?.compress === false ? '.vcf' : '.vcf.gz'
+    if (format === 'bed') return '.bed'
+    if (format === 'gff') return '.gff'
+    if (format === 'gtf') return '.gtf'
+    if (format === 'bam') return '.bam'
+    if (format === 'cram') return '.cram'
+    if (format === 'sam') return '.sam'
+  }
+
+  if (tool.id === 'multiqc' && portId === 'output') {
+    return ''
+  }
+
+  if (tool.id === 'regenie.step1' && portId === 'output') {
+    return '.pred.list'
+  }
+
+  if (tool.id === 'vep' && portId === 'output') {
+    return '.vcf.gz'
+  }
+
+  return undefined
+}
+
+function dynamicOutputPath(tool: ToolDef, data: ToolNodeData, portId: string, outputDir: string, slug: string, fallback: string): string {
+  if (tool.id === 'fastqc' && portId === 'output') return outputDir
+  if (tool.id === 'multiqc' && portId === 'output') {
+    const filename = String(data.paramValues?.filename ?? '').trim() || `${slug}.multiqc_report.html`
+    return `${outputDir}/${filename}`
+  }
+  return fallback
 }
 
 function splitPathTemplate(split: NonNullable<FileNodeData['split']>): string | undefined {
@@ -615,7 +688,15 @@ export function planAxes(snapshot: PipelineSnapshot, ctx: PlannerContext): Map<s
     const perNodeOutputDir = resolveNodeOutputDir(toolData.outputDirOverride, ctx.outputRootForNode?.(node) ?? ctx.outputRoot, slug, ctx.homeDir)
     for (const outPort of tool.outputs) {
       const sink = connectedOutputSink(snapshot, nodeId, outPort.id)
-      const fallbackOut = outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType)
+      const outputExt = dynamicOutputExt(tool, toolData, outPort.id, resolvedInputs)
+      const fallbackOut = dynamicOutputPath(
+        tool,
+        toolData,
+        outPort.id,
+        perNodeOutputDir,
+        slug,
+        outputPath(perNodeOutputDir, slug, outPort.id, null, outPort.fileType, outputExt),
+      )
       const mergeMode = outputMergeMode(toolData, outPort.id, outPort.autoMergeDefault)
       if (mode === 'array' && keys) {
         const arrayValue: Extract<AxedValue, { kind: 'array' }> = {

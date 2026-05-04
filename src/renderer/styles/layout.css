@@ -92,6 +92,18 @@
   max-height: min(41.25rem, 88vh);
 }
 
+.bioflow-run-confirm-dialog {
+  width: min(58rem, 92vw);
+  max-width: min(58rem, 92vw);
+  height: min(45rem, 90vh);
+  max-height: min(45rem, 90vh);
+}
+
+.bioflow-run-confirm-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 .bioflow-workbench-dialog {
   width: min(70rem, 96vw);
   max-width: min(70rem, 96vw);
@@ -166,7 +178,7 @@
 .bioflow-file-browser-grid {
   display: grid;
   grid-template-columns: 10rem minmax(0, 1fr) 16.25rem;
-  grid-template-rows: 2.5rem minmax(0, 1fr) 2.75rem;
+  grid-template-rows: 2.25rem minmax(0, 1fr) 2.5rem;
   gap: 0;
   min-height: 0;
   height: 100%;
@@ -195,11 +207,11 @@
 .bioflow-file-browser-header {
   grid-row: 1;
   grid-column: 2;
-  height: 2.5rem;
+  height: 2.25rem;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 0 var(--space-3);
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
   border-bottom: 1px solid var(--color-border-subtle);
 }
 
@@ -213,20 +225,20 @@
 .bioflow-file-browser-footer {
   grid-row: 3;
   grid-column: 2;
-  height: 2.75rem;
+  height: 2.5rem;
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: 0 var(--space-4);
+  padding: 0 var(--space-3);
   border-top: 1px solid var(--color-border-subtle);
 }
 
 .bioflow-file-browser-row {
-  height: 2rem;
-  padding: 0 var(--space-3);
+  height: 1.75rem;
+  padding: 0 var(--space-2);
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: calc(var(--space-1) + 0.125rem);
   min-width: 0;
 }
 
@@ -292,10 +304,6 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   stroke-width: 1.75;
 }
 
-.bioflow-file-glyph[data-kind='folder'][data-size='grid'] {
-  box-shadow: none;
-}
-
 .bioflow-split-transfer-dialog {
   width: min(58rem, 92vw);
   max-width: min(58rem, 92vw);
@@ -350,10 +358,16 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 }
 
 .bioflow-tool-palette-scroll {
-  flex: 1;
+  flex: 1 1 0;
+  height: 0;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: auto !important;
   overflow-x: hidden;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .bioflow-tool-palette-surface :where(.interactive-button, .interactive-row, [draggable]) {
@@ -384,7 +398,18 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   min-height: 0;
 }
 
+.bioflow-center-body {
+  overflow: hidden;
+}
+
+.bioflow-canvas-region {
+  flex: 1 1 0%;
+  width: auto !important;
+  max-width: 100%;
+}
+
 .bioflow-inspector-rail {
+  flex: 0 0 0;
   width: 0;
   min-width: 0;
   min-height: 0;
@@ -399,6 +424,7 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 }
 
 .bioflow-inspector-rail[data-inspector-open='true'] {
+  flex-basis: var(--panel-inspector-width);
   width: var(--panel-inspector-width);
   min-width: var(--panel-inspector-width);
   max-width: var(--panel-inspector-width);
@@ -472,6 +498,25 @@ body[data-theme='light'] .bioflow-file-browser-preview {
   line-height: 0.9375rem;
 }
 
+.bioflow-split-items-list,
+.bioflow-split-preview {
+  white-space: normal !important;
+  overflow: auto;
+}
+
+.bioflow-split-items-list :where(div, span, label),
+.bioflow-split-preview :where(div, span, label) {
+  min-width: 0;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+
+.bioflow-split-items-list :where(input, button),
+.bioflow-split-preview :where(input, button) {
+  min-width: 0;
+}
+
 .bioflow-bottom-panel {
   height: var(--panel-bottom-height);
   transition: height var(--panel-transition);
@@ -484,6 +529,16 @@ body[data-theme='light'] .bioflow-file-browser-preview {
 .bioflow-bottom-content {
   flex: 1;
   overflow: hidden;
+}
+
+.bioflow-toolbar {
+  font-size: 0.6875rem;
+  line-height: 0.9375rem;
+}
+
+.bioflow-toolbar :where(button, span) {
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .bioflow-panel-text :where(span, label, button, h1, h2, h3, h4, h5, h6):not(.text-wrap):not(.break-all):not(.break-words):not(.whitespace-pre-wrap):not(.bioflow-tooltip-root):not(.bioflow-tooltip-content):not(.bioflow-help-popover):not(.bioflow-suggestion-popover),

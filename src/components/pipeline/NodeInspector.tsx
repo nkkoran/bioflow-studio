@@ -11,6 +11,7 @@
 import { X, Trash2, Copy, Plus, Info, RefreshCcw, FolderOpen } from 'lucide-react'
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
@@ -39,6 +40,7 @@ import {
   columnParamValues,
   connectedInputPath,
   parseHeader,
+  type SchemaCache,
 } from '@/lib/schemaResolver'
 import { resolveUpstreamSchema } from '@/lib/resolveUpstreamSchema'
 import { defaultTransformPresetConfig, getTransformPreset, TRANSFORM_PRESETS } from '@/lib/transformPresets'
@@ -62,6 +64,7 @@ import {
   rangeTextFromItems as sharedRangeTextFromItems,
   type SplitDetectMode,
 } from '@/lib/splitDetection'
+import { resolveSplitItemsForRange } from '@/lib/splitRange'
 import type {
   FileNodeData,
   FileNodeSplit,
@@ -85,13 +88,33 @@ import { classNames, pathBasename, pathDirname } from '@/lib/utils'
 import { expandHomePath } from '@/lib/remotePath'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { buildAxisAlignmentReport } from '@/lib/dataArtifacts'
-import { computeToolPortOutputPreview } from '@/lib/outputPathPreview'
+import { computeToolPortOutputPreview, computeToolPortPhysicalOutputPreviews } from '@/lib/outputPathPreview'
 import { validateCustomShellScript } from '@/lib/customShellValidation'
+import { rPackagesForTool } from '@/lib/rPackages'
 import { nodeBackend } from '@/lib/transferPlanner'
 import { isLikelyLocalPath } from '@/lib/pathOrigin'
+import { optionDisplayLabel } from '@/lib/optionLabels'
 
 const EMPTY_MODULE_SUGGESTIONS: readonly ClusterModuleSuggestion[] = []
 const GENOME_BUILD_OPTIONS = ['', 'GRCh38', 'GRCh37', 'hg38', 'hg19'] as const
+
+function moduleDefaultKey(toolIdOrCommand: string): 'plink' | 'r' | 'bcftools' | 'regenie' | null {
+  const value = toolIdOrCommand.toLowerCase()
+  if (value.includes('plink')) return 'plink'
+  if (value.includes('regenie')) return 'regenie'
+  if (value.includes('bcftools')) return 'bcftools'
+  if (value === 'rscript' || value.startsWith('r.') || value.startsWith('plot.') || value === 'custom.r') return 'r'
+  return null
+}
+
+function resolvedModuleDefault(
+  toolIdOrCommand: string,
+  registryModule: string | undefined,
+  settings: ReturnType<typeof useSettingsStore.getState>['settings'],
+): string {
+  const key = moduleDefaultKey(toolIdOrCommand)
+  return (key ? settings.moduleDefaults[key]?.trim() : '') || registryModule || ''
+}
 
 function connectedInputPaths(
   snapshot: PipelineSnapshot,
@@ -236,7 +259,7 @@ function ParamField({
           >
             <option value="">-- select --</option>
             {param.options?.map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
+              <option key={opt} value={opt}>{optionDisplayLabel(opt, param.name)}</option>
             ))}
           </select>
         </div>
@@ -567,6 +590,7 @@ function ModuleAutocompleteField({
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [focused, setFocused] = useState(false)
+  const [suggestionRect, setSuggestionRect] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null)
   const modules = useClusterInfoStore((s) => {
     if (!connectionId) return EMPTY_MODULE_SUGGESTIONS
     return s.modulesByConnection[connectionId]?.modules ?? EMPTY_MODULE_SUGGESTIONS
@@ -574,18 +598,90 @@ function ModuleAutocompleteField({
   const loadModules = useClusterInfoStore((s) => s.loadModules)
   const suggestions = modules
     .flatMap((entry) => entry.versions.length > 0 ? entry.versions.map((version) => `${entry.name}/${version}`) : [entry.name])
-    .filter((name) => name.toLowerCase().includes(value.toLowerCase()))
+    .filter((name) => moduleSuggestionMatches(name, value))
     .slice(0, 12)
 
   useEffect(() => {
     if (!focused || !connectionId || connectionId === LOCAL_CONNECTION_ID) return
-    void loadModules(connectionId, value || undefined).catch(() => undefined)
+    void loadModules(connectionId, moduleQuery(value) || undefined).catch(() => undefined)
   }, [connectionId, focused, loadModules, value])
+
+  const updateSuggestionRect = useCallback(() => {
+    const rect = inputRef.current?.getBoundingClientRect()
+    if (!rect) {
+      setSuggestionRect(null)
+      return
+    }
+    const gap = 4
+    const viewportPadding = 12
+    const preferredMaxHeight = 280
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding
+    const spaceAbove = rect.top - viewportPadding
+    const openAbove = spaceBelow < 160 && spaceAbove > spaceBelow
+    const maxHeight = Math.max(120, Math.min(preferredMaxHeight, (openAbove ? spaceAbove : spaceBelow) - gap))
+    setSuggestionRect({
+      top: openAbove ? Math.max(viewportPadding, rect.top - maxHeight - gap) : rect.bottom + gap,
+      left: Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - rect.width - viewportPadding)),
+      width: rect.width,
+      maxHeight,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!focused) {
+      setSuggestionRect(null)
+      return
+    }
+    updateSuggestionRect()
+    window.addEventListener('resize', updateSuggestionRect)
+    window.addEventListener('scroll', updateSuggestionRect, true)
+    return () => {
+      window.removeEventListener('resize', updateSuggestionRect)
+      window.removeEventListener('scroll', updateSuggestionRect, true)
+    }
+  }, [focused, suggestions.length, loading, updateSuggestionRect])
+
+  const suggestionList = focused && suggestionRect && connectionId && connectionId !== LOCAL_CONNECTION_ID && typeof document !== 'undefined'
+    ? createPortal(
+        <div
+          className="bioflow-inspector-popover surface-popover fixed z-[1300] overflow-y-auto rounded-md py-1 shadow-xl"
+          style={{
+            top: suggestionRect.top,
+            left: suggestionRect.left,
+            width: suggestionRect.width,
+            maxHeight: suggestionRect.maxHeight,
+          }}
+          onWheel={(event) => event.stopPropagation()}
+        >
+          {loading && suggestions.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-text-muted">Loading modules...</div>
+          ) : suggestions.length > 0 ? (
+            suggestions.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  onChange(name)
+                  window.setTimeout(() => inputRef.current?.focus(), 0)
+                }}
+                className="block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover"
+              >
+                {name}
+              </button>
+            ))
+          ) : (
+            <div className="px-2 py-1.5 text-xs text-text-muted">No matching modules. Free text is allowed.</div>
+          )}
+        </div>,
+        document.body,
+      )
+    : null
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-end gap-1.5">
-        <div className="relative flex flex-1 flex-col gap-1">
+        <div className="flex flex-1 flex-col gap-1">
           <label className="text-text-secondary text-xs font-medium">Module override</label>
           <input
             ref={inputRef}
@@ -593,28 +689,11 @@ function ModuleAutocompleteField({
             value={value}
             placeholder={placeholder}
             onFocus={() => setFocused(true)}
-            onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+            onBlur={() => window.setTimeout(() => setFocused(false), 150)}
             onChange={(e) => onChange(e.target.value)}
             className="h-8 w-full rounded-md border border-border bg-bg-tertiary px-3 text-sm text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent"
           />
-          {focused && suggestions.length > 0 && (
-            <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-bg-secondary py-1 shadow-xl">
-              {suggestions.map((name) => (
-                <button
-                  key={name}
-                  type="button"
-                  onMouseDown={(event) => {
-                    event.preventDefault()
-                    onChange(name)
-                    window.setTimeout(() => inputRef.current?.focus(), 0)
-                  }}
-                  className="block w-full truncate px-2 py-1.5 text-left font-mono text-xs text-text-primary hover:bg-bg-hover"
-                >
-                  {name}
-                </button>
-              ))}
-            </div>
-          )}
+          {suggestionList}
         </div>
         <button
           type="button"
@@ -629,6 +708,18 @@ function ModuleAutocompleteField({
       </div>
     </div>
   )
+}
+
+function moduleQuery(value: string): string {
+  return value.trim().split('/')[0]?.trim() ?? ''
+}
+
+function moduleSuggestionMatches(name: string, value: string): boolean {
+  const needle = value.trim().toLowerCase()
+  if (!needle) return true
+  const lower = name.toLowerCase()
+  const packageName = moduleQuery(value).toLowerCase()
+  return lower.includes(needle) || (packageName.length > 0 && lower.includes(packageName))
 }
 
 function ShellScriptField({
@@ -707,6 +798,45 @@ function ShellScriptField({
           Require the output file to exist and be non-empty
         </label>
       </div>
+    </div>
+  )
+}
+
+function RScriptField({
+  value,
+  onChange,
+}: {
+  value: unknown
+  onChange: (v: unknown) => void
+}) {
+  const script = value === undefined || value === null ? '' : String(value)
+  const referencesOutput = /\b(output_table|plot_png|plot_pdf|output_dir)\b/.test(script)
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-text-secondary text-xs font-medium">
+        R script <span className="text-error">*</span>
+      </label>
+      <textarea
+        value={script}
+        placeholder={'df <- read_table(input_file)\ndata.table::fwrite(df, output_table, sep = "\\t")'}
+        onChange={(e) => onChange(e.target.value)}
+        rows={9}
+        className="rounded-lg border border-border-light bg-bg-primary px-3 py-2 text-sm text-slate-100 shadow-inner outline-none focus:border-accent focus:ring-2 focus:ring-accent/25 resize-y font-mono leading-relaxed"
+      />
+      <div className="rounded-md bg-accent/10 px-2 py-1.5 text-[10px] text-text-secondary leading-relaxed">
+        Variables: <code className="font-mono text-text-primary">input_files</code>,{' '}
+        <code className="font-mono text-text-primary">input_file</code>,{' '}
+        <code className="font-mono text-text-primary">output_table</code>,{' '}
+        <code className="font-mono text-text-primary">plot_png</code>,{' '}
+        <code className="font-mono text-text-primary">plot_pdf</code>, and{' '}
+        <code className="font-mono text-text-primary">output_dir</code>. Helper:{' '}
+        <code className="font-mono text-text-primary">read_table(path)</code>.
+      </div>
+      {script.trim() && !referencesOutput && (
+        <div className="rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] leading-relaxed text-warning">
+          This script does not reference an output variable. BioFlow will create placeholder outputs unless the script writes one.
+        </div>
+      )}
     </div>
   )
 }
@@ -929,11 +1059,18 @@ function ToolOutputRow({
     () => computeToolPortOutputPreview(nodeId, port.id, snapshot, pathSettings),
     [nodeId, pathSettings, port.id, snapshot],
   )
+  const physicalOutputPreviews = useMemo(
+    () => computeToolPortPhysicalOutputPreviews(nodeId, port.id, snapshot, pathSettings),
+    [nodeId, pathSettings, port.id, snapshot],
+  )
+  const showPhysicalPlotOutputs = physicalOutputPreviews.length > 1
+    || Boolean(physicalOutputPreviews[0] && physicalOutputPreviews[0] !== finalOutputPreview)
+  const outputTypeLabel = showPhysicalPlotOutputs ? 'png/pdf' : port.fileType
   return (
     <div className="rounded-md border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
       <div className="flex items-center gap-2">
         <span className="font-medium text-text-primary">{port.label}</span>
-        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{port.fileType}</span>
+        <span className="rounded bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-muted">{outputTypeLabel}</span>
       </div>
       <div className="mt-1 text-[11px] leading-relaxed text-text-muted">
         {port.description ?? `Produces a ${port.fileType} output.`}
@@ -949,6 +1086,19 @@ function ToolOutputRow({
           <span className="font-mono text-text-primary" title={finalOutputPreview}>
             <MiddleEllipsis value={finalOutputPreview} max={48} />
           </span>
+        </div>
+      )}
+      {showPhysicalPlotOutputs && (
+        <div data-wrap className="mt-1.5 rounded border border-accent/20 bg-accent/10 px-2 py-1 text-[11px] text-text-muted">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-text-muted">Plot files written</div>
+          <div className="flex flex-col gap-1">
+            {physicalOutputPreviews.map((path) => (
+              <div key={path} data-wrap className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2">
+                <span className="font-mono text-text-secondary">{path.toLowerCase().endsWith('.pdf') ? 'PDF' : 'PNG'}</span>
+                <span className="break-all font-mono text-text-primary" title={path}>{path}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
       {consumers.length > 0 && (
@@ -1041,6 +1191,197 @@ const ANNOTATION_INTERNAL_PARAMS = new Set([
   'nearest',
   'fork',
 ])
+
+function isRBackedTool(toolId: string): boolean {
+  return toolId === 'plot.manhattan'
+    || toolId === 'plot.qq'
+    || toolId === 'r.plot'
+    || toolId === 'custom.r'
+    || toolId === 'table.gtsummary'
+    || toolId === 'r.regression'
+}
+
+function RPackageSetupPanel({ data }: { data: ToolNodeData }) {
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const settings = useSettingsStore((s) => s.settings)
+  const [message, setMessage] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const toolsRoot = settings.toolsRoot || '~/bioflow/tools'
+  const rLibPath = `${toolsRoot.replace(/\/+$/, '')}/R/library`
+  const moduleName = data.moduleOverride?.trim() || resolvedModuleDefault(data.toolId, 'r/4.4.0', settings)
+  const packages = rPackagesForTool(data.toolId, data)
+
+  const installCommand = [
+    'module --force purge >/dev/null 2>&1 || true',
+    'module load StdEnv/2023 >/dev/null 2>&1 || true',
+    `module load ${shellQuoteClient(moduleName)}`,
+    `mkdir -p ${shellQuoteClient(rLibPath)}`,
+    `export R_LIBS_USER=${shellQuoteClient(rLibPath)}`,
+    `cat > ${shellQuoteClient(`${rLibPath}/bioflow-r-packages.R`)} <<'RS'`,
+    'lib <- Sys.getenv("R_LIBS_USER")',
+    'if (!dir.exists(lib)) dir.create(lib, recursive = TRUE, showWarnings = FALSE)',
+    '.libPaths(unique(c(lib, .libPaths())))',
+    `packages <- c(${packages.map((pkg) => JSON.stringify(pkg)).join(', ')})`,
+    'missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]',
+    'if (length(missing) > 0) install.packages(missing, repos = Sys.getenv("BIOFLOW_CRAN_MIRROR", "https://cloud.r-project.org"), lib = lib)',
+    'missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]',
+    'if (length(missing) > 0) stop("Missing R packages after install: ", paste(missing, collapse = ", "))',
+    'cat("R packages ready in ", lib, "\\n", sep = "")',
+    'RS',
+    `if command -v flock >/dev/null 2>&1; then (flock -w 900 9 && Rscript ${shellQuoteClient(`${rLibPath}/bioflow-r-packages.R`)}) 9>${shellQuoteClient(`${rLibPath}/.bioflow-r-packages.lock`)}; else Rscript ${shellQuoteClient(`${rLibPath}/bioflow-r-packages.R`)}; fi`,
+  ].join('\n')
+
+  const runInstall = async () => {
+    if (!activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID) {
+      setMessage('Connect to Rorqual before checking R packages.')
+      return
+    }
+    setRunning(true)
+    setMessage('Checking R packages on the login node...')
+    try {
+      const result = await window.api.ssh.exec(activeConnectionId, installCommand)
+      setMessage(result.exitCode === 0 ? (result.stdout.trim() || 'R packages are ready.') : `Failed (${result.exitCode}): ${result.stderr || result.stdout}`)
+    } catch (err: any) {
+      setMessage(`Failed: ${err?.message ?? err}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <details>
+      <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-text-muted hover:text-text-secondary">
+        Advanced R package check
+      </summary>
+      <div className="rounded-md border border-border bg-bg-tertiary/50 p-2">
+        <div className="text-[11px] text-text-muted">
+          Run will check/install these automatically in <span className="font-mono text-text-secondary">{rLibPath}</span>: {packages.join(', ')}.
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={running || !activeConnectionId || activeConnectionId === LOCAL_CONNECTION_ID}
+            onClick={() => void runInstall()}
+            className="h-7 px-2 text-[11px]"
+          >
+            {running ? 'Checking...' : 'Check/install packages'}
+          </Button>
+          <span className="text-[10px] text-text-muted">Module: <span className="font-mono">{moduleName}</span></span>
+        </div>
+        {message && (
+          <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-bg-primary p-2 text-[10px] text-text-secondary">
+            {message}
+          </pre>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function ManhattanPlotPanel({
+  nodeId,
+  data,
+  snapshot,
+  schemas,
+  refreshingSchemaPath,
+  onLoadSchema,
+  onParam,
+}: {
+  nodeId: string
+  data: ToolNodeData
+  snapshot: PipelineSnapshot
+  schemas: SchemaCache
+  refreshingSchemaPath: string | null
+  onLoadSchema: (path: string, options?: { force?: boolean; origin?: FileOrigin | null }) => Promise<void>
+  onParam: (name: string, value: unknown) => void
+}) {
+  const settings = useSettingsStore((s) => s.settings)
+  const tool = getTool('plot.manhattan')
+  const inputPath = connectedInputPath(snapshot, nodeId, 'sumstats')
+  const schema = resolveUpstreamSchema(snapshot, nodeId, 'sumstats', schemas)
+  const columns = schema?.columns ?? []
+  const paramByName = new Map((tool?.params ?? []).map((param) => [param.name, param]))
+  const plotPaths = computeToolPortPhysicalOutputPreviews(nodeId, 'plot', snapshot, settings.paths)
+  const columnParams = ['chrCol', 'bpCol', 'pCol', 'snpCol']
+    .map((name) => paramByName.get(name))
+    .filter((param): param is ToolParam => Boolean(param))
+  const outputParams = ['outputFormats', 'title']
+    .map((name) => paramByName.get(name))
+    .filter((param): param is ToolParam => Boolean(param))
+  const styleParams = ['genomewide', 'suggestive', 'width', 'height', 'dpi']
+    .map((name) => paramByName.get(name))
+    .filter((param): param is ToolParam => Boolean(param))
+
+  if (!tool) return null
+
+  return (
+    <div data-wrap className="flex flex-col gap-3">
+      <section data-wrap className="rounded-md border border-border bg-bg-tertiary/40 p-2">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h4 className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Required columns</h4>
+          {inputPath && (
+            <button
+              type="button"
+              onClick={() => void onLoadSchema(inputPath, { force: true, origin: connectedInputOrigin(snapshot, nodeId, 'sumstats') })}
+              className="rounded border border-border bg-bg-secondary px-2 py-1 text-[10px] text-text-muted hover:text-text-primary"
+            >
+              {refreshingSchemaPath === inputPath ? 'Refreshing...' : 'Refresh columns'}
+            </button>
+          )}
+        </div>
+        {inputPath ? (
+          <div className="mb-2 break-all font-mono text-[10px] text-text-muted" title={inputPath}>{inputPath}</div>
+        ) : (
+          <div className="mb-2 text-[11px] text-warning">Connect PLINK/summary statistics to choose plot columns.</div>
+        )}
+        <div className="grid grid-cols-1 gap-2">
+          {columnParams.map((param) => (
+            <ColumnParamField
+              key={param.name}
+              param={param}
+              value={data.paramValues[param.name]}
+              columns={columns}
+              loading={Boolean(inputPath && columns.length === 0)}
+              refreshing={refreshingSchemaPath === inputPath}
+              onRefresh={inputPath ? () => void onLoadSchema(inputPath, { force: true, origin: connectedInputOrigin(snapshot, nodeId, 'sumstats') }) : undefined}
+              onChange={(value) => onParam(param.name, value)}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section data-wrap className="rounded-md border border-border bg-bg-tertiary/40 p-2">
+        <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Output files</h4>
+        <div className="grid grid-cols-1 gap-2">
+          {outputParams.map((param) => (
+            <ParamField key={param.name} param={param} value={data.paramValues[param.name]} onChange={(value) => onParam(param.name, value)} />
+          ))}
+        </div>
+        <div data-wrap className="mt-2 rounded border border-accent/20 bg-accent/10 px-2 py-1.5">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-text-muted">Files BioFlow will write</div>
+          <div className="flex flex-col gap-1 text-[11px]">
+            {plotPaths.map((path) => (
+              <div key={path} data-wrap className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2">
+                <span className="font-mono text-text-secondary">{path.toLowerCase().endsWith('.pdf') ? 'PDF' : 'PNG'}</span>
+                <span className="break-all font-mono text-text-primary" title={path}>{path}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section data-wrap className="rounded-md border border-border bg-bg-tertiary/40 p-2">
+        <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">Plot styling</h4>
+        <div className="grid grid-cols-2 gap-2">
+          {styleParams.map((param) => (
+            <ParamField key={param.name} param={param} value={data.paramValues[param.name]} onChange={(value) => onParam(param.name, value)} />
+          ))}
+        </div>
+      </section>
+    </div>
+  )
+}
 
 function AnnotationConfigPanel({
   nodeId,
@@ -1566,6 +1907,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
   }
 
   const ToolIcon = iconForTool(data.toolId)
+  const moduleDefault = resolvedModuleDefault(tool.command || tool.id, tool.module, settings)
   const supportedBackends = (tool.backends ?? ['ssh']).filter((item) => devMode || item !== 'dnx')
   const backend = supportedBackends.includes('dnx') && data.backend === 'dnx' ? 'dnx' : supportedBackends[0] === 'dnx' ? 'dnx' : 'ssh'
   const dnxInstanceOptions = dnxCatalog?.specs?.length ? dnxCatalog.specs : SPARK_INSTANCE_TYPES
@@ -1775,18 +2117,18 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           <div className="mt-2">
           <ModuleAutocompleteField
             connectionId={activeConnectionId}
-            value={data.moduleOverride ?? tool.module ?? ''}
+            value={data.moduleOverride ?? moduleDefault}
             loading={Boolean(loadingModules)}
-            placeholder={tool.module ?? 'plink/2.00a3'}
+            placeholder={moduleDefault || tool.module || 'plink/2.00a3'}
             onChange={(value) => updateNodeData(nodeId, { moduleOverride: value.trim() || undefined })}
             onRefresh={() => {
               if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
-                void loadModules(activeConnectionId, data.moduleOverride ?? tool.module ?? '', { force: true })
+                void loadModules(activeConnectionId, data.moduleOverride ?? moduleDefault, { force: true })
               }
             }}
           />
           <p className="mt-1 text-[10px] text-text-muted">
-            Leave blank to keep the registry default. Free text still works if the module list is incomplete.
+            Leave blank to use the configured default for this tool family. Free text still works if the module list is incomplete.
           </p>
           </div>
         )}
@@ -1879,13 +2221,24 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
       )}
 
       {tool.requiresDatabase && <AnnotationConfigPanel nodeId={nodeId} data={data} />}
+      {isRBackedTool(tool.id) && <RPackageSetupPanel data={data} />}
 
       {/* Parameters */}
       <div>
         <h4 className="text-[10px] uppercase tracking-wide text-text-muted font-medium mb-2">
           Parameters
         </h4>
-        {tool.id === 'custom.shell' ? (
+        {tool.id === 'plot.manhattan' ? (
+          <ManhattanPlotPanel
+            nodeId={nodeId}
+            data={data}
+            snapshot={snapshot}
+            schemas={schemas}
+            refreshingSchemaPath={refreshingSchemaPath}
+            onLoadSchema={loadSchemaForPath}
+            onParam={setParam}
+          />
+        ) : tool.id === 'custom.shell' || tool.id === 'custom.r' ? (
           <div className="flex flex-col gap-2">
             {paramSections.map((section) => {
               const sectionParams = sortParams(commonParams.filter((param) => toolParamSection(param) === section))
@@ -1895,7 +2248,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                   <div className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">{section}</div>
                   <div className="flex flex-col gap-2">
                     {sectionParams.map((p) => (
-                      p.name === 'script'
+                      p.name === 'script' && tool.id === 'custom.shell'
                         ? (
                             <ShellScriptField
                               key={p.name}
@@ -1905,6 +2258,14 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
                               onOutputContractChange={(contract) => updateNodeData(nodeId, { outputContract: contract })}
                             />
                           )
+                        : p.name === 'script' && tool.id === 'custom.r'
+                          ? (
+                              <RScriptField
+                                key={p.name}
+                                value={data.paramValues[p.name]}
+                                onChange={(v) => setParam(p.name, v)}
+                              />
+                            )
                         : <ParamField key={p.name} param={p} value={data.paramValues[p.name]} onChange={(v) => setParam(p.name, v)} />
                     ))}
                   </div>
@@ -1962,7 +2323,7 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
           )}
           <div className="flex flex-col gap-1">
             <label className="text-text-secondary text-xs font-medium">
-              Input that controls the array
+              Split input behavior
             </label>
             <select
               value={data.arrayOver === null ? '__none__' : (data.arrayOver ?? '__auto__')}
@@ -1974,21 +2335,21 @@ function ToolInspector({ nodeId, data }: { nodeId: string; data: ToolNodeData })
               }}
               className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-sm text-text-primary outline-none focus:ring-1 focus:ring-accent focus:border-accent"
             >
-              <option value="__auto__">Auto: use the only split input</option>
-              <option value="__none__">Single job: do not fan out</option>
+              <option value="__auto__">Auto array over the split input</option>
+              <option value="__none__">Force one single job</option>
               {axedInputPorts.map((p) => {
                 const port = activeInputs.find((ip) => ip.id === p.portId)
                 return (
                   <option key={p.portId} value={p.portId}>
-                    {port?.label ?? p.portId}: one task per "{p.axis}" item
+                    Use {port?.label ?? p.portId} as the array axis ({p.axis})
                   </option>
                 )
               })}
             </select>
             <p className="text-[10px] text-text-muted mt-1">
               {axedInputPorts.length === 1
-                ? 'Auto will run this node once per accepted item from that split input.'
-                : 'Multiple split inputs are connected. Pick the one whose keys define the array tasks.'}
+                ? 'Auto submits one Slurm array task per accepted item, such as one task per chromosome.'
+                : 'Multiple split inputs are connected. Choose which input defines the task keys, or force a single fan-in job.'}
             </p>
           </div>
         </div>
@@ -2151,6 +2512,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   const [splitDetectMode, setSplitDetectMode] = useState<SplitDetectMode>('auto')
   const [detectingSplit, setDetectingSplit] = useState(false)
   const [detectMessage, setDetectMessage] = useState<string | null>(null)
+  const splitListingCacheRef = useRef(new Map<string, RemoteFileEntry[]>())
   const [rangeDraft, setRangeDraft] = useState('')
   const [refreshNonce, setRefreshNonce] = useState(0)
   const setSplit = useCallback(
@@ -2203,6 +2565,21 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
   }, [acceptedRange])
 
   useEffect(() => {
+    if (!split) return
+    const missingPathCount = split.items.filter((item) => !item.path.trim()).length
+    if (missingPathCount === 0) return
+    const rangeText = sharedRangeTextFromItems(split.items)
+    if (!rangeText) return
+    const resolved = resolveSplitItemsForRange(rangeText, split.items, pattern, split.axis || 'items')
+    if (resolved.error || resolved.items.some((item) => !item.path.trim())) return
+    const changed = resolved.items.length !== split.items.length
+      || resolved.items.some((item, index) => item.key !== split.items[index]?.key || item.path !== split.items[index]?.path)
+    if (!changed) return
+    setSplit({ ...split, items: resolved.items })
+    setDetectMessage(`Filled ${missingPathCount} missing split path${missingPathCount === 1 ? '' : 's'} from the accepted-row pattern.`)
+  }, [pattern, setSplit, split])
+
+  useEffect(() => {
     const folder = splitFolderFromData(data)
     const staleParentForDroppedFolder = data.pathKind === 'directory' && splitFolder === pathDirname(data.path)
     if (folder && (!splitFolder || data.split?.folderPath === folder || staleParentForDroppedFolder)) setSplitFolder(folder)
@@ -2224,7 +2601,14 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
       const folder = await resolveRemotePathForSftp(activeConnectionId, splitFolder.trim())
       const seedPath = await resolveRemotePathForSftp(activeConnectionId, splitSeedPath)
       const detected = await detectSmartSplitInFolder({
-        listFolder: (folder) => window.api.sftp.ls(activeConnectionId, folder),
+        listFolder: async (path) => {
+          const key = path.replace(/\/+$/, '')
+          const cached = splitListingCacheRef.current.get(key)
+          if (cached) return cached
+          const listed = await window.api.sftp.ls(activeConnectionId, path)
+          splitListingCacheRef.current.set(key, listed)
+          return listed
+        },
         folder,
         mode: splitDetectMode,
         axis: split.axis || 'item',
@@ -2291,15 +2675,13 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
 
   const applyRange = useCallback(() => {
     if (!split) return
-    const keys = parseRangeKeys(rangeDraft)
-    if (keys.length === 0) {
-      setDetectMessage('Enter keys like 1-22, 1..22, or 1,2,3.')
+    const resolved = resolveSplitItemsForRange(rangeDraft, split.items, pattern, split.axis || 'items')
+    if (resolved.error) {
+      setDetectMessage(resolved.error)
       return
     }
-    const existing = new Map(split.items.map((item) => [item.key, item]))
-    const nextItems = keys.map((key) => existing.get(key) ?? { key, path: pathForSplitKey(pattern, key) })
-    setSplit({ ...split, items: nextItems })
-    setDetectMessage(`Using ${nextItems.length} ${split.axis || 'items'}: ${sharedRangeTextFromItems(nextItems)}.`)
+    setSplit({ ...split, items: resolved.items })
+    setDetectMessage(`Using ${resolved.items.length} ${split.axis || 'items'}: ${sharedRangeTextFromItems(resolved.items)}.`)
   }, [pattern, rangeDraft, setSplit, split])
 
   const uploadLocalFile = useCallback(async () => {
@@ -2479,18 +2861,32 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
           ))}
         </select>
       </div>
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={data.isInput}
-          onChange={(e) => updateNodeData(nodeId, { isInput: e.target.checked })}
-          className="accent-accent"
-        />
-        <span className="text-xs text-text-primary">Input file (vs. output)</span>
-      </label>
+      <div className="flex flex-col gap-1">
+        <label className="text-text-secondary text-xs font-medium">File role</label>
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+          {[
+            { value: true, label: 'Input source' },
+            { value: false, label: 'Named output' },
+          ].map((option) => (
+            <button
+              key={option.label}
+              type="button"
+              onClick={() => updateNodeData(nodeId, { isInput: option.value })}
+              className={classNames(
+                'h-7 rounded text-xs transition-colors',
+                data.isInput === option.value
+                  ? 'bg-accent text-white'
+                  : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Split by axis (enables per-axis SLURM arrays downstream) */}
-      <div className="border-t border-border pt-3 mt-1">
+      {data.isInput && <div className="border-t border-border pt-3 mt-1">
         <div className="mb-2 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h4 className="text-xs uppercase tracking-wide text-text-muted font-medium">
@@ -2574,7 +2970,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 </Button>
                 {detectMessage && (
                   <span className={classNames(
-                    'min-w-0 flex-1 truncate text-[10px]',
+                    'min-w-0 flex-1 break-words text-[10px] leading-4',
                     detectMessage.toLowerCase().includes('could not') || detectMessage.toLowerCase().includes('connect')
                       ? 'text-error'
                       : 'text-text-muted',
@@ -2662,24 +3058,26 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             )}
 
             <div className="rounded border border-border bg-bg-primary p-2">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <label className="text-[10px] uppercase tracking-wide text-text-muted">
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <label className="text-[9px] uppercase tracking-wide text-text-muted">
                   Keys used for array jobs
                 </label>
                 {acceptedRange && (
-                  <span className="truncate text-[10px] font-mono text-text-secondary" title={acceptedRange}>
+                  <span className="truncate text-[9px] font-mono text-text-secondary" title={acceptedRange}>
                     {acceptedRange}
                   </span>
                 )}
               </div>
-              <div className="flex items-end gap-2">
-                <Input
-                  label={`${split.axis || 'item'} range/list`}
-                  value={rangeDraft}
-                  placeholder="1-22 or 1,2,3,X,Y"
-                  onChange={(e) => setRangeDraft(e.target.value)}
-                  className="flex-1"
-                />
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+                <div className="min-w-0">
+                  <Input
+                    label={`${split.axis || 'item'} range/list`}
+                    value={rangeDraft}
+                    placeholder="1-22 or 1,2,3,X,Y"
+                    onChange={(e) => setRangeDraft(e.target.value)}
+                    className="h-7 px-2 text-[11px]"
+                  />
+                </div>
                 <Button variant="secondary" size="sm" className="h-8 px-2 text-[11px]" onClick={applyRange}>
                   Apply
                 </Button>
@@ -2689,7 +3087,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
               </p>
             </div>
 
-            <div className="flex items-center justify-between mt-1">
+            <div data-wrap className="flex items-center justify-between mt-1">
               <label className="text-text-secondary text-xs font-medium">
                 Accepted items ({split.items.length})
               </label>
@@ -2700,14 +3098,14 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 <Plus size={10} /> Add
               </button>
             </div>
-            <div className="flex flex-col gap-1 max-h-56 overflow-y-auto">
+            <div data-wrap className="bioflow-split-items-list scroll-region flex max-h-60 min-h-0 flex-col gap-1 overflow-y-auto rounded border border-border bg-bg-primary p-1 pr-1.5">
               {split.items.map((row, i) => (
-                <div key={i} className="grid grid-cols-[56px_1fr_22px] gap-1 items-start">
+                <div key={i} data-wrap className="grid min-h-8 grid-cols-[2.75rem_minmax(0,1fr)_1.5rem] items-center gap-1 rounded bg-bg-tertiary/50 p-1">
                   <input
                     type="text"
                     value={row.key}
                     onChange={(e) => updateRow(i, { key: e.target.value })}
-                    className="h-7 rounded border border-border bg-bg-tertiary px-1.5 text-xs text-text-primary font-mono"
+                    className="bioflow-field h-6 min-w-0 rounded border border-border bg-bg-tertiary px-1.5 font-mono text-[11px] text-text-primary outline-none"
                     placeholder="1"
                     title="Item key: this becomes the Slurm array item label."
                   />
@@ -2717,13 +3115,14 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                     placeholder="/path/to/item/file"
                     title={`Choose file for split item ${row.key || i + 1}`}
                     mode="file"
-                    buttonLabel="Browse"
+                    buttonLabel=""
                     className="min-w-0"
+                    compact
                   />
                   <button
                     type="button"
                     onClick={() => removeRow(i)}
-                    className="p-1 rounded hover:bg-error/20 text-text-muted hover:text-error transition-colors"
+                    className="flex h-6 items-center justify-center rounded text-text-muted transition-colors hover:bg-error/20 hover:text-error"
                     title="Remove"
                   >
                     <X size={10} />
@@ -2731,17 +3130,17 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                 </div>
               ))}
               {split.items.length === 0 && (
-                <div className="text-[11px] text-text-muted italic px-1">
+                <div className="px-1 py-1 text-[11px] italic text-text-muted">
                   No accepted items yet. Fill a recipe above, check the preview, then click Accept preview.
                 </div>
               )}
             </div>
-            <div className="rounded border border-border bg-bg-primary">
-              <div className="flex items-center justify-between border-b border-border px-2 py-1">
-                <div>
-                  <span className="text-[10px] uppercase tracking-wide text-text-muted">Preview before accepting</span>
+            <div data-wrap className="bioflow-split-preview rounded border border-border bg-bg-primary">
+              <div data-wrap className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-border px-2 py-1">
+                <div className="min-w-0">
+                  <span className="text-[9px] uppercase tracking-wide text-text-muted">Preview before accepting</span>
                   {!preview.loading && !preview.error && preview.items.length > 0 && (
-                    <span className="ml-2 text-[10px] text-text-muted">
+                    <span className="ml-2 text-[9px] text-text-muted">
                       {preview.items.length} found, {preview.missing.size} missing
                     </span>
                   )}
@@ -2752,7 +3151,10 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                     size="sm"
                     className="h-6 px-2 text-[10px]"
                     disabled={preview.loading}
-                    onClick={() => setRefreshNonce((value) => value + 1)}
+                    onClick={() => {
+                      splitListingCacheRef.current.clear()
+                      setRefreshNonce((value) => value + 1)
+                    }}
                   >
                     Refresh
                   </Button>
@@ -2762,12 +3164,13 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                     className="h-6 px-2 text-[10px]"
                     disabled={preview.loading || preview.items.length === 0}
                     onClick={acceptPreview}
+                    title="Accept the previewed split items"
                   >
-                    Accept preview
+                    Accept
                   </Button>
                 </div>
               </div>
-              <div className="max-h-40 overflow-y-auto">
+              <div data-wrap className="scroll-region max-h-60 min-h-0 overflow-y-auto overflow-x-auto">
                 {preview.loading && <div className="px-2 py-2 text-[11px] text-text-muted">Checking files...</div>}
                 {preview.error && <div className="px-2 py-2 text-[11px] text-error">{preview.error}</div>}
                 {!preview.loading && !preview.error && preview.items.length === 0 && (
@@ -2776,27 +3179,25 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
                   </div>
                 )}
                 {!preview.loading && !preview.error && preview.items.length > 0 && (
-                  <table className="w-full text-[10px]">
-                    <thead className="sticky top-0 bg-bg-tertiary text-text-muted">
-                      <tr>
-                        <th className="w-12 px-2 py-1 text-left font-medium">Key</th>
-                        <th className="px-2 py-1 text-left font-medium">Resolved path</th>
-                        <th className="w-14 px-2 py-1 text-right font-medium">Check</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {preview.items.map((item) => {
-                        const missing = preview.missing.has(item.key)
-                        return (
-                          <tr key={`${item.key}:${item.path}`} className={missing ? 'bg-error/10 text-error' : 'text-text-secondary'}>
-                            <td className="w-12 px-2 py-1 font-mono">{item.key}</td>
-                            <td className="px-2 py-1 font-mono truncate" title={item.path}>{item.path}</td>
-                            <td className="w-14 px-2 py-1 text-right">{missing ? 'missing' : 'exists'}</td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
+                  <div data-wrap className="flex min-w-[18rem] flex-col gap-px p-1 text-[10px]">
+                    {preview.items.map((item) => {
+                      const missing = preview.missing.has(item.key)
+                      return (
+                        <div
+                          key={`${item.key}:${item.path}`}
+                          data-wrap
+                          className={classNames(
+                            'grid grid-cols-[2.75rem_minmax(0,1fr)_3.5rem] items-start gap-2 rounded px-1.5 py-1',
+                            missing ? 'bg-error/10 text-error' : 'text-text-secondary',
+                          )}
+                        >
+                          <span className="font-mono text-text-primary">{item.key}</span>
+                          <span className="break-all font-mono leading-4" title={item.path}>{item.path}</span>
+                          <span className="text-right">{missing ? 'missing' : 'exists'}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
               </div>
             </div>
@@ -2815,7 +3216,7 @@ function FileInspector({ nodeId, data }: { nodeId: string; data: FileNodeData })
             </p>
           </div>
         )}
-      </div>
+      </div>}
       {data.isInput && settings.showInputGenomeBuild && (
         <details className="border-t border-border pt-3">
           <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-text-muted hover:text-text-secondary">
@@ -3124,36 +3525,6 @@ function normalizeSplitForInspector(split: FileNodeSplit | undefined): FileNodeS
     items: safeSplitItems(split),
     pattern: split.pattern ?? (split.glob ? { kind: 'brace', template: split.glob } : { kind: 'manual' }),
   }
-}
-
-function parseRangeKeys(text: string): string[] {
-  const keys: string[] = []
-  for (const token of text.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean)) {
-    const range = token.match(/^(\d+)\s*(?:-|\.\.)\s*(\d+)$/)
-    if (range) {
-      const start = Number(range[1])
-      const end = Number(range[2])
-      const step = start <= end ? 1 : -1
-      for (let value = start; step > 0 ? value <= end : value >= end; value += step) {
-        keys.push(String(value))
-      }
-    } else {
-      keys.push(token)
-    }
-  }
-  return [...new Set(keys)]
-}
-
-function pathForSplitKey(pattern: SplitPattern, key: string): string {
-  if (pattern.kind === 'brace') return pattern.template.replace(/\{[^{}]*\}/, key)
-  if (pattern.kind === 'glob') return pattern.template.replace('*', key)
-  if (pattern.kind === 'crossFolder') {
-    const parent = pattern.parentDir.replace(/\/+$/, '')
-    const child = pattern.childGlob.replace('*', key).replace(/^\/+|\/+$/g, '')
-    const file = pattern.file.replace(/^\/+/, '')
-    return `${parent}/${child}/${file}`
-  }
-  return ''
 }
 
 function inferSplitFileType(items: FileNodeSplit['items'], current: FileNodeData['fileType']): FileNodeData['fileType'] {
@@ -3509,7 +3880,7 @@ function TransferInspector({ nodeId, data }: { nodeId: string; data: TransferNod
       {data.to === 'local' && (
         <div>
           <LocalPathField
-            label="Local destination folder"
+            label="Local destination folder on this Mac"
             value={data.localFolder ?? ''}
             placeholder="Required, e.g. ~/BioFlow/transfers"
             onChange={(value) => updateNodeData(nodeId, { localFolder: value || undefined })}

@@ -6,6 +6,7 @@ import type { ToolNodeData, TransformNodeData } from '@/types/pipeline'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
 import { PortHandle } from './PortHandle'
+import { useSyncNodeHandles } from './useSyncNodeHandles'
 
 function StatusBadge({ status = 'idle' }: { status?: ToolNodeData['status'] }) {
   const map: Record<NonNullable<ToolNodeData['status']>, { icon: React.ReactNode; label: string; cls: string }> = {
@@ -31,6 +32,14 @@ function TransformNodeInner({ id, data, selected }: NodeProps) {
   const filterCount = nodeData.filters?.length ?? 0
   const columnCount = nodeData.selectedColumns?.length ?? 0
   const tone = nodeTypeTone('transform')
+
+  useSyncNodeHandles(id, [
+    selected,
+    nodeData.label,
+    nodeData.status,
+    filterCount,
+    columnCount,
+  ])
 
   return (
     <div

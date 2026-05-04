@@ -19,12 +19,20 @@ import type {
 } from '../../src/types/pipeline'
 import { activeFlagBlocks, blockFlag, getFlagDef, toolUsesFlagBuilder, CUSTOM_FLAG_ID } from '../../src/lib/flagRegistry'
 import { getActiveToolInputs, getAnalysisOptionDefs, normalizeAnalysisOptions } from '../../src/lib/analysisOptions'
+import { rPackagesForTool } from '../../src/lib/rPackages'
 import type { AxedValue, AxisPlan } from './axisPlanner'
 
 export interface ConnectionDefaults {
   account?: string            // --account
   partition?: string          // --partition
   modulePreamble?: string     // e.g., "module --force purge && module load StdEnv/2023"
+  moduleDefaults?: {
+    plink?: string
+    r?: string
+    bcftools?: string
+    regenie?: string
+  }
+  rPackageInstallMode?: 'prompt-on-run' | 'auto-on-run' | 'manual'
   toolsRoot?: string
   annovarScriptsPath?: string
   annovarDbPath?: string
@@ -136,8 +144,8 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   lines.push('set -euo pipefail')
   lines.push('')
   if (connectionDefaults?.modulePreamble) lines.push(connectionDefaults.modulePreamble)
-  if (nodeData.moduleOverride?.trim()) lines.push(`module load ${nodeData.moduleOverride.trim()}`)
-  else if (tool.module) lines.push(`module load ${tool.module}`)
+  const moduleName = nodeData.moduleOverride?.trim() || defaultModuleForTool(tool, connectionDefaults)
+  if (moduleName) lines.push(`module load ${moduleName}`)
   lines.push('')
   lines.push(`mkdir -p ${shellQuote(outputDir)}`)
   lines.push(`cd ${shellQuote(outputDir)}`)
@@ -251,6 +259,30 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
     return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
   }
 
+  if (tool.id === 'plot.manhattan' || tool.id === 'plot.qq' || tool.id === 'r.plot') {
+    lines.push(...renderRPlotCommand({ tool, nodeData, axisPlan, outputDir, slug, connectionDefaults }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'custom.r') {
+    lines.push(...renderCustomRCommand({ nodeData, axisPlan, outputDir, slug, connectionDefaults }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'table.gtsummary') {
+    lines.push(...renderGtsummaryCommand({ nodeData, axisPlan, outputDir, slug, connectionDefaults }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
+  if (tool.id === 'r.regression') {
+    lines.push(...renderRRegressionCommand({ nodeData, axisPlan, outputDir, slug, connectionDefaults }))
+    lines.push('')
+    return { script: lines.join('\n'), outputs: axisPlan.outputs, arraySize }
+  }
+
   const customTemplate = typeof (tool as ToolDef & { customCommandTemplate?: unknown }).customCommandTemplate === 'string'
     ? String((tool as ToolDef & { customCommandTemplate?: unknown }).customCommandTemplate)
     : ''
@@ -309,6 +341,7 @@ export function generateToolScript(opts: ToolScriptOpts): ToolScriptResult {
   if (outputSpec) cmdParts.push(...outputSpec)
 
   lines.push(formatCommand(cmdParts))
+  lines.push(...renderDeclaredOutputFinalizers(tool, nodeData, axisPlan, outputDir, slug, axisPlan.mode === 'array'))
   lines.push('')
 
   const outputs: Record<string, AxedValue> = axisPlan.outputs
@@ -568,16 +601,14 @@ function renderCrossMapCommand(opts: {
   const format = normalizeCrossMapFormat(stringParam(nodeData, 'format'), input)
   const parts = ['CrossMap', format]
   const chromid = stringParam(nodeData, 'chromid')
-  if (chromid && ['bam', 'cram', 'sam'].includes(format)) parts.push('--chromid', shellQuote(chromid))
+  if (chromid) parts.push('--chromid', shellQuote(chromid))
+  if ((format === 'vcf' || format === 'gvcf') && nodeData.paramValues?.compress !== false) parts.push('--compress')
   parts.push(shellExpr(chain), shellExpr(input))
   if (format === 'vcf' || format === 'gvcf') {
     if (reference) parts.push(shellExpr(reference))
     parts.push(shellExpr(output))
   } else {
     parts.push(shellExpr(output))
-  }
-  if ((format === 'vcf' || format === 'gvcf') && nodeData.paramValues?.compress === true && output.endsWith('.gz')) {
-    return `${parts.join(' \\\n  ')}\nif command -v tabix >/dev/null 2>&1; then tabix -f -p vcf ${shellExpr(output)}; fi`
   }
   return parts.join(' \\\n  ')
 }
@@ -647,12 +678,14 @@ function renderMultiqcCommand(opts: {
   const { nodeData, axisPlan, outputDir, slug } = opts
   const input = axisPlan.inputs.input
   const paths = input?.kind === 'multi' || input?.kind === 'array' ? input.paths : input ? [input.path] : []
+  const declaredOutput = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'any', false)
+  const declaredDir = pathDirname(declaredOutput) || outputDir
   const parts = ['multiqc']
   if (booleanParam(nodeData, 'force', true)) parts.push('-f')
   const title = stringParam(nodeData, 'title')
   if (title) parts.push('--title', shellQuote(title))
-  const filename = stringParam(nodeData, 'filename') || `${slug}.multiqc_report.html`
-  parts.push('--filename', shellQuote(filename), '-o', shellQuote(outputDir), ...(paths.length ? paths.map(shellExpr) : ['.']))
+  const filename = pathBasename(declaredOutput) || stringParam(nodeData, 'filename') || `${slug}.multiqc_report.html`
+  parts.push('--filename', shellQuote(filename), '-o', shellQuote(declaredDir), ...(paths.length ? paths.map(shellExpr) : ['.']))
   return parts.join(' \\\n  ')
 }
 
@@ -797,7 +830,13 @@ function renderAnnovarCommand(opts: {
   if (booleanParam(nodeData, 'otherinfo', false)) parts.push('--otherinfo')
   if (nodeData.paramValues?.remove === true) parts.push('--remove')
   if (nodeData.paramValues?.vcfinput !== false) parts.push('--vcfinput')
-  return parts.join(' \\\n  ')
+  return [
+    parts.join(' \\\n  '),
+    `ANNOVAR_OUT=${shellArg(output)}`,
+    `ANNOVAR_REPORT=${shellArg(`${prefix}.${build}_multianno.txt`)}`,
+    'test -s "$ANNOVAR_REPORT" || { echo "ANNOVAR did not create $ANNOVAR_REPORT" >&2; exit 1; }',
+    'cp "$ANNOVAR_REPORT" "$ANNOVAR_OUT"',
+  ].join('\n')
 }
 
 function renderVepCommand(opts: {
@@ -828,8 +867,10 @@ function renderVepCommand(opts: {
     '--assembly', shellQuote(assembly),
     '--dir_cache', shellQuote(cache),
     '--fork', shellQuote(fork),
+    '--vcf',
     '--force_overwrite',
   ]
+  if (output.endsWith('.gz')) parts.push('--compress_output', 'bgzip')
   if (fasta) parts.push('--fasta', shellQuote(fasta))
   if (bufferSize) parts.push('--buffer_size', shellQuote(bufferSize))
   if (nodeData.paramValues?.cache !== false) parts.push('--cache')
@@ -870,9 +911,588 @@ function renderVepCommand(opts: {
   return parts.join(' \\\n  ')
 }
 
+function renderRPlotCommand(opts: {
+  tool: ToolDef
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  connectionDefaults?: ConnectionDefaults
+}): string[] {
+  const { tool, nodeData, axisPlan, outputDir, slug, connectionDefaults } = opts
+  const inputPort = tool.id === 'r.plot' ? 'input' : 'sumstats'
+  const inputPaths = inputPathsForPort(axisPlan, inputPort)
+  const plotManifest = resolveFirstOutput(axisPlan, 'plot', outputDir, slug, 'txt', false)
+  const plotBase = plotManifest.endsWith('.txt') ? plotManifest.slice(0, -4) : plotManifest
+  const png = `${plotBase}.png`
+  const pdf = `${plotBase}.pdf`
+  const outputFormats = stringParam(nodeData, 'outputFormats') || 'both'
+  const scriptPath = `${outputDir}/${slug}.plot.R`
+  const lines: string[] = []
+  lines.push(...renderRPackageBootstrap(outputDir, connectionDefaults, rPackagesForTool(tool.id, nodeData)))
+  lines.push(`INPUT_FILES=(${inputPaths.map(shellArg).join(' ')})`)
+  lines.push(`PLOT_OUT=${shellArg(plotManifest)}`)
+  lines.push(`PNG_OUT=${shellArg(png)}`)
+  lines.push(`PDF_OUT=${shellArg(pdf)}`)
+  lines.push(`OUTPUT_FORMATS=${shellArg(outputFormats)}`)
+  lines.push(`R_SCRIPT=${shellArg(scriptPath)}`)
+  lines.push(`cat > "$R_SCRIPT" <<'RS'`)
+  if (tool.id === 'plot.manhattan') lines.push(...renderManhattanR(nodeData))
+  else if (tool.id === 'plot.qq') lines.push(...renderQqR(nodeData))
+  else lines.push(...renderGenericRPlotR(nodeData))
+  lines.push('RS')
+  lines.push('Rscript "$R_SCRIPT" "$PNG_OUT" "$PDF_OUT" "$OUTPUT_FORMATS" "${INPUT_FILES[@]}"')
+  lines.push(': > "$PLOT_OUT"')
+  lines.push('case "$OUTPUT_FORMATS" in png|both) printf "%s\\n" "$PNG_OUT" >> "$PLOT_OUT" ;; esac')
+  lines.push('case "$OUTPUT_FORMATS" in pdf|both) printf "%s\\n" "$PDF_OUT" >> "$PLOT_OUT" ;; esac')
+  return lines
+}
+
+function renderRPackageBootstrap(outputDir: string, connectionDefaults?: ConnectionDefaults, packages = rPackagesForTool('r.plot')): string[] {
+  const toolsRoot = (connectionDefaults?.toolsRoot ?? '~/bioflow/tools').replace(/\/+$/, '')
+  const rLib = `${toolsRoot}/R/library`
+  const bootstrapPath = `${outputDir}/bioflow-r-packages.R`
+  if (connectionDefaults?.rPackageInstallMode === 'manual') {
+    return [
+      `R_LIB_DIR=${shellArg(rLib)}`,
+      'mkdir -p "$R_LIB_DIR"',
+      'export R_LIBS_USER="$R_LIB_DIR"',
+      '# R package installation is disabled by Settings -> Tools -> R packages.',
+      '',
+    ]
+  }
+  return [
+    `R_LIB_DIR=${shellArg(rLib)}`,
+    'mkdir -p "$R_LIB_DIR"',
+    'export R_LIBS_USER="$R_LIB_DIR"',
+    `R_PKG_BOOTSTRAP=${shellArg(bootstrapPath)}`,
+    `cat > "$R_PKG_BOOTSTRAP" <<'RS'`,
+    'lib <- Sys.getenv("R_LIBS_USER")',
+    'if (!dir.exists(lib)) dir.create(lib, recursive = TRUE, showWarnings = FALSE)',
+    '.libPaths(unique(c(lib, .libPaths())))',
+    `packages <- ${rStringArray(packages)}`,
+    'missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]',
+    'if (length(missing) > 0) {',
+    '  install.packages(missing, repos = Sys.getenv("BIOFLOW_CRAN_MIRROR", "https://cloud.r-project.org"), lib = lib)',
+    '}',
+    'missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]',
+    'if (length(missing) > 0) stop("Missing R packages after install: ", paste(missing, collapse = ", "))',
+    'RS',
+    'if command -v flock >/dev/null 2>&1; then',
+    '  (flock -w 900 9 && Rscript "$R_PKG_BOOTSTRAP") 9>"$R_LIB_DIR/.bioflow-r-packages.lock"',
+    'else',
+    '  Rscript "$R_PKG_BOOTSTRAP"',
+    'fi',
+    '',
+  ]
+}
+
+function renderCommonRPrelude(): string[] {
+  return [
+    'suppressPackageStartupMessages({',
+    '  library(data.table)',
+    '  library(ggplot2)',
+    '  library(qqman)',
+    '  library(scales)',
+    '})',
+    'args <- commandArgs(trailingOnly = TRUE)',
+    'if (length(args) < 4) stop("Expected PNG path, PDF path, output format, and at least one input table")',
+    'png_path <- args[[1]]',
+    'pdf_path <- args[[2]]',
+    'output_formats <- strsplit(args[[3]], ",", fixed = TRUE)[[1]]',
+    'write_png <- any(output_formats %in% c("png", "both"))',
+    'write_pdf <- any(output_formats %in% c("pdf", "both"))',
+    'input_files <- args[-c(1, 2, 3)]',
+    'read_one <- function(path) data.table::fread(path, data.table = FALSE, showProgress = FALSE)',
+    'df <- data.table::rbindlist(lapply(input_files, read_one), fill = TRUE)',
+    'df <- as.data.frame(df)',
+    'if (nrow(df) == 0) stop("Input table has no rows")',
+    'choose_col <- function(preferred, aliases, required = TRUE) {',
+    '  if (nzchar(preferred) && preferred %in% names(df)) return(preferred)',
+    '  hit <- aliases[aliases %in% names(df)]',
+    '  if (length(hit) > 0) return(hit[[1]])',
+    '  if (required) stop("Missing required column. Tried: ", paste(unique(c(preferred, aliases)), collapse = ", "))',
+    '  ""',
+    '}',
+    'as_num <- function(x) suppressWarnings(as.numeric(x))',
+    '',
+  ]
+}
+
+function renderManhattanR(nodeData: ToolNodeData): string[] {
+  const chrCol = stringParam(nodeData, 'chrCol') || 'CHR'
+  const bpCol = stringParam(nodeData, 'bpCol') || 'BP'
+  const pCol = stringParam(nodeData, 'pCol') || 'P'
+  const snpCol = stringParam(nodeData, 'snpCol') || 'ID'
+  const title = stringParam(nodeData, 'title') || 'Manhattan plot'
+  const genomewide = numberParam(nodeData, 'genomewide', 5e-8)
+  const suggestive = numberParam(nodeData, 'suggestive', 1e-5)
+  const width = numberParam(nodeData, 'width', 12)
+  const height = numberParam(nodeData, 'height', 6)
+  const dpi = numberParam(nodeData, 'dpi', 180)
+  return [
+    ...renderCommonRPrelude(),
+    `chr_col <- choose_col(${rString(chrCol)}, c("CHR", "#CHROM", "chrom", "chromosome"))`,
+    `bp_col <- choose_col(${rString(bpCol)}, c("BP", "POS", "position", "base_pair"))`,
+    `p_col <- choose_col(${rString(pCol)}, c("P", "PVAL", "P_VALUE", "P_LIN", "P_LOGISTIC", "LOG10P"))`,
+    `snp_col <- choose_col(${rString(snpCol)}, c("ID", "SNP", "RSID"), required = FALSE)`,
+    'chr_raw <- gsub("^chr", "", as.character(df[[chr_col]]), ignore.case = TRUE)',
+    'chr_num <- suppressWarnings(as.numeric(chr_raw))',
+    'chr_num[toupper(chr_raw) == "X"] <- 23',
+    'chr_num[toupper(chr_raw) == "Y"] <- 24',
+    'chr_num[toupper(chr_raw) %in% c("M", "MT")] <- 25',
+    'plot_df <- data.frame(',
+    '  CHR = chr_num,',
+    '  BP = as_num(df[[bp_col]]),',
+    '  P = if (toupper(p_col) == "LOG10P") 10^(-as_num(df[[p_col]])) else as_num(df[[p_col]]),',
+    '  SNP = if (nzchar(snp_col)) as.character(df[[snp_col]]) else paste(chr_raw, as_num(df[[bp_col]]), sep = ":")',
+    ')',
+    'plot_df <- plot_df[is.finite(plot_df$CHR) & is.finite(plot_df$BP) & is.finite(plot_df$P) & plot_df$P > 0 & plot_df$P <= 1, ]',
+    'if (nrow(plot_df) == 0) stop("No finite p-values remained for Manhattan plotting")',
+    `plot_title <- ${rString(title)}`,
+    `genomewide <- ${genomewide}`,
+    `suggestive <- ${suggestive}`,
+    'draw_plot <- function() {',
+    '  qqman::manhattan(',
+    '    plot_df, chr = "CHR", bp = "BP", p = "P", snp = "SNP",',
+    '    main = plot_title, genomewideline = -log10(genomewide), suggestiveline = -log10(suggestive)',
+    '  )',
+    '}',
+    'if (write_png) {',
+    `  png(png_path, width = ${width}, height = ${height}, units = "in", res = ${dpi})`,
+    '  draw_plot()',
+    '  dev.off()',
+    '}',
+    'if (write_pdf) {',
+    `  pdf(pdf_path, width = ${width}, height = ${height})`,
+    '  draw_plot()',
+    '  dev.off()',
+    '}',
+  ]
+}
+
+function renderQqR(nodeData: ToolNodeData): string[] {
+  const pCol = stringParam(nodeData, 'pCol') || 'P'
+  const title = stringParam(nodeData, 'title') || 'QQ plot'
+  const width = numberParam(nodeData, 'width', 6)
+  const height = numberParam(nodeData, 'height', 6)
+  const dpi = numberParam(nodeData, 'dpi', 180)
+  return [
+    ...renderCommonRPrelude(),
+    `p_col <- choose_col(${rString(pCol)}, c("P", "PVAL", "P_VALUE", "P_LIN", "P_LOGISTIC", "LOG10P"))`,
+    'p <- if (toupper(p_col) == "LOG10P") 10^(-as_num(df[[p_col]])) else as_num(df[[p_col]])',
+    'p <- p[is.finite(p) & p > 0 & p <= 1]',
+    'if (length(p) == 0) stop("No finite p-values remained for QQ plotting")',
+    'lambda <- stats::median(stats::qchisq(1 - p, df = 1), na.rm = TRUE) / stats::qchisq(0.5, df = 1)',
+    'expected <- sort(-log10(stats::ppoints(length(p))))',
+    'observed <- sort(-log10(sort(p)))',
+    'plot_df <- data.frame(expected = expected, observed = observed)',
+    'limit <- max(plot_df$expected, plot_df$observed, na.rm = TRUE)',
+    'g <- ggplot2::ggplot(plot_df, ggplot2::aes(expected, observed)) +',
+    '  ggplot2::geom_abline(slope = 1, intercept = 0, color = "grey60", linewidth = 0.4) +',
+    '  ggplot2::geom_point(alpha = 0.55, size = 0.9, color = "#3b82f6") +',
+    '  ggplot2::coord_equal(xlim = c(0, limit), ylim = c(0, limit)) +',
+    `  ggplot2::labs(title = ${rString(title)}, subtitle = sprintf("lambda GC = %.3f", lambda), x = "Expected -log10(p)", y = "Observed -log10(p)") +`,
+    '  ggplot2::theme_minimal(base_size = 12)',
+    `if (write_png) ggplot2::ggsave(png_path, g, width = ${width}, height = ${height}, dpi = ${dpi})`,
+    `if (write_pdf) ggplot2::ggsave(pdf_path, g, width = ${width}, height = ${height})`,
+  ]
+}
+
+function renderGenericRPlotR(nodeData: ToolNodeData): string[] {
+  const preset = stringParam(nodeData, 'preset') || 'scatter'
+  const title = stringParam(nodeData, 'title') || 'BioFlow R plot'
+  const xColumn = stringParam(nodeData, 'xColumn')
+  const yColumn = stringParam(nodeData, 'yColumn')
+  const colorColumn = stringParam(nodeData, 'colorColumn')
+  const facetColumn = stringParam(nodeData, 'facetColumn')
+  const groupColumn = stringParam(nodeData, 'groupColumn')
+  const bins = numberParam(nodeData, 'bins', 50)
+  const width = numberParam(nodeData, 'width', 8)
+  const height = numberParam(nodeData, 'height', 5)
+  const dpi = numberParam(nodeData, 'dpi', 180)
+  return [
+    ...renderCommonRPrelude(),
+    `preset <- ${rString(preset)}`,
+    `plot_title <- ${rString(title)}`,
+    `x_col <- choose_col(${rString(xColumn)}, c("PC1", "x", "X"), required = FALSE)`,
+    `y_col <- choose_col(${rString(yColumn)}, c("PC2", "y", "Y"), required = FALSE)`,
+    `color_col <- choose_col(${rString(colorColumn)}, c("group", "Group", "phenotype", "trait"), required = FALSE)`,
+    `facet_col <- choose_col(${rString(facetColumn)}, c(), required = FALSE)`,
+    `group_col <- choose_col(${rString(groupColumn)}, c("group", "Group", "cluster", "trait"), required = FALSE)`,
+    'facet_if_needed <- function(g) {',
+    '  if (nzchar(facet_col)) g + ggplot2::facet_wrap(stats::as.formula(paste("~", facet_col))) else g',
+    '}',
+    'if (preset == "pca-scatter") {',
+    '  if (!nzchar(x_col)) x_col <- choose_col("PC1", c("PC1"), required = TRUE)',
+    '  if (!nzchar(y_col)) y_col <- choose_col("PC2", c("PC2"), required = TRUE)',
+    '}',
+    'if (preset == "scatter" || preset == "pca-scatter") {',
+    '  if (!nzchar(x_col) || !nzchar(y_col)) stop("Scatter presets need X and Y columns")',
+    '  g <- ggplot2::ggplot(df, ggplot2::aes_string(x = x_col, y = y_col, color = if (nzchar(color_col)) color_col else NULL)) +',
+    '    ggplot2::geom_point(alpha = 0.7, size = 1.2) +',
+    '    ggplot2::labs(title = plot_title, x = x_col, y = y_col, color = color_col) +',
+    '    ggplot2::theme_minimal(base_size = 12)',
+    '  g <- facet_if_needed(g)',
+    '} else if (preset == "histogram" || preset == "density") {',
+    '  if (!nzchar(x_col)) stop("Histogram and density presets need an X column")',
+    '  g <- ggplot2::ggplot(df, ggplot2::aes_string(x = x_col, fill = if (nzchar(color_col)) color_col else NULL)) +',
+    `    ${preset === 'density' ? 'ggplot2::geom_density(alpha = 0.35)' : `ggplot2::geom_histogram(bins = ${bins}, alpha = 0.8)`} +`,
+    '    ggplot2::labs(title = plot_title, x = x_col, y = if (preset == "density") "Density" else "Count", fill = color_col) +',
+    '    ggplot2::theme_minimal(base_size = 12)',
+    '  g <- facet_if_needed(g)',
+    '} else if (preset == "boxplot" || preset == "violin") {',
+    '  if (!nzchar(y_col)) stop("Boxplot and violin presets need a Y column")',
+    '  if (!nzchar(group_col)) group_col <- if (nzchar(x_col)) x_col else stop("Boxplot and violin presets need a group or X column")',
+    '  g <- ggplot2::ggplot(df, ggplot2::aes_string(x = group_col, y = y_col, fill = if (nzchar(color_col)) color_col else group_col)) +',
+    '    { if (preset == "violin") ggplot2::geom_violin(trim = FALSE, alpha = 0.75) else ggplot2::geom_boxplot(outlier.alpha = 0.35) } +',
+    '    ggplot2::labs(title = plot_title, x = group_col, y = y_col, fill = color_col) +',
+    '    ggplot2::theme_minimal(base_size = 12) +',
+    '    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 35, hjust = 1))',
+    '  g <- facet_if_needed(g)',
+    '} else if (preset == "grouped-bar") {',
+    '  if (!nzchar(group_col)) group_col <- if (nzchar(x_col)) x_col else stop("Grouped bar preset needs a group or X column")',
+    '  if (nzchar(y_col)) {',
+    '    summary_df <- stats::aggregate(as_num(df[[y_col]]), by = list(group = df[[group_col]]), FUN = function(x) mean(x, na.rm = TRUE))',
+    '    names(summary_df) <- c(group_col, y_col)',
+    '    g <- ggplot2::ggplot(summary_df, ggplot2::aes_string(x = group_col, y = y_col)) + ggplot2::geom_col(fill = "#3b82f6", alpha = 0.85)',
+    '  } else {',
+    '    g <- ggplot2::ggplot(df, ggplot2::aes_string(x = group_col, fill = if (nzchar(color_col)) color_col else NULL)) + ggplot2::geom_bar(alpha = 0.85)',
+    '  }',
+    '  g <- g + ggplot2::labs(title = plot_title, x = group_col, fill = color_col) + ggplot2::theme_minimal(base_size = 12) +',
+    '    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 35, hjust = 1))',
+    '} else {',
+    '  stop("Unknown R plot preset: ", preset)',
+    '}',
+    `if (write_png) ggplot2::ggsave(png_path, g, width = ${width}, height = ${height}, dpi = ${dpi})`,
+    `if (write_pdf) ggplot2::ggsave(pdf_path, g, width = ${width}, height = ${height})`,
+  ]
+}
+
+function renderCustomRCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  connectionDefaults?: ConnectionDefaults
+}): string[] {
+  const { nodeData, axisPlan, outputDir, slug, connectionDefaults } = opts
+  const inputPaths = inputPathsForPort(axisPlan, 'input')
+  const table = resolveFirstOutput(axisPlan, 'table', outputDir, slug, 'tsv', false)
+  const png = resolveFirstOutput(axisPlan, 'png', outputDir, slug, 'any', false)
+  const pdf = resolveFirstOutput(axisPlan, 'pdf', outputDir, slug, 'any', false)
+  const scriptPath = `${outputDir}/${slug}.custom.R`
+  const lines: string[] = []
+  lines.push(...renderRPackageBootstrap(outputDir, connectionDefaults, rPackagesForTool('custom.r', nodeData)))
+  lines.push(`INPUT_FILES=(${inputPaths.map(shellArg).join(' ')})`)
+  lines.push(`OUTPUT_TABLE=${shellArg(table)}`)
+  lines.push(`PLOT_PNG=${shellArg(png)}`)
+  lines.push(`PLOT_PDF=${shellArg(pdf)}`)
+  lines.push(`OUTPUT_DIR=${shellArg(outputDir)}`)
+  lines.push(`R_SCRIPT=${shellArg(scriptPath)}`)
+  lines.push(`cat > "$R_SCRIPT" <<'RS'`)
+  lines.push(...renderCustomRR(nodeData))
+  lines.push('RS')
+  lines.push('Rscript "$R_SCRIPT" "$OUTPUT_TABLE" "$PLOT_PNG" "$PLOT_PDF" "$OUTPUT_DIR" "${INPUT_FILES[@]}"')
+  return lines
+}
+
+function renderCustomRR(nodeData: ToolNodeData): string[] {
+  const script = stringParam(nodeData, 'script') || [
+    'df <- if (nzchar(input_file)) read_table(input_file) else data.frame(message = "No input connected")',
+    'data.table::fwrite(df, output_table, sep = "\\t")',
+    'ggplot2::ggsave(plot_png, ggplot2::ggplot(df, ggplot2::aes(seq_len(nrow(df)))) + ggplot2::geom_blank() + ggplot2::labs(title = "Custom R output"), width = 7, height = 4, dpi = 180)',
+    'ggplot2::ggsave(plot_pdf, ggplot2::ggplot(df, ggplot2::aes(seq_len(nrow(df)))) + ggplot2::geom_blank() + ggplot2::labs(title = "Custom R output"), width = 7, height = 4)',
+  ].join('\n')
+  return [
+    'suppressPackageStartupMessages({',
+    '  library(data.table)',
+    '  library(ggplot2)',
+    '})',
+    'args <- commandArgs(trailingOnly = TRUE)',
+    'if (length(args) < 4) stop("Expected output table, PNG, PDF, output_dir, then optional input files")',
+    'output_table <- args[[1]]',
+    'plot_png <- args[[2]]',
+    'plot_pdf <- args[[3]]',
+    'output_dir <- args[[4]]',
+    'input_files <- if (length(args) > 4) args[-c(1, 2, 3, 4)] else character()',
+    'input_file <- if (length(input_files) > 0) input_files[[1]] else ""',
+    'read_table <- function(path) data.table::fread(path, data.table = FALSE, showProgress = FALSE)',
+    '',
+    script,
+    '',
+    'if (!file.exists(output_table)) data.table::fwrite(data.frame(note = "Custom R script did not write output_table."), output_table, sep = "\\t")',
+    'if (!file.exists(plot_png)) { png(plot_png, width = 7, height = 4, units = "in", res = 180); plot.new(); text(0.5, 0.5, "Custom R script did not write plot_png"); dev.off() }',
+    'if (!file.exists(plot_pdf)) { pdf(plot_pdf, width = 7, height = 4); plot.new(); text(0.5, 0.5, "Custom R script did not write plot_pdf"); dev.off() }',
+  ]
+}
+
+function renderGtsummaryCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  connectionDefaults?: ConnectionDefaults
+}): string[] {
+  const { nodeData, axisPlan, outputDir, slug, connectionDefaults } = opts
+  const input = resolveSingleInput(axisPlan, 'table', false)
+  const tsv = resolveFirstOutput(axisPlan, 'tsv', outputDir, slug, 'tsv', false)
+  const xlsx = resolveFirstOutput(axisPlan, 'excel', outputDir, slug, 'xlsx', false)
+  const scriptPath = `${outputDir}/${slug}.summary-table.R`
+  const lines: string[] = []
+  lines.push(...renderRPackageBootstrap(outputDir, connectionDefaults, rPackagesForTool('table.gtsummary', nodeData)))
+  lines.push(`INPUT_TABLE=${shellArg(input)}`)
+  lines.push(`OUTPUT_TSV=${shellArg(tsv)}`)
+  lines.push(`OUTPUT_XLSX=${shellArg(xlsx)}`)
+  lines.push(`R_SCRIPT=${shellArg(scriptPath)}`)
+  lines.push(`cat > "$R_SCRIPT" <<'RS'`)
+  lines.push(...renderGtsummaryR(nodeData))
+  lines.push('RS')
+  lines.push('Rscript "$R_SCRIPT" "$INPUT_TABLE" "$OUTPUT_TSV" "$OUTPUT_XLSX"')
+  return lines
+}
+
+function renderGtsummaryR(nodeData: ToolNodeData): string[] {
+  const includeColumns = stringParam(nodeData, 'includeColumns')
+  const byColumn = stringParam(nodeData, 'byColumn')
+  const labelMap = stringParam(nodeData, 'labelMap')
+  const missingText = stringParam(nodeData, 'missingText') || 'Unknown'
+  const addOverall = booleanParam(nodeData, 'addOverall', true)
+  const addP = booleanParam(nodeData, 'addP', true)
+  const percentStyle = stringParam(nodeData, 'percentStyle') || 'column'
+  const title = stringParam(nodeData, 'title') || 'Summary table'
+  return [
+    ...renderStatsRPrelude(),
+    'args <- commandArgs(trailingOnly = TRUE)',
+    'if (length(args) < 3) stop("Expected input table, output TSV, and output XLSX")',
+    'input_table <- args[[1]]',
+    'output_tsv <- args[[2]]',
+    'output_xlsx <- args[[3]]',
+    'df <- data.table::fread(input_table, data.table = FALSE, showProgress = FALSE)',
+    'if (nrow(df) == 0) stop("Input table has no rows")',
+    `include_cols <- split_cols(${rString(includeColumns)})`,
+    `by_col <- choose_col(df, ${rString(byColumn)}, c("group", "Group", "case_control", "status"), required = FALSE)`,
+    'if (length(include_cols) == 0) include_cols <- names(df)',
+    'missing_cols <- setdiff(unique(c(include_cols, by_col[nzchar(by_col)])), names(df))',
+    'if (length(missing_cols) > 0) stop("Missing summary columns: ", paste(missing_cols, collapse = ", "))',
+    'summary_df <- df[, unique(c(include_cols, by_col[nzchar(by_col)])), drop = FALSE]',
+    `label_arg <- label_formulas(${rString(labelMap)})`,
+    'tbl <- gtsummary::tbl_summary(',
+    '  summary_df,',
+    '  by = if (nzchar(by_col)) by_col else NULL,',
+    '  include = dplyr::all_of(include_cols),',
+    `  missing_text = ${rString(missingText)},`,
+    `  percent = ${rString(percentStyle)},`,
+    '  label = label_arg',
+    ')',
+    `if (${rBool(addOverall)} && nzchar(by_col)) tbl <- gtsummary::add_overall(tbl)`,
+    `if (${rBool(addP)} && nzchar(by_col)) tbl <- tryCatch(gtsummary::add_p(tbl), error = function(e) { message("add_p skipped: ", conditionMessage(e)); tbl })`,
+    'out <- as.data.frame(gtsummary::as_tibble(tbl, col_labels = TRUE))',
+    'data.table::fwrite(out, output_tsv, sep = "\\t")',
+    `write_xlsx_table(out, output_xlsx, ${rString(title)})`,
+  ]
+}
+
+function renderRRegressionCommand(opts: {
+  nodeData: ToolNodeData
+  axisPlan: AxisPlan
+  outputDir: string
+  slug: string
+  connectionDefaults?: ConnectionDefaults
+}): string[] {
+  const { nodeData, axisPlan, outputDir, slug, connectionDefaults } = opts
+  const pheno = resolveSingleInput(axisPlan, 'pheno', false)
+  const covar = resolveSingleInput(axisPlan, 'covar', false)
+  const coefficients = resolveFirstOutput(axisPlan, 'coefficients', outputDir, slug, 'tsv', false)
+  const table = resolveFirstOutput(axisPlan, 'table', outputDir, slug, 'tsv', false)
+  const xlsx = resolveFirstOutput(axisPlan, 'excel', outputDir, slug, 'xlsx', false)
+  const scriptPath = `${outputDir}/${slug}.regression.R`
+  const lines: string[] = []
+  lines.push(...renderRPackageBootstrap(outputDir, connectionDefaults, rPackagesForTool('r.regression', nodeData)))
+  lines.push(`PHENO_TABLE=${shellArg(pheno)}`)
+  lines.push(`COVAR_TABLE=${shellArg(covar)}`)
+  lines.push(`COEFFICIENTS_TSV=${shellArg(coefficients)}`)
+  lines.push(`DISPLAY_TSV=${shellArg(table)}`)
+  lines.push(`DISPLAY_XLSX=${shellArg(xlsx)}`)
+  lines.push(`R_SCRIPT=${shellArg(scriptPath)}`)
+  lines.push(`cat > "$R_SCRIPT" <<'RS'`)
+  lines.push(...renderRRegressionR(nodeData))
+  lines.push('RS')
+  lines.push('Rscript "$R_SCRIPT" "$PHENO_TABLE" "$COVAR_TABLE" "$COEFFICIENTS_TSV" "$DISPLAY_TSV" "$DISPLAY_XLSX"')
+  return lines
+}
+
+function renderRRegressionR(nodeData: ToolNodeData): string[] {
+  const phenoIdCol = stringParam(nodeData, 'phenoIdCol') || 'IID'
+  const covarIdCol = stringParam(nodeData, 'covarIdCol') || 'IID'
+  const outcomeColumn = stringParam(nodeData, 'outcomeColumn')
+  const predictorColumns = stringParam(nodeData, 'predictorColumns')
+  const phenotypeCovariates = stringParam(nodeData, 'phenotypeCovariates')
+  const covariateColumns = stringParam(nodeData, 'covariateColumns')
+  const modelType = stringParam(nodeData, 'modelType') || 'linear-lm'
+  const formulaOverride = stringParam(nodeData, 'formulaOverride')
+  const familyLink = stringParam(nodeData, 'familyLink') || 'default'
+  const confidenceLevel = numberParam(nodeData, 'confidenceLevel', 0.95)
+  const referenceLevels = stringParam(nodeData, 'referenceLevels')
+  const title = stringParam(nodeData, 'title') || 'Regression results'
+  return [
+    ...renderStatsRPrelude(),
+    'args <- commandArgs(trailingOnly = TRUE)',
+    'if (length(args) < 5) stop("Expected phenotype table, covariate table, coefficients TSV, display TSV, and display XLSX")',
+    'pheno_path <- args[[1]]',
+    'covar_path <- args[[2]]',
+    'coefficients_tsv <- args[[3]]',
+    'display_tsv <- args[[4]]',
+    'display_xlsx <- args[[5]]',
+    'pheno <- data.table::fread(pheno_path, data.table = FALSE, showProgress = FALSE)',
+    `pheno_id <- choose_col(pheno, ${rString(phenoIdCol)}, c("IID", "sample_id", "participant_id", "subject_id", "ID"))`,
+    `covar_id_preferred <- ${rString(covarIdCol)}`,
+    `outcome_col <- ${rString(outcomeColumn)}`,
+    `predictor_cols <- split_cols(${rString(predictorColumns)})`,
+    `phenotype_covars <- split_cols(${rString(phenotypeCovariates)})`,
+    `covariate_cols <- split_cols(${rString(covariateColumns)})`,
+    'if (!nzchar(outcome_col)) stop("Choose an outcome column")',
+    `formula_override <- ${rString(formulaOverride)}`,
+    `model_type <- ${rString(modelType)}`,
+    `family_link <- ${rString(familyLink)}`,
+    `conf_level <- ${confidenceLevel}`,
+    'df <- pheno',
+    'if (nzchar(covar_path) && file.exists(covar_path)) {',
+    '  covar <- data.table::fread(covar_path, data.table = FALSE, showProgress = FALSE)',
+    '  covar_id <- choose_col(covar, covar_id_preferred, c("IID", "sample_id", "participant_id", "subject_id", "ID"))',
+    '  keep <- unique(c(covar_id, covariate_cols))',
+    '  missing_covar <- setdiff(keep, names(covar))',
+    '  if (length(missing_covar) > 0) stop("Missing covariate columns: ", paste(missing_covar, collapse = ", "))',
+    '  df <- merge(pheno, covar[, keep, drop = FALSE], by.x = pheno_id, by.y = covar_id, all = FALSE)',
+    '}',
+    'guided_terms <- unique(c(predictor_cols, phenotype_covars, covariate_cols))',
+    'if (nzchar(formula_override)) {',
+    '  formula_text <- formula_override',
+    '} else {',
+    '  if (length(predictor_cols) == 0) stop("Choose at least one predictor column or provide a formula override")',
+    '  formula_text <- paste(quote_col(outcome_col), "~", paste(vapply(guided_terms, quote_col, character(1)), collapse = " + "))',
+    '}',
+    'model_formula <- stats::as.formula(formula_text)',
+    'model_vars <- all.vars(model_formula)',
+    'missing_vars <- setdiff(model_vars, names(df))',
+    'if (length(missing_vars) > 0) stop("Missing model columns: ", paste(missing_vars, collapse = ", "))',
+    `df <- apply_reference_levels(df, ${rString(referenceLevels)})`,
+    'before_n <- nrow(df)',
+    'model_df <- df[stats::complete.cases(df[, model_vars, drop = FALSE]), , drop = FALSE]',
+    'message("Regression complete-case rows: ", nrow(model_df), " of ", before_n)',
+    'if (nrow(model_df) == 0) stop("No complete rows remained for regression")',
+    'if (model_type == "linear-lm") {',
+    '  fit <- stats::lm(model_formula, data = model_df)',
+    '} else {',
+    '  family <- glm_family(model_type, family_link)',
+    '  fit <- stats::glm(model_formula, data = model_df, family = family)',
+    '}',
+    'exponentiate <- model_type != "linear-lm" && family_link != "identity"',
+    'coeff <- broom::tidy(fit, conf.int = TRUE, conf.level = conf_level, exponentiate = exponentiate)',
+    'data.table::fwrite(coeff, coefficients_tsv, sep = "\\t")',
+    'tbl <- gtsummary::tbl_regression(fit, exponentiate = exponentiate, conf.level = conf_level)',
+    'out <- as.data.frame(gtsummary::as_tibble(tbl, col_labels = TRUE))',
+    'data.table::fwrite(out, display_tsv, sep = "\\t")',
+    `write_xlsx_table(out, display_xlsx, ${rString(title)})`,
+  ]
+}
+
+function renderStatsRPrelude(): string[] {
+  return [
+    'suppressPackageStartupMessages({',
+    '  library(data.table)',
+    '  library(dplyr)',
+    '  library(gtsummary)',
+    '  library(openxlsx)',
+    '  library(broom)',
+    '})',
+    'split_cols <- function(value) {',
+    '  if (!nzchar(value)) return(character())',
+    '  out <- unlist(strsplit(value, "[,;\\n\\t ]+"))',
+    '  out[nzchar(out)]',
+    '}',
+    'choose_col <- function(df, preferred, aliases = character(), required = TRUE) {',
+    '  if (nzchar(preferred) && preferred %in% names(df)) return(preferred)',
+    '  hit <- aliases[aliases %in% names(df)]',
+    '  if (length(hit) > 0) return(hit[[1]])',
+    '  if (required) stop("Missing required column. Tried: ", paste(unique(c(preferred, aliases)), collapse = ", "))',
+    '  ""',
+    '}',
+    'quote_col <- function(column) paste0("`", gsub("`", "\\\\`", column), "`")',
+    'label_formulas <- function(spec) {',
+    '  if (!nzchar(spec)) return(NULL)',
+    '  pieces <- unlist(strsplit(spec, ";"))',
+    '  out <- list()',
+    '  for (piece in pieces) {',
+    '    kv <- unlist(strsplit(piece, "=", fixed = TRUE))',
+    '    if (length(kv) < 2) next',
+    '    nm <- trimws(kv[[1]])',
+    '    label <- trimws(paste(kv[-1], collapse = "="))',
+    '    if (nzchar(nm) && nzchar(label)) out[[length(out) + 1]] <- stats::as.formula(paste0(quote_col(nm), " ~ ", encodeString(label, quote = "\\"")))',
+    '  }',
+    '  if (length(out) == 0) NULL else out',
+    '}',
+    'apply_reference_levels <- function(df, spec) {',
+    '  if (!nzchar(spec)) return(df)',
+    '  for (piece in unlist(strsplit(spec, ";"))) {',
+    '    kv <- unlist(strsplit(piece, "=", fixed = TRUE))',
+    '    if (length(kv) < 2) next',
+    '    nm <- trimws(kv[[1]])',
+    '    ref <- trimws(paste(kv[-1], collapse = "="))',
+    '    if (nm %in% names(df) && nzchar(ref)) df[[nm]] <- stats::relevel(as.factor(df[[nm]]), ref = ref)',
+    '  }',
+    '  df',
+    '}',
+    'glm_family <- function(model_type, family_link) {',
+    '  if (model_type == "logistic-glm") {',
+    '    link <- if (family_link %in% c("logit", "probit")) family_link else "logit"',
+    '    return(stats::binomial(link = link))',
+    '  }',
+    '  if (model_type == "poisson-glm") {',
+    '    link <- if (family_link %in% c("log", "identity")) family_link else "log"',
+    '    return(stats::poisson(link = link))',
+    '  }',
+    '  stop("Unknown model type: ", model_type)',
+    '}',
+    'write_xlsx_table <- function(df, path, title) {',
+    '  wb <- openxlsx::createWorkbook()',
+    '  openxlsx::addWorksheet(wb, "BioFlow table")',
+    '  openxlsx::writeData(wb, 1, title, startRow = 1, startCol = 1)',
+    '  openxlsx::addStyle(wb, 1, openxlsx::createStyle(textDecoration = "bold", fontSize = 14), rows = 1, cols = 1)',
+    '  openxlsx::writeDataTable(wb, 1, df, startRow = 3, tableStyle = "TableStyleMedium2")',
+    '  openxlsx::setColWidths(wb, 1, cols = seq_len(max(1, ncol(df))), widths = "auto")',
+    '  openxlsx::saveWorkbook(wb, path, overwrite = TRUE)',
+    '}',
+    '',
+  ]
+}
+
+function inputPathsForPort(axisPlan: AxisPlan, portId: string): string[] {
+  const value = axisPlan.inputs[portId]
+  if (!value) return []
+  return value.kind === 'single' ? [value.path] : value.paths
+}
+
+function rString(value: string): string {
+  return JSON.stringify(value)
+}
+
+function rStringArray(values: string[]): string {
+  return `c(${values.map(rString).join(', ')})`
+}
+
+function rBool(value: boolean): string {
+  return value ? 'TRUE' : 'FALSE'
+}
+
 function stringParam(nodeData: ToolNodeData, name: string): string {
   const value = nodeData.paramValues?.[name]
   return value === undefined || value === null ? '' : String(value).trim()
+}
+
+function numberParam(nodeData: ToolNodeData, name: string, fallback: number): number {
+  const value = Number(nodeData.paramValues?.[name])
+  return Number.isFinite(value) ? value : fallback
 }
 
 function booleanParam(nodeData: ToolNodeData, name: string, fallback = false): boolean {
@@ -1040,12 +1660,29 @@ function resolveSingleInput(axisPlan: AxisPlan, portId: string, isArray: boolean
   return val.paths[0] ?? ''
 }
 
+function defaultModuleForTool(tool: ToolDef, connectionDefaults?: ConnectionDefaults): string {
+  const command = (tool.command || tool.id).toLowerCase()
+  const defaults = connectionDefaults?.moduleDefaults
+  if (command.includes('plink')) return defaults?.plink || tool.module || ''
+  if (command.includes('regenie')) return defaults?.regenie || tool.module || ''
+  if (command.includes('bcftools')) return defaults?.bcftools || tool.module || ''
+  if (command === 'rscript' || tool.id.startsWith('r.') || tool.id.startsWith('plot.') || tool.id === 'custom.r') {
+    return defaults?.r || tool.module || ''
+  }
+  return tool.module || ''
+}
+
 function resolveFirstOutput(axisPlan: AxisPlan, portId: string, outputDir: string, slug: string, ft: FileType, isArray: boolean): string {
   const outVal = axisPlan.outputs[portId]
-  if (!outVal) return `${outputDir}/${slug}.${portId}${extForFileType(ft)}`
-  if (isArray && outVal.kind === 'array') return pickPathExpr(portId, outputDir, slug, ft)
+  if (!outVal) return fallbackOutputPath(portId, outputDir, slug, ft)
+  if (isArray && outVal.kind === 'array') return arrayOutputPathExpr(outVal) ?? pickPathExpr(portId, outputDir, slug, ft)
   if (outVal.kind === 'single') return outVal.path
-  return outVal.paths[0] ?? `${outputDir}/${slug}.${portId}${extForFileType(ft)}`
+  return outVal.paths[0] ?? fallbackOutputPath(portId, outputDir, slug, ft)
+}
+
+function fallbackOutputPath(portId: string, outputDir: string, slug: string, ft: FileType): string {
+  const ext = extForFileType(ft)
+  return `${outputDir}/${outputStem(slug, portId, ft, ext)}${ext}`
 }
 
 function shellArrayValue(value: string): string {
@@ -1081,14 +1718,14 @@ function buildOutputSpec(
   if (!outVal) return null
   const path = isArray
     ? outVal.kind === 'array'
-      ? pickPathExpr(firstOut.id, outputDir, slug, firstOut.fileType)
+      ? arrayOutputPathExpr(outVal) ?? pickPathExpr(firstOut.id, outputDir, slug, firstOut.fileType)
       : (outVal as { path: string }).path
     : (outVal as { path: string }).path
 
   const cmdId = tool.command.toLowerCase()
   if (cmdId === 'plink2' || cmdId === 'plink' || cmdId === 'regenie') {
     // plink uses --out <prefix>, no extension.
-    const prefix = stripExt(path)
+    const prefix = tool.id === 'regenie.step1' ? regenieStep1Prefix(path) : stripExt(path)
     return [`--out ${shellExpr(prefix)}`]
   }
   // Default: -o <path>
@@ -1097,7 +1734,20 @@ function buildOutputSpec(
 
 function pickPathExpr(portId: string, outputDir: string, slug: string, ft: FileType): string {
   const ext = extForFileType(ft)
-  return `${outputDir}/${slug}.${portId}.\${KEY}${ext}`
+  return `${outputDir}/${outputStem(slug, portId, ft, ext)}.\${KEY}${ext}`
+}
+
+function arrayOutputPathExpr(value: Extract<AxedValue, { kind: 'array' }>): string | null {
+  const template = inferKeyedPathTemplate(value.paths, value.keys)
+  return template ? template.replaceAll('__BIOFLOW_KEY__', '${KEY}') : null
+}
+
+function outputStem(slug: string, portId: string, ft: FileType, ext: string): string {
+  const extWithoutDot = ext.replace(/^\./, '')
+  const compressedBase = extWithoutDot.replace(/\.gz$/, '')
+  return portId === ft || portId === extWithoutDot || portId === compressedBase
+    ? slug
+    : `${slug}.${portId}`
 }
 
 function appendParamArgs(tool: ToolDef, param: ToolDef['params'][number], raw: unknown, out: string[]): void {
@@ -1154,7 +1804,7 @@ function isRegenieListParam(tool: ToolDef, name: string): boolean {
 
 function normalizePlinkGlmValue(raw: unknown): string[] {
   const values = splitPlinkListValue(raw)
-  const normalized = values.filter((value) => value !== 'none')
+  const normalized = values.filter((value) => value !== 'none' && value !== 'standard')
   if (normalized.length === 0) return []
   if (normalized.some((value) => value === 'linear' || value === 'logistic')) {
     return ['hide-covar']
@@ -1167,7 +1817,7 @@ function plinkGlmValuesFromParams(nodeData: ToolNodeData): string[] {
   for (const modifier of ['allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
     if (nodeData.paramValues?.[modifier] === true && !values.includes(modifier)) values.push(modifier)
   }
-  if (!values.includes('hide-covar')) values.push('hide-covar')
+  if (nodeData.paramValues?.['hide-covar'] !== false && !values.includes('hide-covar')) values.push('hide-covar')
   return values
 }
 
@@ -1255,12 +1905,13 @@ function plinkAssocFileInputFlag(id: string, flag: string, options: AnalysisOpti
 }
 
 function emitAnalysisGlmFlag(option: AnalysisOptionState): string {
-  const mode = typeof option.value === 'string' && option.value.trim() ? option.value.trim() : 'hide-covar'
-  const extras = mode === 'hide-covar' ? ['hide-covar'] : [mode]
+  const mode = typeof option.value === 'string' && option.value.trim() ? option.value.trim() : 'standard'
+  const extras = mode === 'standard' ? [] : mode === 'hide-covar' ? ['hide-covar'] : [mode]
   for (const id of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
     if (option.subOptions?.[id]?.enabled) extras.push(id)
   }
-  return `--glm ${[...new Set(extras)].join(' ')}`
+  const unique = [...new Set(extras)]
+  return unique.length ? `--glm ${unique.join(' ')}` : '--glm'
 }
 
 function emitAnalysisScoreFlag(
@@ -1367,7 +2018,7 @@ function emitAssocGlmFlag(
     ? value.trim()
     : 'hide-covar'
   if (mode === 'hide-covar') extras.push('hide-covar')
-  else extras.push(mode)
+  else if (mode !== 'standard') extras.push(mode)
   for (const modifier of ['hide-covar', 'allow-no-covars', 'omit-ref', 'skip-invalid-pheno']) {
     if (byId.get(modifier)?.enabled) extras.push(modifier)
   }
@@ -1546,6 +2197,129 @@ function plinkShellPrefixExpr(variableName: string, samplePath: string): string 
   if (/\.bed$/i.test(samplePath)) return `"${'${'}${variableName}%.bed}"`
   if (/\.(pgen|pvar|psam)$/i.test(samplePath)) return `"${'${'}${variableName}%.*}"`
   return `"$${variableName}"`
+}
+
+function renderDeclaredOutputFinalizers(
+  tool: ToolDef,
+  nodeData: ToolNodeData,
+  axisPlan: AxisPlan,
+  outputDir: string,
+  slug: string,
+  isArray: boolean,
+): string[] {
+  if (tool.id === 'plink2.assoc') {
+    const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'tsv', isArray)
+    const prefix = stripExt(output)
+    return [
+      '',
+      '# --- Materialize declared BioFlow association output ---',
+      `ASSOC_OUT=${shellArg(output)}`,
+      `ASSOC_PREFIX=${shellArg(prefix)}`,
+      'ASSOC_RESULTS=("$ASSOC_PREFIX".*.glm.*)',
+      'if [ ! -e "${ASSOC_RESULTS[0]}" ]; then echo "PLINK2 did not create any --glm result files for $ASSOC_PREFIX" >&2; exit 1; fi',
+      ': > "$ASSOC_OUT"',
+      'ASSOC_HEADER_WRITTEN=0',
+      'for result in "${ASSOC_RESULTS[@]}"; do',
+      '  [ -s "$result" ] || continue',
+      '  if [ "$ASSOC_HEADER_WRITTEN" -eq 0 ]; then',
+      '    awk \'NR==1{print; next} NR>1{print}\' "$result" >> "$ASSOC_OUT"',
+      '    ASSOC_HEADER_WRITTEN=1',
+      '  else',
+      '    awk \'NR>1{print}\' "$result" >> "$ASSOC_OUT"',
+      '  fi',
+      'done',
+      'test -s "$ASSOC_OUT" || { echo "PLINK2 association output was empty" >&2; exit 1; }',
+    ]
+  }
+
+  if (tool.id === 'plink2.clump') {
+    const clumped = resolveFirstOutput(axisPlan, 'clumped', outputDir, slug, 'tsv', isArray)
+    const leadIds = resolveFirstOutput(axisPlan, 'leadIds', outputDir, slug, 'txt', isArray)
+    const prefix = stripExt(clumped)
+    return [
+      '',
+      '# --- Materialize declared BioFlow clump outputs ---',
+      `CLUMP_OUT=${shellArg(clumped)}`,
+      `LEAD_IDS_OUT=${shellArg(leadIds)}`,
+      `CLUMP_PREFIX=${shellArg(prefix)}`,
+      'CLUMP_REPORT="$CLUMP_PREFIX.clumps"',
+      'test -s "$CLUMP_REPORT" || { echo "PLINK2 did not create $CLUMP_REPORT" >&2; exit 1; }',
+      'cp "$CLUMP_REPORT" "$CLUMP_OUT"',
+      'awk \'BEGIN{FS=OFS="\\t"} NR==1{for(i=1;i<=NF;i++) if($i=="ID" || $i=="SNP"){id=i}; next} NR>1 && id && $id!=""{print $id}\' "$CLUMP_REPORT" > "$LEAD_IDS_OUT"',
+      'test -s "$LEAD_IDS_OUT" || { echo "No lead variant IDs found in PLINK2 clump report" >&2; exit 1; }',
+    ]
+  }
+
+  if (tool.id === 'plink2.score') {
+    const profile = resolveFirstOutput(axisPlan, 'profile', outputDir, slug, 'tsv', isArray)
+    const prefix = stripExt(profile)
+    return [
+      '',
+      '# --- Materialize declared BioFlow score output ---',
+      `SCORE_OUT=${shellArg(profile)}`,
+      `SCORE_PREFIX=${shellArg(prefix)}`,
+      'SCORE_REPORT="$SCORE_PREFIX.sscore"',
+      'test -s "$SCORE_REPORT" || { echo "PLINK2 did not create $SCORE_REPORT" >&2; exit 1; }',
+      'cp "$SCORE_REPORT" "$SCORE_OUT"',
+    ]
+  }
+
+  if (tool.id === 'plink2.pca') {
+    const eigenvec = resolveFirstOutput(axisPlan, 'eigenvec', outputDir, slug, 'tsv', isArray)
+    const eigenval = resolveFirstOutput(axisPlan, 'eigenval', outputDir, slug, 'tsv', isArray)
+    const prefix = stripExt(eigenvec)
+    return [
+      '',
+      '# --- Materialize declared BioFlow PCA outputs ---',
+      `PCA_EIGENVEC_OUT=${shellArg(eigenvec)}`,
+      `PCA_EIGENVAL_OUT=${shellArg(eigenval)}`,
+      `PCA_PREFIX=${shellArg(prefix)}`,
+      'test -s "$PCA_PREFIX.eigenvec" || { echo "PLINK2 did not create $PCA_PREFIX.eigenvec" >&2; exit 1; }',
+      'test -s "$PCA_PREFIX.eigenval" || { echo "PLINK2 did not create $PCA_PREFIX.eigenval" >&2; exit 1; }',
+      'cp "$PCA_PREFIX.eigenvec" "$PCA_EIGENVEC_OUT"',
+      'cp "$PCA_PREFIX.eigenval" "$PCA_EIGENVAL_OUT"',
+    ]
+  }
+
+  if (tool.id === 'regenie.step1') {
+    const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'txt', isArray)
+    const prefix = regenieStep1Prefix(output)
+    return [
+      '',
+      '# --- Materialize declared BioFlow REGENIE Step 1 prediction list ---',
+      `REGENIE_PRED_OUT=${shellArg(output)}`,
+      `REGENIE_PREFIX=${shellArg(prefix)}`,
+      'test -s "$REGENIE_PREFIX"_pred.list || { echo "REGENIE did not create ${REGENIE_PREFIX}_pred.list" >&2; exit 1; }',
+      'cp "$REGENIE_PREFIX"_pred.list "$REGENIE_PRED_OUT"',
+    ]
+  }
+
+  if (tool.id === 'regenie.step2') {
+    const output = resolveFirstOutput(axisPlan, 'output', outputDir, slug, 'tsv', isArray)
+    const prefix = stripExt(output)
+    return [
+      '',
+      '# --- Materialize declared BioFlow REGENIE Step 2 association output ---',
+      `REGENIE_ASSOC_OUT=${shellArg(output)}`,
+      `REGENIE_PREFIX=${shellArg(prefix)}`,
+      'REGENIE_RESULTS=("$REGENIE_PREFIX"*.regenie)',
+      'if [ ! -e "${REGENIE_RESULTS[0]}" ]; then echo "REGENIE did not create association result files for $REGENIE_PREFIX" >&2; exit 1; fi',
+      ': > "$REGENIE_ASSOC_OUT"',
+      'REGENIE_HEADER_WRITTEN=0',
+      'for result in "${REGENIE_RESULTS[@]}"; do',
+      '  [ -s "$result" ] || continue',
+      '  if [ "$REGENIE_HEADER_WRITTEN" -eq 0 ]; then',
+      '    awk \'NR==1{print; next} NR>1{print}\' "$result" >> "$REGENIE_ASSOC_OUT"',
+      '    REGENIE_HEADER_WRITTEN=1',
+      '  else',
+      '    awk \'NR>1{print}\' "$result" >> "$REGENIE_ASSOC_OUT"',
+      '  fi',
+      'done',
+      'test -s "$REGENIE_ASSOC_OUT" || { echo "REGENIE association output was empty" >&2; exit 1; }',
+    ]
+  }
+
+  return []
 }
 
 // --- Merge scripts --------------------------------------------------------
@@ -2071,6 +2845,19 @@ function shellArg(s: string): string {
   return shellQuote(s)
 }
 
+function pathDirname(path: string): string {
+  const normalized = path.replace(/\/+$/, '')
+  const idx = normalized.lastIndexOf('/')
+  if (idx <= 0) return idx === 0 ? '/' : ''
+  return normalized.slice(0, idx)
+}
+
+function pathBasename(path: string): string {
+  const normalized = path.replace(/\/+$/, '')
+  const idx = normalized.lastIndexOf('/')
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized
+}
+
 function awkStringLiteral(value: string): string {
   return `"${value
     .replace(/\\/g, '\\\\')
@@ -2089,6 +2876,12 @@ function stripExt(p: string): string {
   return p.slice(0, idx)
 }
 
+function regenieStep1Prefix(path: string): string {
+  if (path.endsWith('_pred.list')) return path.slice(0, -10)
+  if (path.endsWith('.pred.list')) return path.slice(0, -10)
+  return stripExt(path)
+}
+
 function extForFileType(ft: FileType): string {
   switch (ft) {
     case 'vcf': return '.vcf.gz'
@@ -2104,6 +2897,7 @@ function extForFileType(ft: FileType): string {
     case 'tsv': return '.tsv'
     case 'csv': return '.csv'
     case 'txt': return '.txt'
+    case 'xlsx': return '.xlsx'
     case 'json': return '.json'
     case 'yaml': return '.yaml'
     case 'plink': return ''

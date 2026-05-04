@@ -120,11 +120,14 @@ interface Window {
       listRuns: () => Promise<import('./types/pipeline').RunState[]>
       getRun: (runId: string) => Promise<import('./types/pipeline').RunState | null>
       listOutputs: (runId: string, nodeId: string, connectionId?: string) => Promise<Array<{ name: string; path: string; size: number; modified: number; origin: 'local' | 'ssh' | 'dnx' }>>
+      refreshArrayTasks: (runId: string, nodeId: string) => Promise<Record<string, import('./types/pipeline').ArrayTaskStatus>>
       generateScriptsDry: (connectionId: string, snapshot: import('./types/pipeline').PipelineSnapshot, workDir?: string) => Promise<import('./types/pipeline').DryRunScript[]>
       planTransfersDry: (snapshot: import('./types/pipeline').PipelineSnapshot) => Promise<import('./types/pipeline').TransferPlan[]>
       onNodeStatus: (callback: (data: { runId: string; nodeId: string; status: import('./types/pipeline').RunStatus | 'idle'; jobId?: string; error?: string; node?: import('./types/pipeline').NodeRunState }) => void) => () => void
       onRunStatus: (callback: (data: { runId: string; status: import('./types/pipeline').RunStatus }) => void) => () => void
       onJobLog: (callback: (data: { runId: string; nodeId: string; chunk: string; stream: 'stdout' | 'stderr' }) => void) => () => void
+      onArrayTaskStatus: (callback: (data: { runId: string; nodeId: string; tasks: Record<string, import('./types/pipeline').ArrayTaskStatus>; taskMap?: import('./types/pipeline').ArrayTaskMapEntry[] }) => void) => () => void
+      onTransferProgress: (callback: (data: { runId: string; nodeId: string; progress: NonNullable<import('./types/pipeline').NodeRunState['transferProgress']> }) => void) => () => void
     }
     slurm: {
       queue: (connectionId: string) => Promise<Array<{

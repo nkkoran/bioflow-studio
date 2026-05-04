@@ -4,6 +4,7 @@ import {
   bioflowControlPath,
   bioflowOpenSshAlias,
   buildExpectScript,
+  buildOpenSshLsCommand,
   buildOpenSshBaseArgs,
   buildOpenSshHostBlock,
   buildOpenSshMasterCheckArgs,
@@ -50,6 +51,13 @@ describe('OpenSSH ControlPersist transport helpers', () => {
     expect(bioflowOpenSshAlias(baseConfig)).toBe('bioflow-nk-rorqual.alliancecan.ca-22')
     expect(openSshShellQuote('/project/nk/results.tsv')).toBe('/project/nk/results.tsv')
     expect(openSshShellQuote("/project/nk/weird file's.tsv")).toBe("'/project/nk/weird file'\"'\"'s.tsv'")
+  })
+
+  it('lists symlinked project directories through find -H', () => {
+    const command = buildOpenSshLsCommand('/project/rrg-jamiece')
+
+    expect(command).toContain('find -H "$dir"')
+    expect(command).toContain('[ -d "$dir" ] || exit 2')
   })
 
   it('builds config-independent ssh args for BioFlow app operations', () => {

@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
   ArrowRightLeft,
+  BarChart3,
   Boxes,
   Dna,
   FileCog,
@@ -10,6 +11,7 @@ import {
   Rows3,
   ShieldCheck,
   SlidersHorizontal,
+  Sigma,
   StickyNote,
   Tags,
   Terminal,
@@ -20,9 +22,12 @@ import type { BioflowNodeType, ToolCategory } from '@/types/pipeline'
 
 const CATEGORY_ICONS: Record<ToolCategory, LucideIcon> = {
   gwas: Dna,
+  stats: Sigma,
+  visualization: BarChart3,
   annotation: Tags,
   qc: ShieldCheck,
   format: FileCog,
+  'file-ops': FileCog,
   utility: Workflow,
   custom: Terminal,
   'variant-calling': Activity,

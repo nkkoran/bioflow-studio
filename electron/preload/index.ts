@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern, TransferPlan } from '../../src/types/pipeline'
+import type { ArrayTaskMapEntry, ArrayTaskStatus, DryRunScript, NodeRunState, PipelineSnapshot, RunState, RunStatus, SplitPattern, TransferPlan } from '../../src/types/pipeline'
 import type { RunReadinessReport } from '../../src/types/workspace'
 import type { AnnovarInstallRequest, AnnovarInstallProgress, AnnovarStatusResult } from '../../src/types/annotation'
 import type {
@@ -373,6 +373,8 @@ const api = {
       ipcRenderer.invoke('pipeline:get-run', runId),
     listOutputs: (runId: string, nodeId: string, connectionId?: string): Promise<Array<{ name: string; path: string; size: number; modified: number; origin: 'local' | 'ssh' | 'dnx' }>> =>
       ipcRenderer.invoke('pipeline:list-outputs', { runId, nodeId, connectionId }),
+    refreshArrayTasks: (runId: string, nodeId: string): Promise<Record<string, ArrayTaskStatus>> =>
+      ipcRenderer.invoke('pipeline:refresh-array-tasks', { runId, nodeId }),
     generateScriptsDry: (connectionId: string, snapshot: PipelineSnapshot, workDir?: string): Promise<DryRunScript[]> =>
       ipcRenderer.invoke('pipeline:generate-scripts-dry', { connectionId, snapshot, workDir }),
     planTransfersDry: (snapshot: PipelineSnapshot): Promise<TransferPlan[]> =>
@@ -391,6 +393,16 @@ const api = {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('pipeline:job-log', handler)
       return () => ipcRenderer.removeListener('pipeline:job-log', handler)
+    },
+    onArrayTaskStatus: (callback: (data: { runId: string; nodeId: string; tasks: Record<string, ArrayTaskStatus>; taskMap?: ArrayTaskMapEntry[] }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('pipeline:array-task-status', handler)
+      return () => ipcRenderer.removeListener('pipeline:array-task-status', handler)
+    },
+    onTransferProgress: (callback: (data: { runId: string; nodeId: string; progress: NonNullable<NodeRunState['transferProgress']> }) => void): (() => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('pipeline:transfer-progress', handler)
+      return () => ipcRenderer.removeListener('pipeline:transfer-progress', handler)
     },
   },
   slurm: {

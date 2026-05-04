@@ -36,6 +36,7 @@ function modeToPermissions(mode: number): string {
 }
 
 function resolvePath(p: string): string {
+  if (!p?.trim()) return homedir()
   if (p.startsWith('~/') || p === '~') {
     return join(homedir(), p.slice(2))
   }

@@ -47,9 +47,9 @@ export const TOOL_BUNDLES: ToolBundle[] = [
   {
     id: 'grs.withClumping',
     label: 'GRS with clumping',
-    description: 'PLINK2 clumping followed by score calculation with clumped ranges wired into --extract.',
+    description: 'PLINK2 clumping followed by score calculation with lead variant IDs wired into --extract.',
     pack: 'GWAS/PRS',
-    expectedOutputs: ['Clumped variant ranges', 'PLINK profile/score table'],
+    expectedOutputs: ['Clumped lead variant IDs', 'PLINK profile/score table'],
     help: 'Use this when you already have GWAS summary statistics and want a clean PRS/GRS scoring handoff.',
     build: (position) => {
       const clumpId = makeId('node')
@@ -84,7 +84,7 @@ export const TOOL_BUNDLES: ToolBundle[] = [
         {
           id: makeId('edge'),
           source: clumpId,
-          sourceHandle: 'ranges',
+          sourceHandle: 'leadIds',
           target: scoreId,
           targetHandle: 'extract',
           animated: false,
@@ -108,7 +108,7 @@ export const TOOL_BUNDLES: ToolBundle[] = [
         nodes: [assoc, clump, score],
         edges: [
           { id: makeId('edge'), source: assoc.id, sourceHandle: 'output', target: clump.id, targetHandle: 'clump', animated: false },
-          { id: makeId('edge'), source: clump.id, sourceHandle: 'ranges', target: score.id, targetHandle: 'extract', animated: false },
+          { id: makeId('edge'), source: clump.id, sourceHandle: 'leadIds', target: score.id, targetHandle: 'extract', animated: false },
         ],
       }
     },

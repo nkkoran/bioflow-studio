@@ -110,4 +110,33 @@ describe('pipelineStore', () => {
       outputName: 'cad.tsv',
     })
   })
+
+  it('migrates old plot png/pdf output edges to the logical plot port', () => {
+    usePipelineStore.getState().loadSnapshot({
+      version: 1,
+      id: 'plot-migration',
+      name: 'Plot migration',
+      createdAt: 1,
+      updatedAt: 1,
+      nodes: [
+        {
+          id: 'plot',
+          type: 'tool',
+          position: { x: 0, y: 0 },
+          data: { toolId: 'plot.manhattan', label: 'Manhattan', paramValues: {}, status: 'idle' },
+        },
+        {
+          id: 'sink',
+          type: 'transfer',
+          position: { x: 240, y: 0 },
+          data: { label: 'Download', from: 'ssh', to: 'local', status: 'idle' },
+        },
+      ],
+      edges: [
+        { id: 'old-png-edge', source: 'plot', sourceHandle: 'png', target: 'sink', targetHandle: 'input' },
+      ],
+    })
+
+    expect(usePipelineStore.getState().edges[0]?.sourceHandle).toBe('plot')
+  })
 })

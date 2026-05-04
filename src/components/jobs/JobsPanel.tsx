@@ -14,6 +14,7 @@ import { JobSummary } from './JobSummary'
 import { QueueDetails } from './QueueDetails'
 import { FailureDiagnostic } from './FailureDiagnostic'
 import { RunRecoveryCard } from './RunRecoveryCard'
+import { ArrayJobViewer } from './ArrayJobViewer'
 import type { NodeRunState, RunState } from '@/types/pipeline'
 import { useFileStore } from '@/stores/fileStore'
 import { useConnectionStore, LOCAL_CONNECTION_ID } from '@/stores/connectionStore'
@@ -334,6 +335,9 @@ export function JobsPanel() {
                 ns={activeRun.nodes[selectedNodeId]}
                 label={labelForNode(activeRun.snapshot?.nodes as Array<{ id: string; type?: string; data: Record<string, unknown> }> | undefined ?? pipelineNodes, selectedNodeId)}
               />
+            )}
+            {selectedNodeId && activeRun.nodes[selectedNodeId]?.isArray && (
+              <ArrayJobViewer run={activeRun} ns={activeRun.nodes[selectedNodeId]} />
             )}
             {(() => {
               const ns = selectedNodeId ? activeRun.nodes[selectedNodeId] : null

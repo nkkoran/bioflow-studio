@@ -17,6 +17,7 @@ export interface ColumnSchema {
   columns: string[]
   delimiter: string
   sourcePath?: string
+  roles?: Array<{ roleId: string; column: string }>
 }
 
 export type SchemaCache = Record<string, { columns: string[]; delimiter: string; fetchedAt: number; modified?: number }>
@@ -66,9 +67,10 @@ export function outputSchema(
 
   if (node.type === 'file') {
     const data = node.data as FileNodeData
-    const cached = schemas[data.path]
+    const schemaPath = data.path || data.split?.items?.find((item) => item.path)?.path
+    const cached = schemaPath ? schemas[schemaPath] : undefined
     if (!cached) return null
-    return { columns: cached.columns, delimiter: cached.delimiter, sourcePath: data.path }
+    return { columns: cached.columns, delimiter: cached.delimiter, sourcePath: schemaPath }
   }
 
   if (node.type === 'transform') {
@@ -81,14 +83,19 @@ export function outputSchema(
         columns: presetSchema.columns,
         delimiter: presetSchema.delimiter ?? (data.fileType === 'csv' ? ',' : upstream.delimiter),
         sourcePath: upstream.sourcePath,
+        roles: presetSchema.roles,
       }
     }
     const selected = data.selectedColumns?.length ? data.selectedColumns : upstream.columns
     const renameMap = new Map((data.renames ?? []).map((rule) => [rule.from, rule.to.trim() || rule.from]))
+    const outputColumns = selected.map((column) => renameMap.get(column) ?? column)
     return {
-      columns: selected.map((column) => renameMap.get(column) ?? column),
+      columns: outputColumns,
       delimiter: data.fileType === 'csv' ? ',' : upstream.delimiter,
       sourcePath: upstream.sourcePath,
+      roles: upstream.roles
+        ?.filter((role) => selected.includes(role.column))
+        .map((role) => ({ ...role, column: renameMap.get(role.column) ?? role.column })),
     }
   }
 
@@ -100,6 +107,7 @@ export function outputSchema(
       return {
         columns: port.outputSchema.columns,
         delimiter: port.outputSchema.delimiter ?? '\t',
+        roles: port.outputSchema.roles,
       }
     }
   }

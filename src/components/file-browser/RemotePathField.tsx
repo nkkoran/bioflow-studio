@@ -3,6 +3,7 @@ import { useState } from 'react'
 
 import { Button } from '@/components/ui/Button'
 import { useConnectionStore } from '@/stores/connectionStore'
+import { classNames } from '@/lib/utils'
 import { RemoteFileBrowser } from './RemoteFileBrowser'
 import { RemotePathInput } from './RemotePathInput'
 
@@ -17,6 +18,7 @@ interface RemotePathFieldProps {
   buttonLabel?: string
   className?: string
   error?: string
+  compact?: boolean
 }
 
 export function RemotePathField({
@@ -30,6 +32,7 @@ export function RemotePathField({
   buttonLabel = 'Browse',
   className,
   error,
+  compact = false,
 }: RemotePathFieldProps) {
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
   const [open, setOpen] = useState(false)
@@ -43,17 +46,17 @@ export function RemotePathField({
           placeholder={placeholder}
           onChange={onChange}
           mode={mode}
-          className="flex-1"
+          className={classNames('flex-1', compact && 'h-6 px-2 text-[10px]')}
         />
         <Button
           variant="secondary"
           size="sm"
-          className="h-8 shrink-0 px-2"
+          className={classNames('shrink-0', compact ? 'h-6 px-1.5 text-[10px]' : 'h-8 px-2')}
           title={activeConnectionId ? `Browse ${mode === 'directory' ? 'folders' : 'files'}` : 'Connect first to browse remote paths'}
           disabled={!activeConnectionId}
           onClick={() => setOpen(true)}
         >
-          <Folder size={12} className="mr-1" />
+          <Folder size={compact ? 10 : 12} className={buttonLabel ? 'mr-1' : undefined} />
           {buttonLabel}
         </Button>
       </div>

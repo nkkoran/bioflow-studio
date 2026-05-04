@@ -102,7 +102,7 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
       <div className="relative flex items-center" ref={dropdownRef}>
         <button
           onClick={handleClick}
-          className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors text-sm min-w-0"
+          className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors hover:bg-bg-hover"
           title={
             status === 'connected' && activeEntry
               ? `${activeEntry.config.name} (${activeEntry.config.username}@${activeEntry.config.host})`
@@ -126,13 +126,13 @@ export function ConnectionStatus({ compact = false }: ConnectionStatusProps = {}
                 </>
               ) : (
                 <>
-                  <span className="text-text-primary truncate">
+                  <span className="truncate text-text-primary">
                     {activeEntry.config.name}
                   </span>
-                  <span className="text-text-muted truncate">
+                  <span className="truncate text-[11px] text-text-muted">
                     ({activeEntry.config.username}@{activeEntry.config.host})
                   </span>
-                  <ChevronDown size={14} className="text-text-muted shrink-0" />
+                  <ChevronDown size={12} className="text-text-muted shrink-0" />
                 </>
               )}
             </>

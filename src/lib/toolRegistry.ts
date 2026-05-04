@@ -9,6 +9,16 @@
  */
 import type { ToolDef } from '@/types/pipeline'
 
+const PLINK_GLM_OUTPUT_COLUMNS = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'A1', 'TEST', 'OBS_CT', 'BETA', 'SE', 'T_STAT', 'OR', 'LOG(OR)_SE', 'Z_STAT', 'P', 'ERRCODE']
+const PLINK_GLM_OUTPUT_ROLES = [
+  { roleId: 'chromosome', column: '#CHROM' },
+  { roleId: 'position', column: 'POS' },
+  { roleId: 'variant_id', column: 'ID' },
+  { roleId: 'effect_allele', column: 'A1' },
+  { roleId: 'p_value', column: 'P' },
+  { roleId: 'weight', column: 'BETA' },
+]
+
 export const TOOLS: ToolDef[] = [
   // ==================== GWAS ====================
   {
@@ -25,6 +35,7 @@ export const TOOLS: ToolDef[] = [
         label: 'Phenotype',
         description: 'Tabular phenotype file with one row per sample and the trait column named in the parameters.',
         fileType: 'tsv',
+        required: true,
         contract: {
           family: 'tabular',
           tabular: {
@@ -84,18 +95,13 @@ export const TOOLS: ToolDef[] = [
         autoMergeDefault: 'tsv-concat-header',
         intermediate: true,
         outputSchema: {
-          columns: ['ID', 'A1', 'TEST', 'OBS_CT', 'BETA', 'OR', 'P'],
-          roles: [
-            { roleId: 'variant_id', column: 'ID' },
-            { roleId: 'effect_allele', column: 'A1' },
-            { roleId: 'p_value', column: 'P' },
-            { roleId: 'weight', column: 'BETA' },
-          ],
+          columns: PLINK_GLM_OUTPUT_COLUMNS,
+          roles: PLINK_GLM_OUTPUT_ROLES,
         },
       },
     ],
     params: [
-      { name: 'glm', flag: '--glm', label: 'GLM output', type: 'select', options: ['hide-covar', 'firth-fallback', 'allow-no-covars', 'omit-ref', 'none'], default: 'hide-covar', required: true },
+      { name: 'glm', flag: '--glm', label: 'GLM output', type: 'select', options: ['standard', 'firth-fallback', 'firth', 'no-firth'], default: 'standard', required: true },
       { name: 'ci', flag: '--ci', label: 'Confidence interval', type: 'number', default: 0.95, min: 0, max: 1, step: 0.01 },
       { name: 'maf', flag: '--maf', label: 'Min MAF', type: 'number', default: 0.01, min: 0, max: 0.5, step: 0.001 },
       { name: 'geno', flag: '--geno', label: 'Max missing genotype rate', type: 'number', default: 0.05, min: 0, max: 1, step: 0.01 },
@@ -175,20 +181,18 @@ export const TOOLS: ToolDef[] = [
         fileType: 'tsv',
         autoMergeDefault: 'tsv-concat-header',
         outputSchema: {
-          columns: ['PHENO', 'ID', 'A1', 'TEST', 'OBS_CT', 'BETA', 'OR', 'P'],
-          roles: [
-            { roleId: 'variant_id', column: 'ID' },
-            { roleId: 'effect_allele', column: 'A1' },
-            { roleId: 'p_value', column: 'P' },
-            { roleId: 'weight', column: 'BETA' },
-          ],
+          columns: ['PHENO', ...PLINK_GLM_OUTPUT_COLUMNS],
+          roles: PLINK_GLM_OUTPUT_ROLES,
         },
       },
     ],
     params: [
       { name: 'phenotypes', flag: '--pheno-name', label: 'Phenotype columns', type: 'string', placeholder: 'bmi asthma height or one per line', columnRef: true, columnSourcePortId: 'pheno', columnMulti: true },
-      { name: 'glm', flag: '--glm', label: 'GLM output', type: 'select', options: ['hide-covar', 'firth-fallback', 'allow-no-covars', 'omit-ref'], default: 'hide-covar', required: true },
+      { name: 'glm', flag: '--glm', label: 'Regression mode', type: 'select', options: ['standard', 'firth-fallback', 'firth', 'no-firth'], default: 'standard', required: true },
+      { name: 'hide-covar', label: 'Hide covariate rows', type: 'boolean', default: true },
       { name: 'allow-no-covars', label: 'Allow no covariates', type: 'boolean', default: false },
+      { name: 'omit-ref', label: 'Omit reference allele row', type: 'boolean', default: false },
+      { name: 'skip-invalid-pheno', label: 'Skip invalid phenotypes', type: 'boolean', default: false },
       { name: 'pheno-iid-only', label: 'Phenotype file uses IID only', type: 'boolean', default: false, description: 'Use PLINK2 iid-only modifier for phenotype files without FID.' },
       { name: 'one', flag: '--1', label: '0/1 case-control coding', type: 'boolean', default: false, description: 'Use when binary phenotypes are coded 0=control and 1=case instead of PLINK2 default 1=control and 2=case.' },
       { name: 'covar-iid-only', label: 'Covariate file uses IID only', type: 'boolean', default: false, description: 'Use PLINK2 iid-only modifier for covariate files without FID.' },
@@ -203,6 +207,256 @@ export const TOOLS: ToolDef[] = [
       { name: 'array-mode', label: 'Phenotype execution', type: 'select', options: ['array-if-list-is-typed', 'single-job-loop'], default: 'array-if-list-is-typed' },
     ],
     slurm: { cpus: 32, memoryGB: 100, timeHours: 24 },
+  },
+  {
+    id: 'plot.manhattan',
+    name: 'Manhattan Plot',
+    category: 'visualization',
+    description: 'Create a publication-ready Manhattan plot from GWAS summary statistics',
+    command: 'Rscript',
+    module: 'r/4.4.0',
+    inputs: [
+      {
+        id: 'sumstats',
+        label: 'Summary stats',
+        description: 'GWAS association results. Split per-chromosome results are collapsed into one plotting job.',
+        fileType: 'tsv',
+        required: true,
+        multi: true,
+        arrayable: false,
+        multiFormat: 'space',
+        contract: {
+          family: 'tabular',
+          tabular: {
+            requiresHeader: true,
+            roles: [
+              { id: 'chromosome', label: 'Chromosome', required: true, aliases: ['CHR', '#CHROM', 'chrom', 'chromosome'], binding: { kind: 'param', key: 'chrCol' } },
+              { id: 'position', label: 'Base-pair position', required: true, aliases: ['BP', 'POS', 'position', 'base_pair'], binding: { kind: 'param', key: 'bpCol' } },
+              { id: 'p_value', label: 'P-value', required: true, aliases: ['P', 'PVAL', 'P_VALUE', 'P_LIN', 'P_LOGISTIC', 'LOG10P'], binding: { kind: 'param', key: 'pCol' } },
+              { id: 'variant_id', label: 'Variant ID', required: false, aliases: ['ID', 'SNP', 'RSID'], binding: { kind: 'param', key: 'snpCol' } },
+            ],
+          },
+        },
+      },
+    ],
+    outputs: [
+      { id: 'plot', label: 'Plot files', description: 'PNG/PDF plot files selected in Plot formats.', fileType: 'txt' },
+    ],
+    params: [
+      { name: 'chrCol', label: 'Chromosome column', type: 'string', default: 'CHR', required: true, columnRef: true, columnSourcePortId: 'sumstats' },
+      { name: 'bpCol', label: 'Position column', type: 'string', default: 'BP', required: true, columnRef: true, columnSourcePortId: 'sumstats' },
+      { name: 'pCol', label: 'P-value column', type: 'string', default: 'P', required: true, columnRef: true, columnSourcePortId: 'sumstats' },
+      { name: 'snpCol', label: 'Variant ID column', type: 'string', default: 'ID', columnRef: true, columnSourcePortId: 'sumstats' },
+      { name: 'outputFormats', label: 'Plot formats', type: 'select', options: ['both', 'png', 'pdf'], default: 'both', required: true },
+      { name: 'title', label: 'Plot title', type: 'string', default: 'Manhattan plot' },
+      { name: 'genomewide', label: 'Genome-wide threshold', type: 'number', default: 5e-8, step: 1e-8 },
+      { name: 'suggestive', label: 'Suggestive threshold', type: 'number', default: 1e-5, step: 1e-6 },
+      { name: 'width', label: 'Width (in)', type: 'number', default: 12, min: 3, step: 0.5 },
+      { name: 'height', label: 'Height (in)', type: 'number', default: 6, min: 3, step: 0.5 },
+      { name: 'dpi', label: 'PNG DPI', type: 'number', default: 180, min: 72, step: 12 },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'plot.qq',
+    name: 'QQ Plot',
+    category: 'visualization',
+    description: 'Create a QQ plot and genomic inflation summary from GWAS p-values',
+    command: 'Rscript',
+    module: 'r/4.4.0',
+    inputs: [
+      {
+        id: 'sumstats',
+        label: 'Summary stats',
+        description: 'GWAS association results containing p-values. Split inputs are collapsed into one plotting job.',
+        fileType: 'tsv',
+        required: true,
+        multi: true,
+        arrayable: false,
+        multiFormat: 'space',
+        contract: {
+          family: 'tabular',
+          tabular: {
+            requiresHeader: true,
+            roles: [
+              { id: 'p_value', label: 'P-value', required: true, aliases: ['P', 'PVAL', 'P_VALUE', 'P_LIN', 'P_LOGISTIC', 'LOG10P'], binding: { kind: 'param', key: 'pCol' } },
+            ],
+          },
+        },
+      },
+    ],
+    outputs: [
+      { id: 'plot', label: 'Plot files', description: 'PNG/PDF plot files selected in Plot formats.', fileType: 'txt' },
+    ],
+    params: [
+      { name: 'pCol', label: 'P-value column', type: 'string', default: 'P', required: true, columnRef: true, columnSourcePortId: 'sumstats' },
+      { name: 'outputFormats', label: 'Plot formats', type: 'select', options: ['both', 'png', 'pdf'], default: 'both', required: true },
+      { name: 'title', label: 'Plot title', type: 'string', default: 'QQ plot' },
+      { name: 'width', label: 'Width (in)', type: 'number', default: 6, min: 3, step: 0.5 },
+      { name: 'height', label: 'Height (in)', type: 'number', default: 6, min: 3, step: 0.5 },
+      { name: 'dpi', label: 'PNG DPI', type: 'number', default: 180, min: 72, step: 12 },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'r.plot',
+    name: 'Exploratory R Plot',
+    category: 'visualization',
+    description: 'Generate common exploratory plots from a tabular file using R presets',
+    command: 'Rscript',
+    module: 'r/4.4.0',
+    inputs: [
+      {
+        id: 'input',
+        label: 'Table',
+        description: 'Tabular data to plot. Use column pickers to choose variables.',
+        fileType: 'tsv',
+        required: true,
+        multi: true,
+        arrayable: false,
+        multiFormat: 'space',
+        contract: { family: 'tabular', tabular: { requiresHeader: true, roles: [] } },
+      },
+    ],
+    outputs: [
+      { id: 'plot', label: 'Plot files', description: 'PNG/PDF plot files selected in Plot formats.', fileType: 'txt' },
+    ],
+    params: [
+      { name: 'preset', label: 'Plot preset', type: 'select', options: ['scatter', 'histogram', 'density', 'boxplot', 'violin', 'pca-scatter', 'grouped-bar'], default: 'scatter', required: true },
+      { name: 'outputFormats', label: 'Plot formats', type: 'select', options: ['both', 'png', 'pdf'], default: 'both', required: true },
+      { name: 'xColumn', label: 'X column', type: 'string', columnRef: true, columnSourcePortId: 'input' },
+      { name: 'yColumn', label: 'Y column', type: 'string', columnRef: true, columnSourcePortId: 'input' },
+      { name: 'colorColumn', label: 'Color column', type: 'string', columnRef: true, columnSourcePortId: 'input' },
+      { name: 'facetColumn', label: 'Facet column', type: 'string', columnRef: true, columnSourcePortId: 'input' },
+      { name: 'groupColumn', label: 'Group column', type: 'string', columnRef: true, columnSourcePortId: 'input' },
+      { name: 'title', label: 'Plot title', type: 'string', default: 'BioFlow R plot' },
+      { name: 'bins', label: 'Histogram bins', type: 'number', default: 50, min: 5, step: 5 },
+      { name: 'width', label: 'Width (in)', type: 'number', default: 8, min: 3, step: 0.5 },
+      { name: 'height', label: 'Height (in)', type: 'number', default: 5, min: 3, step: 0.5 },
+      { name: 'dpi', label: 'PNG DPI', type: 'number', default: 180, min: 72, step: 12 },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'table.gtsummary',
+    name: 'Summary Table',
+    category: 'stats',
+    description: 'Create a polished Table 1 style summary table with gtsummary',
+    command: 'Rscript',
+    module: 'r/4.4.0',
+    inputs: [
+      {
+        id: 'table',
+        label: 'Table',
+        description: 'Phenotype, covariate, or results table to summarize.',
+        fileType: 'tsv',
+        required: true,
+        arrayable: false,
+        contract: { family: 'tabular', tabular: { requiresHeader: true, roles: [] } },
+      },
+    ],
+    outputs: [
+      { id: 'tsv', label: 'Preview table', description: 'Reusable TSV companion for preview and downstream nodes.', fileType: 'tsv' },
+      { id: 'excel', label: 'Excel table', description: 'Polished XLSX table for reports and manuscripts.', fileType: 'xlsx' },
+    ],
+    params: [
+      { name: 'includeColumns', label: 'Columns to include', type: 'string', columnRef: true, columnSourcePortId: 'table', columnMulti: true, placeholder: 'age sex BMI PC1' },
+      { name: 'byColumn', label: 'Stratify by', type: 'string', columnRef: true, columnSourcePortId: 'table' },
+      { name: 'labelMap', label: 'Column labels', type: 'string', placeholder: 'age=Age at baseline; sex=Sex' },
+      { name: 'missingText', label: 'Missing text', type: 'string', default: 'Unknown' },
+      { name: 'addOverall', label: 'Add overall column', type: 'boolean', default: true },
+      { name: 'addP', label: 'Add p-values', type: 'boolean', default: true },
+      { name: 'percentStyle', label: 'Percent style', type: 'select', options: ['column', 'row', 'cell'], default: 'column' },
+      { name: 'title', label: 'Table title', type: 'string', default: 'Summary table' },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'r.regression',
+    name: 'R Regression',
+    category: 'stats',
+    description: 'Run guided lm/glm regression on phenotype data and export model-ready tables',
+    command: 'Rscript',
+    module: 'r/4.4.0',
+    inputs: [
+      {
+        id: 'pheno',
+        label: 'Phenotype table',
+        description: 'Main analysis table containing sample IDs, outcome, predictors, and optionally covariates.',
+        fileType: 'tsv',
+        required: true,
+        arrayable: false,
+        contract: {
+          family: 'tabular',
+          tabular: {
+            requiresHeader: true,
+            sampleIdRoleIds: ['sample_id'],
+            roles: [
+              { id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'participant_id', 'subject_id', 'ID'], binding: { kind: 'param', key: 'phenoIdCol' } },
+              { id: 'phenotype', label: 'Outcome', required: true, aliases: ['trait', 'phenotype', 'PHENO', 'status'], binding: { kind: 'param', key: 'outcomeColumn' } },
+            ],
+          },
+        },
+      },
+      {
+        id: 'covar',
+        label: 'Covariate table',
+        description: 'Optional covariate table joined to the phenotype table by sample ID.',
+        fileType: 'tsv',
+        arrayable: false,
+        contract: {
+          family: 'tabular',
+          tabular: {
+            requiresHeader: true,
+            sampleIdRoleIds: ['sample_id'],
+            roles: [
+              { id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'participant_id', 'subject_id', 'ID'], binding: { kind: 'param', key: 'covarIdCol' } },
+              { id: 'covariate', label: 'Covariates', required: false, aliases: ['age', 'sex', 'PC1'], binding: { kind: 'param', key: 'covariateColumns', multi: true } },
+            ],
+          },
+        },
+      },
+    ],
+    outputs: [
+      { id: 'coefficients', label: 'Coefficients', description: 'Machine-readable model coefficients from broom.', fileType: 'tsv' },
+      { id: 'table', label: 'Display table', description: 'Previewable gtsummary regression table.', fileType: 'tsv' },
+      { id: 'excel', label: 'Excel table', description: 'Polished XLSX regression table.', fileType: 'xlsx' },
+    ],
+    params: [
+      { name: 'phenoIdCol', label: 'Phenotype sample ID', type: 'string', default: 'IID', required: true, columnRef: true, columnSourcePortId: 'pheno' },
+      { name: 'covarIdCol', label: 'Covariate sample ID', type: 'string', default: 'IID', columnRef: true, columnSourcePortId: 'covar' },
+      { name: 'outcomeColumn', label: 'Outcome column', type: 'string', required: true, columnRef: true, columnSourcePortId: 'pheno' },
+      { name: 'predictorColumns', label: 'Predictors', type: 'string', required: true, columnRef: true, columnSourcePortId: 'pheno', columnMulti: true },
+      { name: 'phenotypeCovariates', label: 'Covariates in phenotype table', type: 'string', columnRef: true, columnSourcePortId: 'pheno', columnMulti: true },
+      { name: 'covariateColumns', label: 'Covariates in covariate table', type: 'string', columnRef: true, columnSourcePortId: 'covar', columnMulti: true },
+      { name: 'modelType', label: 'Model type', type: 'select', options: ['linear-lm', 'logistic-glm', 'poisson-glm'], default: 'linear-lm', required: true },
+      { name: 'formulaOverride', label: 'Formula override', type: 'string', placeholder: 'outcome ~ exposure + age + sex' },
+      { name: 'familyLink', label: 'GLM link', type: 'select', options: ['default', 'logit', 'probit', 'log', 'identity'], default: 'default' },
+      { name: 'confidenceLevel', label: 'Confidence level', type: 'number', default: 0.95, min: 0.5, max: 0.999, step: 0.01 },
+      { name: 'referenceLevels', label: 'Reference levels', type: 'string', placeholder: 'sex=Female; batch=A' },
+      { name: 'missingness', label: 'Missing data', type: 'select', options: ['complete-case'], default: 'complete-case' },
+      { name: 'title', label: 'Table title', type: 'string', default: 'Regression results' },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
+  },
+  {
+    id: 'custom.r',
+    name: 'Custom R Script',
+    category: 'custom',
+    description: 'Run arbitrary R code with BioFlow input and output variables',
+    command: 'Rscript',
+    module: 'r/4.4.0',
+    inputs: [{ id: 'input', label: 'Input', description: 'Connected files become input_files and input_file inside the R script.', fileType: 'any', multi: true, arrayable: false }],
+    outputs: [
+      { id: 'table', label: 'Output table', description: 'TSV table written by the script.', fileType: 'tsv' },
+      { id: 'png', label: 'PNG plot', description: 'Raster plot written by the script.', fileType: 'any' },
+      { id: 'pdf', label: 'PDF plot', description: 'Vector plot written by the script.', fileType: 'any' },
+    ],
+    params: [
+      { name: 'script', label: 'R script', type: 'string', required: true, placeholder: 'df <- read_table(input_file)\ndata.table::fwrite(df, output_table, sep = "\\t")' },
+      { name: 'packages', label: 'Extra packages', type: 'string', placeholder: 'survival lubridate' },
+    ],
+    slurm: { cpus: 2, memoryGB: 8, timeHours: 1 },
   },
   {
     id: 'plink2.qc',
@@ -298,14 +552,14 @@ export const TOOLS: ToolDef[] = [
         autoMergeDefault: 'tsv-concat-header',
         intermediate: true,
         outputSchema: {
-          columns: ['CHR', 'F', 'SNP', 'BP', 'P', 'TOTAL'],
+          columns: ['CHROM', 'POS', 'ID', 'A1', 'P', 'TOTAL'],
           roles: [
-            { roleId: 'variant_id', column: 'SNP' },
+            { roleId: 'variant_id', column: 'ID' },
             { roleId: 'p_value', column: 'P' },
           ],
         },
       },
-      { id: 'ranges', label: 'Extract ranges', description: 'Variant/range list for the independent clumped SNPs; connect this to PLINK2 Score extract ranges.', fileType: 'bed', autoMergeDefault: 'cat', intermediate: true },
+      { id: 'leadIds', label: 'Lead variant IDs', description: 'One lead variant ID per line for PLINK2 Score variant extraction.', fileType: 'txt', autoMergeDefault: 'cat', intermediate: true },
     ],
     params: [
       { name: 'clump-p1', flag: '--clump-p1', label: 'Primary p-value', type: 'number', default: 5e-8, step: 1e-8 },
@@ -346,7 +600,7 @@ export const TOOLS: ToolDef[] = [
         },
       },
       { id: 'sumstats', label: 'Summary stats', description: 'Optional source summary statistics kept beside the score run for provenance.', fileType: 'tsv', arrayable: false },
-      { id: 'extract', label: 'Extract variants', description: 'Optional list of SNPs or ranges to keep before scoring. Connect a clump lead-list or range artifact here.', fileType: 'any', arrayable: false },
+      { id: 'extract', label: 'Extract variant IDs', description: 'Optional one-variant-ID-per-line file to keep before scoring. Connect the PLINK2 Clump lead ID output here.', fileType: 'txt', arrayable: false },
       {
         id: 'keep',
         label: 'Keep samples',
@@ -458,7 +712,7 @@ export const TOOLS: ToolDef[] = [
       { id: 'pheno', label: 'Phenotype', description: 'Phenotype table with sample IDs and one or more traits for model fitting.', fileType: 'tsv', required: true, contract: { family: 'tabular', tabular: { requiresHeader: true, sampleIdRoleIds: ['sample_id', 'family_id'], roles: [{ id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'ID'] }, { id: 'family_id', label: 'Family ID', required: false, aliases: ['FID', 'family_id'] }, { id: 'phenotype', label: 'Phenotype columns', required: false, aliases: ['trait', 'phenotype', 'PHENO'], binding: { kind: 'param', key: 'phenoColList', multi: true } }] } } },
       { id: 'covar', label: 'Covariates', description: 'Optional covariate table with columns such as age, sex, batch, and PCs.', fileType: 'tsv', contract: { family: 'tabular', tabular: { requiresHeader: true, sampleIdRoleIds: ['sample_id', 'family_id'], roles: [{ id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'ID'] }, { id: 'family_id', label: 'Family ID', required: false, aliases: ['FID', 'family_id'] }, { id: 'covariate', label: 'Covariate columns', required: false, aliases: ['age', 'sex', 'PC1'], binding: { kind: 'param', key: 'covarColList', multi: true } }] } } },
     ],
-    outputs: [{ id: 'output', label: 'Predictions (step 1)', description: 'REGENIE prediction files consumed by REGENIE Step 2.', fileType: 'any' }],
+    outputs: [{ id: 'output', label: 'Prediction list', description: 'REGENIE *_pred.list file consumed by REGENIE Step 2.', fileType: 'txt' }],
     params: [
       { name: 'step', flag: '--step', label: 'Step', type: 'select', options: ['1'], default: '1', required: true },
       { name: 'bt', flag: '--bt', label: 'Binary trait', type: 'boolean', default: false },
@@ -480,12 +734,28 @@ export const TOOLS: ToolDef[] = [
     command: 'regenie',
     module: 'regenie/3.4',
     inputs: [
-      { id: 'input', label: 'Genotypes', description: 'Imputed or target genotype data to association-test, typically BGEN.', fileType: 'bgen', required: true, contract: { family: 'generic', requiresSidecars: ['.sample'] } },
+      { id: 'input', label: 'Genotypes', description: 'Target genotype data to association-test: BGEN, PLINK BED, or PLINK2 PGEN fileset.', fileType: 'any', required: true, contract: { family: 'generic' } },
       { id: 'pheno', label: 'Phenotype', description: 'Same phenotype table used for the association test traits.', fileType: 'tsv', required: true, contract: { family: 'tabular', tabular: { requiresHeader: true, sampleIdRoleIds: ['sample_id', 'family_id'], roles: [{ id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'ID'] }, { id: 'family_id', label: 'Family ID', required: false, aliases: ['FID', 'family_id'] }, { id: 'phenotype', label: 'Phenotype columns', required: false, aliases: ['trait', 'phenotype', 'PHENO'], binding: { kind: 'param', key: 'phenoColList', multi: true } }] } } },
       { id: 'covar', label: 'Covariates', description: 'Optional covariates aligned to the phenotype and sample IDs.', fileType: 'tsv', contract: { family: 'tabular', tabular: { requiresHeader: true, sampleIdRoleIds: ['sample_id', 'family_id'], roles: [{ id: 'sample_id', label: 'Sample ID', required: true, aliases: ['IID', 'sample_id', 'ID'] }, { id: 'family_id', label: 'Family ID', required: false, aliases: ['FID', 'family_id'] }, { id: 'covariate', label: 'Covariate columns', required: false, aliases: ['age', 'sex', 'PC1'], binding: { kind: 'param', key: 'covarColList', multi: true } }] } } },
       { id: 'pred', label: 'Step 1 predictions', description: 'Prediction files produced by REGENIE Step 1.', fileType: 'any', required: true },
     ],
-    outputs: [{ id: 'output', label: 'Association results', description: 'Per-variant association results from REGENIE Step 2.', fileType: 'tsv' }],
+    outputs: [{
+      id: 'output',
+      label: 'Association results',
+      description: 'Per-variant association results from REGENIE Step 2.',
+      fileType: 'tsv',
+      outputSchema: {
+        columns: ['CHROM', 'GENPOS', 'ID', 'ALLELE0', 'ALLELE1', 'A1FREQ', 'N', 'TEST', 'BETA', 'SE', 'CHISQ', 'LOG10P', 'EXTRA'],
+        roles: [
+          { roleId: 'chromosome', column: 'CHROM' },
+          { roleId: 'position', column: 'GENPOS' },
+          { roleId: 'variant_id', column: 'ID' },
+          { roleId: 'effect_allele', column: 'ALLELE1' },
+          { roleId: 'p_value', column: 'LOG10P' },
+          { roleId: 'weight', column: 'BETA' },
+        ],
+      },
+    }],
     params: [
       { name: 'step', flag: '--step', label: 'Step', type: 'select', options: ['2'], default: '2', required: true },
       { name: 'bt', flag: '--bt', label: 'Binary trait', type: 'boolean', default: false },
@@ -505,7 +775,7 @@ export const TOOLS: ToolDef[] = [
   {
     id: 'bcftools.view',
     name: 'bcftools view',
-    category: 'format',
+    category: 'file-ops',
     description: 'View, subset and filter VCF/BCF files',
     command: 'bcftools view',
     module: 'bcftools/1.19',
@@ -541,7 +811,7 @@ export const TOOLS: ToolDef[] = [
   {
     id: 'bcftools.merge',
     name: 'bcftools merge',
-    category: 'format',
+    category: 'file-ops',
     description: 'Merge multiple VCF/BCF files',
     command: 'bcftools merge',
     module: 'bcftools/1.19',
@@ -599,7 +869,7 @@ export const TOOLS: ToolDef[] = [
       { id: 'input', label: 'Variants', description: 'VCF containing variants to annotate with Ensembl consequence data.', fileType: 'vcf', required: true, contract: { family: 'vcf-bcf' } },
     ],
     outputs: [
-      { id: 'output', label: 'Annotated variants', description: 'VEP annotation output for each variant, usually VCF or tabular depending on parameters.', fileType: 'vcf' },
+      { id: 'output', label: 'Annotated VCF', description: 'Input VCF with VEP CSQ annotations added to INFO fields.', fileType: 'vcf' },
     ],
     params: [
       { name: 'toolPath', label: 'VEP executable or folder', type: 'string', placeholder: 'vep or ~/bioflow/tools/ensembl-vep/vep', internal: true },
@@ -734,7 +1004,7 @@ export const TOOLS: ToolDef[] = [
   {
     id: 'crossmap.liftover',
     name: 'CrossMap Liftover',
-    category: 'format',
+    category: 'file-ops',
     description: 'Convert genomic coordinates between reference assemblies using a UCSC/Ensembl chain file',
     docUrl: 'https://crossmap.readthedocs.io/',
     command: 'CrossMap',
@@ -752,7 +1022,7 @@ export const TOOLS: ToolDef[] = [
       { name: 'source-build', label: 'Source build', type: 'select', options: ['GRCh37', 'GRCh38', 'hg19', 'hg38'], default: 'GRCh37' },
       { name: 'target-build', label: 'Target build', type: 'select', options: ['GRCh38', 'GRCh37', 'hg38', 'hg19'], default: 'GRCh38' },
       { name: 'chromid', flag: '--chromid', label: 'Chromosome naming', type: 'select', options: ['a', 's', 'l'], default: 'a' },
-      { name: 'compress', flag: '--compress', label: 'Compress VCF output', type: 'boolean', default: true },
+      { name: 'compress', flag: '--compress', label: 'Gzip VCF output', type: 'boolean', default: true },
     ],
     slurm: { cpus: 2, memoryGB: 8, timeHours: 2 },
   },
@@ -761,7 +1031,7 @@ export const TOOLS: ToolDef[] = [
   {
     id: 'flow.filterFile',
     name: 'Filter File',
-    category: 'utility',
+    category: 'file-ops',
     description: 'Materialize a filtered tabular file once for downstream reuse',
     command: 'flow.filterFile',
     inputs: [{ id: 'input', label: 'Tabular input', description: 'Tabular file to filter and project into a reusable artifact.', fileType: 'tsv', required: true }],
@@ -778,7 +1048,7 @@ export const TOOLS: ToolDef[] = [
   {
     id: 'ukb.spark-extract',
     name: 'UKB Data Extraction (Spark)',
-    category: 'utility',
+    category: 'file-ops',
     description: 'Extract phenotype and metadata fields from a RAP-dispensed UK Biobank dataset using a fixed Spark applet.',
     command: 'bioflow-ukb-extract',
     backends: ['dnx'],
@@ -816,6 +1086,12 @@ const TOOL_DOCS: Record<string, string> = {
   'plink2.clump': 'https://www.cog-genomics.org/plink/2.0/postproc',
   'plink2.score': 'https://www.cog-genomics.org/plink/2.0/score',
   'plink2.pca': 'https://www.cog-genomics.org/plink/2.0/strat',
+  'plot.manhattan': 'https://cran.r-project.org/package=qqman',
+  'plot.qq': 'https://ggplot2.tidyverse.org/',
+  'r.plot': 'https://ggplot2.tidyverse.org/',
+  'table.gtsummary': 'https://www.danieldsjoberg.com/gtsummary/',
+  'r.regression': 'https://www.danieldsjoberg.com/gtsummary/reference/tbl_regression.html',
+  'custom.r': 'https://cran.r-project.org/doc/manuals/r-release/R-intro.html',
   'regenie.step1': 'https://rgcgithub.github.io/regenie/options/',
   'regenie.step2': 'https://rgcgithub.github.io/regenie/options/',
   'bcftools.view': 'https://samtools.github.io/bcftools/bcftools.html#view',
@@ -831,7 +1107,8 @@ const TOOL_DOCS: Record<string, string> = {
 }
 
 const PARAM_DESCRIPTIONS: Record<string, string> = {
-  glm: 'Controls PLINK2 association output modifiers. hide-covar keeps covariate effects out of the main report.',
+  glm: 'Controls PLINK2 association testing mode. Standard uses PLINK2 defaults; Firth modes are useful for sparse binary traits.',
+  'hide-covar': 'Suppress covariate rows in PLINK association outputs so variant rows are easier to scan.',
   ci: 'Request confidence intervals at the chosen coverage level.',
   maf: 'Exclude variants with minor allele frequency below this threshold.',
   geno: 'Exclude variants with missing genotype rate above this threshold.',
@@ -840,6 +1117,15 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   'pheno-name': 'Trait column in the connected phenotype file.',
   phenotypes: 'Phenotype/outcome columns to run. PLINK2 accepts multiple column names separated by spaces or commas; BioFlow can turn a typed list into a Slurm array.',
   'covar-name': 'Covariate columns in the connected covariate file. PLINK expects these separated by spaces.',
+  'pheno-iid-only': 'Use when the phenotype file has IID but no FID column.',
+  'covar-iid-only': 'Use when the covariate file has IID but no FID column.',
+  one: 'Interpret binary phenotypes coded as 0=control and 1=case.',
+  'allow-no-covars': 'Allow PLINK2 association testing without a covariate file.',
+  'omit-ref': 'Omit reference-allele result rows from PLINK association output.',
+  'skip-invalid-pheno': 'Skip invalid phenotype columns instead of stopping the full batch.',
+  'neg9-pheno-really-missing': 'Confirm that -9 should be treated as missing phenotype data.',
+  'no-input-missing-phenotype': 'Treat -9 as a real numeric phenotype value instead of missing.',
+  'input-missing-phenotype': 'Custom phenotype missing-value token for PLINK input.',
   mind: 'Exclude samples with missing genotype rate above this threshold.',
   'make-bed': 'Write a PLINK1 BED/BIM/FAM fileset.',
   'clump-p1': 'Primary p-value threshold for lead variants.',
@@ -936,15 +1222,51 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   nogroup: 'Disable FastQC base grouping.',
   extract: 'Unzip the FastQC result archive after the run.',
   force: 'Overwrite an existing report in the output directory.',
-  title: 'Title shown at the top of the MultiQC report.',
+  title: 'Title shown in the generated plot, table, or report.',
   filename: 'Output filename written by MultiQC.',
   script: 'Shell body run by bash. Use $INPUT, ${INPUTS[@]}, and $OUTPUT.',
+  packages: 'Additional R packages to install and load for this custom R script.',
+  includeColumns: 'Columns included in the gtsummary table. Leave blank to include all columns.',
+  byColumn: 'Optional grouping column used to stratify summary statistics.',
+  labelMap: 'Optional semicolon-delimited label overrides, such as age=Age; sex=Sex.',
+  missingText: 'Text shown for missing values in the summary table.',
+  addOverall: 'Add an overall column when the table is stratified.',
+  addP: 'Add p-values when a stratifying column is selected.',
+  percentStyle: 'How gtsummary computes percentages for categorical summaries.',
+  phenoIdCol: 'Sample ID column in the phenotype table.',
+  covarIdCol: 'Sample ID column in the covariate table.',
+  outcomeColumn: 'Regression outcome column.',
+  predictorColumns: 'Primary predictor or exposure columns in the phenotype table.',
+  phenotypeCovariates: 'Covariate columns already present in the phenotype table.',
+  covariateColumns: 'Covariate columns from the optional covariate table.',
+  modelType: 'Regression engine: lm for linear traits, glm for binary or count traits.',
+  formulaOverride: 'Advanced raw R formula. When set, BioFlow uses it instead of guided outcome/predictor/covariate fields.',
+  familyLink: 'Optional GLM link override for logistic or Poisson models.',
+  confidenceLevel: 'Confidence interval level for model summaries.',
+  referenceLevels: 'Optional semicolon-delimited factor reference levels, such as sex=Female.',
+  missingness: 'How missing model fields are handled before fitting.',
   format: 'Coordinate file format to pass to CrossMap. Auto chooses from the input filename extension.',
   'source-build': 'Reference build of the incoming coordinate file.',
   'target-build': 'Reference build to lift coordinates onto.',
   chromid: 'Controls target chromosome naming in CrossMap output.',
-  compress: 'Compress lifted VCF/gVCF output when applicable.',
+  compress: 'Ask CrossMap to gzip lifted VCF/gVCF output when applicable.',
   'array-mode': 'When phenotype names are typed directly, run them as one Slurm array; file-backed lists run as a loop inside one job.',
+  chrCol: 'Column containing chromosome labels.',
+  bpCol: 'Column containing base-pair positions.',
+  pCol: 'Column containing p-values.',
+  snpCol: 'Optional variant identifier column used for labels and provenance.',
+  genomewide: 'P-value threshold drawn as the genome-wide significance line.',
+  suggestive: 'P-value threshold drawn as the suggestive significance line.',
+  width: 'Plot width in inches.',
+  height: 'Plot height in inches.',
+  dpi: 'PNG resolution in dots per inch.',
+  preset: 'R plotting preset to generate.',
+  xColumn: 'Column mapped to the x-axis.',
+  yColumn: 'Column mapped to the y-axis.',
+  colorColumn: 'Optional column mapped to color.',
+  facetColumn: 'Optional column used to facet the plot.',
+  groupColumn: 'Grouping column for box, violin, or bar-style summaries.',
+  bins: 'Number of bins for histogram-style plots.',
 }
 
 const ADVANCED_PARAMS = new Set([
@@ -1004,13 +1326,20 @@ const ADVANCED_PARAMS = new Set([
   'min-seed-length',
   'csi',
   'extract',
-  'title',
   'filename',
   'array-mode',
+  'packages',
+  'labelMap',
+  'referenceLevels',
+  'formulaOverride',
 ])
 
 const PARAM_SECTIONS: Record<string, NonNullable<ToolDef['params'][number]['section']>> = {
   glm: 'Analysis',
+  'hide-covar': 'Analysis',
+  'allow-no-covars': 'Analysis',
+  'omit-ref': 'Analysis',
+  'skip-invalid-pheno': 'Analysis',
   ci: 'Analysis',
   maf: 'Filters',
   geno: 'Filters',
@@ -1117,12 +1446,48 @@ const PARAM_SECTIONS: Record<string, NonNullable<ToolDef['params'][number]['sect
   title: 'Output',
   filename: 'Output',
   script: 'Analysis',
+  packages: 'Runtime',
+  includeColumns: 'Inputs',
+  byColumn: 'Inputs',
+  labelMap: 'Output',
+  missingText: 'Output',
+  addOverall: 'Analysis',
+  addP: 'Analysis',
+  percentStyle: 'Analysis',
+  phenoIdCol: 'Inputs',
+  covarIdCol: 'Inputs',
+  outcomeColumn: 'Inputs',
+  predictorColumns: 'Inputs',
+  phenotypeCovariates: 'Inputs',
+  covariateColumns: 'Inputs',
+  modelType: 'Analysis',
+  formulaOverride: 'Analysis',
+  familyLink: 'Analysis',
+  confidenceLevel: 'Analysis',
+  referenceLevels: 'Analysis',
+  missingness: 'Analysis',
   format: 'Inputs',
   'source-build': 'Inputs',
   'target-build': 'Output',
   chromid: 'Output',
   compress: 'Output',
   'array-mode': 'Runtime',
+  chrCol: 'Inputs',
+  bpCol: 'Inputs',
+  pCol: 'Inputs',
+  snpCol: 'Inputs',
+  genomewide: 'Analysis',
+  suggestive: 'Analysis',
+  width: 'Output',
+  height: 'Output',
+  dpi: 'Output',
+  preset: 'Analysis',
+  xColumn: 'Inputs',
+  yColumn: 'Inputs',
+  colorColumn: 'Inputs',
+  facetColumn: 'Inputs',
+  groupColumn: 'Inputs',
+  bins: 'Analysis',
 }
 
 const CORE_PARAMS = new Set([
@@ -1171,9 +1536,21 @@ const CORE_PARAMS = new Set([
   'title',
   'filename',
   'script',
+  'includeColumns',
+  'byColumn',
+  'outcomeColumn',
+  'predictorColumns',
+  'modelType',
   'format',
   'source-build',
   'target-build',
+  'chrCol',
+  'bpCol',
+  'pCol',
+  'snpCol',
+  'preset',
+  'xColumn',
+  'yColumn',
 ])
 
 const DNX_READY_TOOL_IDS = new Set([
@@ -1219,6 +1596,20 @@ export function getTool(id: string): ToolDef | undefined {
   return TOOL_MAP[id] ?? CUSTOM_TOOL_MAP[id]
 }
 
+export const CATEGORY_ORDER = [
+  'gwas',
+  'qc',
+  'stats',
+  'visualization',
+  'annotation',
+  'file-ops',
+  'alignment',
+  'custom',
+  'variant-calling',
+  'format',
+  'utility',
+]
+
 /** Group tools by category, preserving registry order within each group. */
 export function getToolsByCategory(): Array<{ category: string; tools: ToolDef[] }> {
   const groups = new Map<string, ToolDef[]>()
@@ -1226,18 +1617,28 @@ export function getToolsByCategory(): Array<{ category: string; tools: ToolDef[]
     if (!groups.has(tool.category)) groups.set(tool.category, [])
     groups.get(tool.category)!.push(tool)
   }
-  return Array.from(groups.entries()).map(([category, tools]) => ({ category, tools }))
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => categoryRank(a) - categoryRank(b) || a.localeCompare(b))
+    .map(([category, tools]) => ({ category, tools }))
 }
 
 export const CATEGORY_LABELS: Record<string, string> = {
-  'gwas': 'GWAS',
+  'gwas': 'GWAS & Genetics',
+  'stats': 'Phenotypes & Stats',
+  'visualization': 'Visualization',
   'qc': 'Quality Control',
   'variant-calling': 'Variant Calling',
-  'alignment': 'Alignment',
+  'alignment': 'Alignment & Sequencing',
   'annotation': 'Annotation',
   'format': 'Format Conversion',
+  'file-ops': 'File Operations',
   'utility': 'Utilities',
   'custom': 'Custom',
+}
+
+function categoryRank(category: string): number {
+  const index = CATEGORY_ORDER.indexOf(category)
+  return index === -1 ? CATEGORY_ORDER.length : index
 }
 
 /** Check whether two file types are compatible (for edge validation). */

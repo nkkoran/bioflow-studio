@@ -24,6 +24,7 @@ export type FileType =
   | 'bed' | 'gff' | 'gtf'    // annotations
   | 'plink' | 'bgen' | 'pgen' // genotype matrices
   | 'tsv' | 'csv' | 'txt'    // generic tabular
+  | 'xlsx'                   // spreadsheet export
   | 'json' | 'yaml'          // config
   | 'any'                    // anything
 
@@ -308,8 +309,11 @@ export type ToolCategory =
   | 'alignment'
   | 'qc'
   | 'gwas'
+  | 'stats'
+  | 'visualization'
   | 'annotation'
   | 'format'
+  | 'file-ops'
   | 'utility'
   | 'custom'
 
@@ -580,6 +584,38 @@ export interface PipelineSnapshot {
 
 export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
+export type ArrayTaskState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'timeout'
+  | 'unknown'
+
+export interface ArrayTaskMapEntry {
+  /** Concrete Slurm array task id used in job ids/log paths, e.g. "1" in 12345_1. */
+  taskId: string
+  /** Biological/logical split key, e.g. chromosome "1" or "X". */
+  key: string
+  /** User-facing label such as "chr 1". */
+  label: string
+  /** Original zero-based order in the BioFlow split list. */
+  index: number
+}
+
+export interface ArrayTaskStatus {
+  taskId: string
+  key: string
+  state: ArrayTaskState
+  slurmState?: string
+  elapsed?: string
+  exitCode?: string
+  reason?: string
+  nodeList?: string
+  updatedAt: number
+}
+
 export interface NodeRunState {
   nodeId: string
   toolId?: string
@@ -610,6 +646,12 @@ export interface NodeRunState {
   isArray?: boolean
   /** For array jobs: number of tasks. */
   arraySize?: number
+  /** For array jobs: logical axis such as chrom. */
+  arrayAxis?: string
+  /** For array jobs: stable mapping from display key to concrete Slurm task id. */
+  arrayTaskMap?: ArrayTaskMapEntry[]
+  /** For array jobs: latest known per-task Slurm status. */
+  arrayTasks?: Record<string, ArrayTaskStatus>
   transferProgress?: {
     route?: TransferPlan['route']
     status: TransferPlan['status']

@@ -151,6 +151,18 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
     () => Boolean(form.host.trim() && form.username.trim() && form.port > 0),
     [form.host, form.port, form.username],
   )
+  const orderedSavedConnections = useMemo(() => {
+    const presetRank = (conn: ConnectionConfig) => {
+      const text = `${conn.name} ${conn.host}`.toLowerCase()
+      if (text.includes('rorqual') || text.includes('vorkal')) return 0
+      return 1
+    }
+    return [...savedConnections].sort((a, b) =>
+      presetRank(a) - presetRank(b) ||
+      a.name.localeCompare(b.name) ||
+      a.host.localeCompare(b.host),
+    )
+  }, [savedConnections])
   const defaultAlias = useMemo(() => {
     const preferred = form.alias.trim() || form.name.trim() || form.host.trim().split('.')[0] || form.username.trim()
     return preferred.replace(/\s+/g, '-').replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'bioflow'
@@ -427,18 +439,7 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
               Saved presets
             </div>
             <div className="grid max-h-40 grid-cols-1 gap-1.5 overflow-y-auto sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => setForm(initialFormData)}
-                className={classNames(
-                  'interactive-row flex min-h-14 min-w-0 flex-col items-start justify-center px-3 py-2 text-left shadow-sm',
-                  !activeSavedName ? 'bg-accent/10 text-text-primary' : 'bg-bg-tertiary/70 text-text-secondary hover:text-text-primary',
-                )}
-              >
-                <span className="text-nowrap text-xs font-medium">New connection</span>
-                <span className="text-nowrap mt-0.5 text-xs text-text-muted">Start blank</span>
-              </button>
-              {savedConnections.map((conn) => (
+              {orderedSavedConnections.map((conn) => (
                 <button
                   key={conn.name}
                   type="button"
@@ -454,6 +455,17 @@ export function ConnectionDialog({ open, onClose }: ConnectionDialogProps) {
                   </span>
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => setForm(initialFormData)}
+                className={classNames(
+                  'interactive-row flex min-h-14 min-w-0 flex-col items-start justify-center border border-dashed border-border px-3 py-2 text-left shadow-sm',
+                  !activeSavedName ? 'bg-accent/10 text-text-primary' : 'bg-bg-tertiary/40 text-text-secondary hover:text-text-primary',
+                )}
+              >
+                <span className="text-nowrap text-xs font-medium">New connection</span>
+                <span className="text-nowrap mt-0.5 text-xs text-text-muted">Start blank</span>
+              </button>
             </div>
           </div>
         )}

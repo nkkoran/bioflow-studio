@@ -196,9 +196,10 @@ function plinkOptionDefs(tool: ToolDef): AnalysisOptionDef[] {
     }
     if (tool.id === 'plink2.assoc' && flagDef.id === 'glm') {
       option.kind = 'compound'
-      option.requiredValue = true
+      option.requiredValue = false
       option.defaultEnabled = true
-      option.defaultValue = flagDef.defaultValue ?? 'hide-covar'
+      option.defaultValue = 'standard'
+      option.options = ['standard', 'firth-fallback', 'firth', 'no-firth']
       option.subOptions = PLINK_ASSOC_GLM_MODIFIERS.map((id) => {
         const sub = getFlagDef(tool.id, id)
         return {
@@ -236,7 +237,7 @@ function plinkOptionDefs(tool: ToolDef): AnalysisOptionDef[] {
 
 export function getAnalysisOptionDefs(tool: ToolDef): AnalysisOptionDef[] {
   const base = toolUsesFlagBuilder(tool.id) ? plinkOptionDefs(tool) : tool.params.filter((p) => !p.internal).map(paramToOptionDef)
-  const boundPorts = new Set(base.map((def) => def.filePortId ?? def.sourcePortId).filter(Boolean))
+  const boundPorts = new Set(base.map((def) => def.filePortId).filter(Boolean))
   const optionalInputOptions: AnalysisOptionDef[] = tool.inputs
     .filter((port) => !port.required && !boundPorts.has(port.id))
     .map((port) => ({
@@ -382,7 +383,7 @@ export function getEnabledAnalysisOptions(tool: ToolDef, nodeData: ToolNodeData,
 }
 
 export function getActiveToolInputs(tool: ToolDef, nodeData: ToolNodeData, opts: { connectedPortIds?: Iterable<string> } = {}): ToolPort[] {
-  if (tool.id === 'custom.shell') return tool.inputs
+  if (tool.id === 'custom.shell' || tool.id === 'custom.r') return tool.inputs
   const options = normalizeAnalysisOptions(tool, nodeData, opts)
   const enabledFilePorts = new Set<string>()
   const defsById = new Map(getAnalysisOptionDefs(tool).map((def) => [def.id, def]))
@@ -605,6 +606,8 @@ export function previewAnalysisCommand(tool: ToolDef, nodeData: ToolNodeData, co
       const value = optionValue(option)
       const mainTokens = value === undefined || value === null || value === ''
         ? []
+        : tool.id === 'plink2.assoc' && def.id === 'glm' && String(value) === 'standard'
+          ? []
         : tool.id === 'plink2.assoc' && def.id === 'glm' && String(value) === 'hide-covar'
           ? ['hide-covar']
           : [String(value)]

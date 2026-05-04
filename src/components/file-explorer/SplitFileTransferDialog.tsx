@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronUp, Copy, Loader2, MoveRight, PanelsLeftRight, RefreshCw, Upload } from 'lucide-react'
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
-import { MenuSelect } from '@/components/ui/MenuSelect'
+import { MenuSelect, type MenuSelectOption } from '@/components/ui/MenuSelect'
 import { LOCAL_CONNECTION_ID, useConnectionStore } from '@/stores/connectionStore'
 import { useDialogStore } from '@/stores/dialogStore'
 import type { RemoteFileEntry } from '@/types/files'
@@ -14,11 +14,13 @@ type PaneOrigin = 'local' | 'ssh'
 
 interface InitialPane {
   origin: PaneOrigin
+  connectionId?: string | null
   cwd?: string
 }
 
 interface PaneState {
   origin: PaneOrigin
+  connectionId: string | null
   cwd: string
   entries: RemoteFileEntry[]
   selected: RemoteFileEntry | null
@@ -29,6 +31,7 @@ interface PaneState {
 
 interface DragPayload {
   origin: PaneOrigin
+  connectionId?: string | null
   path: string
   name: string
   isDirectory: boolean
@@ -45,11 +48,33 @@ export function SplitFileTransferDialog({
   initialPanes?: [InitialPane, InitialPane]
 }) {
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId)
+  const connections = useConnectionStore((s) => s.connections)
   const confirmDialog = useDialogStore((s) => s.confirm)
-  const canUseSsh = Boolean(activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID)
+  const serverOptions = useMemo(
+    () => Object.entries(connections)
+      .filter(([, entry]) => !entry.isLocal)
+      .map(([id, entry]) => ({
+        id,
+        label: entry.config.name || entry.config.host || id,
+        status: entry.status,
+        defaultDirectory: entry.config.defaultDirectory,
+      })),
+    [connections],
+  )
+  const defaultServerId = activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID
+    ? activeConnectionId
+    : serverOptions.find((entry) => entry.status === 'connected')?.id ?? null
+  const locationOptions = useMemo<Array<MenuSelectOption<string>>>(() => [
+    { value: 'local', label: 'Local' },
+    ...serverOptions.map((entry) => ({
+      value: entry.id,
+      label: entry.label,
+      description: entry.status === 'connected' ? 'Server' : `Server (${entry.status})`,
+    })),
+  ], [serverOptions])
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [homeByOrigin, setHomeByOrigin] = useState<Record<PaneOrigin, string>>({ local: '/', ssh: '/' })
+  const [homeByLocation, setHomeByLocation] = useState<Record<string, string>>({ local: '/' })
   const [panes, setPanes] = useState<[PaneState, PaneState]>(() => [
     emptyPane('local'),
     emptyPane('ssh'),
@@ -60,32 +85,41 @@ export function SplitFileTransferDialog({
     let cancelled = false
     async function init() {
       const localHome = await window.api.local.homedir().catch(() => '/')
-      const sshHome = canUseSsh && activeConnectionId
-        ? (await window.api.ssh.exec(activeConnectionId, 'printf %s "$HOME"').catch(() => ({ stdout: '' }))).stdout.trim()
-        : ''
+      const homes: Record<string, string> = { local: localHome || '/' }
+      for (const option of serverOptions) {
+        homes[option.id] = option.defaultDirectory?.trim() || (
+          option.status === 'connected'
+            ? (await window.api.ssh.exec(option.id, 'printf %s "$HOME"').catch(() => ({ stdout: '' }))).stdout.trim()
+            : ''
+        ) || '/'
+      }
       if (cancelled) return
-      setHomeByOrigin({ local: localHome || '/', ssh: sshHome || '/' })
-      const fallbackByOrigin: Record<PaneOrigin, string> = { local: localHome || '/', ssh: sshHome || '/' }
+      setHomeByLocation(homes)
       const left = initialPanes?.[0] ?? { origin: 'local' as const }
       const right = initialPanes?.[1] ?? { origin: 'ssh' as const }
-      setPanes([
-        { ...emptyPane(left.origin), cwd: left.cwd?.trim() || fallbackByOrigin[left.origin] || '/' },
-        { ...emptyPane(right.origin), cwd: right.cwd?.trim() || fallbackByOrigin[right.origin] || '/' },
-      ])
+      const normalizeInitialPane = (pane: InitialPane): PaneState => {
+        const connectionId = pane.origin === 'ssh' ? (pane.connectionId || defaultServerId) : null
+        const key = pane.origin === 'local' ? 'local' : connectionId || ''
+        return {
+          ...emptyPane(pane.origin, connectionId),
+          cwd: pane.cwd?.trim() || homes[key] || '/',
+        }
+      }
+      setPanes([normalizeInitialPane(left), normalizeInitialPane(right)])
     }
     void init()
     return () => { cancelled = true }
-  }, [activeConnectionId, canUseSsh, initialPanes, open])
+  }, [defaultServerId, initialPanes, open, serverOptions])
 
   useEffect(() => {
     if (!open) return
     panes.forEach((pane, index) => {
       if (!pane.cwd) return
-      if (pane.origin === 'ssh' && !canUseSsh) return
+      if (pane.origin === 'ssh' && !paneUsable(pane, connections)) return
       void loadPane(index)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, panes[0].cwd, panes[0].origin, panes[0].nonce, panes[1].cwd, panes[1].origin, panes[1].nonce, canUseSsh])
+  }, [open, panes[0].connectionId, panes[0].cwd, panes[0].origin, panes[0].nonce, panes[1].connectionId, panes[1].cwd, panes[1].origin, panes[1].nonce, connections])
 
   const updatePane = useCallback((index: number, patch: Partial<PaneState>) => {
     setPanes((current) => {
@@ -97,7 +131,7 @@ export function SplitFileTransferDialog({
 
   const loadPane = useCallback(async (index: number) => {
     const pane = panes[index]
-    if (pane.origin === 'ssh' && !canUseSsh) {
+    if (pane.origin === 'ssh' && !paneUsable(pane, connections)) {
       updatePane(index, { entries: [], loading: false, error: 'Connect to SSH before browsing remote files.' })
       return
     }
@@ -105,12 +139,12 @@ export function SplitFileTransferDialog({
     try {
       const entries = pane.origin === 'local'
         ? await window.api.local.ls(pane.cwd)
-        : await window.api.sftp.ls(activeConnectionId!, pane.cwd)
+        : await window.api.sftp.ls(pane.connectionId!, pane.cwd)
       updatePane(index, { entries, loading: false, selected: null })
     } catch (err) {
       updatePane(index, { entries: [], loading: false, error: err instanceof Error ? err.message : String(err) })
     }
-  }, [activeConnectionId, canUseSsh, panes, updatePane])
+  }, [connections, panes, updatePane])
 
   const refreshPane = (index: number) => updatePane(index, { nonce: panes[index].nonce + 1 })
   const other = (index: number) => index === 0 ? 1 : 0
@@ -119,16 +153,16 @@ export function SplitFileTransferDialog({
     const source = panes[fromIndex]
     const entry = source.selected
     if (!entry) return
-    await transferEntry({ origin: source.origin, path: entry.path, name: entry.name, isDirectory: entry.isDirectory }, fromIndex, other(fromIndex), move)
+    await transferEntry({ origin: source.origin, connectionId: source.connectionId, path: entry.path, name: entry.name, isDirectory: entry.isDirectory }, fromIndex, other(fromIndex), move)
   }
 
   const transferEntry = async (payload: DragPayload, fromIndex: number, toIndex: number, move: boolean) => {
     const target = panes[toIndex]
-    if (target.origin === 'ssh' && !canUseSsh) {
+    if (target.origin === 'ssh' && !paneUsable(target, connections)) {
       setMessage('Connect to SSH before transferring to the server pane.')
       return
     }
-    if (payload.origin === target.origin && pathDir(payload.path) === target.cwd) {
+    if (sameEndpoint(payload, target) && pathDir(payload.path) === target.cwd) {
       setMessage('Source and destination are the same folder.')
       return
     }
@@ -146,11 +180,11 @@ export function SplitFileTransferDialog({
     setMessage(null)
     try {
       if (payload.isDirectory) {
-        await copyDirectory(payload.origin, payload.path, target.origin, destination, activeConnectionId)
+        await copyDirectory(endpointFromPayload(payload), payload.path, endpointFromPane(target), destination)
       } else {
-        await copyFile(payload.origin, payload.path, target.origin, destination, activeConnectionId)
+        await copyFile(endpointFromPayload(payload), payload.path, endpointFromPane(target), destination)
       }
-      if (move) await deleteEntry(payload.origin, payload.path, payload.isDirectory, activeConnectionId)
+      if (move) await deleteEntry(endpointFromPayload(payload), payload.path, payload.isDirectory)
       setMessage(`${move ? 'Moved' : 'Copied'} ${payload.name}`)
       refreshPane(fromIndex)
       refreshPane(toIndex)
@@ -189,8 +223,9 @@ export function SplitFileTransferDialog({
               key={index}
               index={index}
               pane={panes[index]}
-              homeByOrigin={homeByOrigin}
-              disabled={panes[index].origin === 'ssh' && !canUseSsh}
+              homeByLocation={homeByLocation}
+              locationOptions={locationOptions}
+              disabled={panes[index].origin === 'ssh' && !paneUsable(panes[index], connections)}
               busy={busy}
               onPatch={(patch) => updatePane(index, patch)}
               onRefresh={() => refreshPane(index)}
@@ -209,7 +244,8 @@ export function SplitFileTransferDialog({
 function FilePane({
   index,
   pane,
-  homeByOrigin,
+  homeByLocation,
+  locationOptions,
   disabled,
   busy,
   onPatch,
@@ -220,7 +256,8 @@ function FilePane({
 }: {
   index: number
   pane: PaneState
-  homeByOrigin: Record<PaneOrigin, string>
+  homeByLocation: Record<string, string>
+  locationOptions: Array<MenuSelectOption<string>>
   disabled: boolean
   busy: boolean
   onPatch: (patch: Partial<PaneState>) => void
@@ -234,9 +271,10 @@ function FilePane({
     return a.name.localeCompare(b.name, undefined, { numeric: true })
   }), [pane.entries])
   const canAct = Boolean(pane.selected) && !busy && !disabled
+  const locationValue = pane.origin === 'local' ? 'local' : pane.connectionId ?? ''
   return (
     <div
-      className="surface-card flex min-h-0 flex-col rounded-md bg-bg-secondary"
+      className="surface-card flex min-h-0 flex-col overflow-visible rounded-md bg-bg-secondary"
       onDragOver={(event) => {
         event.preventDefault()
         event.dataTransfer.dropEffect = event.altKey ? 'move' : 'copy'
@@ -246,25 +284,33 @@ function FilePane({
         const raw = event.dataTransfer.getData('application/x-bioflow-file-transfer')
         if (!raw) return
         const payload = JSON.parse(raw) as DragPayload
-        if (payload.origin === pane.origin && pathDir(payload.path) === pane.cwd) return
+        if (sameEndpoint(payload, pane) && pathDir(payload.path) === pane.cwd) return
         onDropPayload(payload, event.altKey)
       }}
     >
-      <div className="flex items-center gap-2 border-b border-border-light px-2 py-2">
-        <MenuSelect<PaneOrigin>
-          value={pane.origin}
+      <div className="flex items-center gap-2 overflow-visible border-b border-border-light px-2 py-2">
+        <MenuSelect<string>
+          value={locationValue}
           onChange={(value) => {
-            const nextOrigin = value || 'local'
-            onPatch({ origin: nextOrigin, cwd: homeByOrigin[nextOrigin] || '/', entries: [], selected: null, nonce: pane.nonce + 1 })
+            const nextValue = value || 'local'
+            const nextOrigin: PaneOrigin = nextValue === 'local' ? 'local' : 'ssh'
+            const nextConnectionId = nextOrigin === 'ssh' ? nextValue : null
+            const homeKey = nextOrigin === 'local' ? 'local' : nextConnectionId
+            onPatch({
+              origin: nextOrigin,
+              connectionId: nextConnectionId,
+              cwd: homeByLocation[homeKey ?? ''] || '/',
+              entries: [],
+              selected: null,
+              error: null,
+              nonce: pane.nonce + 1,
+            })
           }}
-          options={[
-            { value: 'local', label: 'Local' },
-            { value: 'ssh', label: 'Server' },
-          ]}
+          options={locationOptions}
           ariaLabel="Choose transfer side"
-          className="w-24 shrink-0"
+          className="w-32 shrink-0"
           buttonClassName="h-7 text-xs"
-          menuClassName="w-28"
+          menuClassName="w-56"
         />
         <input
           value={pane.cwd}
@@ -286,7 +332,7 @@ function FilePane({
           {index === 0 ? 'Left pane' : 'Right pane'} · {pane.origin === 'ssh' ? 'server' : 'local'}
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="scroll-region min-h-0 flex-1">
         {disabled ? (
           <div className="p-4 text-xs text-text-muted">Connect to SSH to use the server pane.</div>
         ) : pane.loading ? (
@@ -302,6 +348,7 @@ function FilePane({
             draggable
             onDragStart={(event) => {
               const payload: DragPayload = { origin: pane.origin, path: entry.path, name: entry.name, isDirectory: entry.isDirectory, paneIndex: index }
+              payload.connectionId = pane.connectionId
               event.dataTransfer.setData('application/x-bioflow-file-transfer', JSON.stringify(payload))
               event.dataTransfer.effectAllowed = 'copyMove'
             }}
@@ -324,59 +371,100 @@ function FilePane({
   )
 }
 
-function emptyPane(origin: PaneOrigin): PaneState {
-  return { origin, cwd: '', entries: [], selected: null, loading: false, error: null, nonce: 0 }
+interface TransferEndpoint {
+  origin: PaneOrigin
+  connectionId?: string | null
 }
 
-async function copyFile(from: PaneOrigin, source: string, to: PaneOrigin, destination: string, connectionId: string | null | undefined): Promise<void> {
-  if (from === 'local' && to === 'local') {
+function emptyPane(origin: PaneOrigin, connectionId: string | null = null): PaneState {
+  return { origin, connectionId: origin === 'ssh' ? connectionId : null, cwd: '', entries: [], selected: null, loading: false, error: null, nonce: 0 }
+}
+
+function paneUsable(pane: Pick<PaneState, 'origin' | 'connectionId'>, connections: ReturnType<typeof useConnectionStore.getState>['connections']): boolean {
+  if (pane.origin === 'local') return true
+  if (!pane.connectionId) return false
+  return connections[pane.connectionId]?.status === 'connected'
+}
+
+function endpointFromPane(pane: Pick<PaneState, 'origin' | 'connectionId'>): TransferEndpoint {
+  return { origin: pane.origin, connectionId: pane.connectionId }
+}
+
+function endpointFromPayload(payload: Pick<DragPayload, 'origin' | 'connectionId'>): TransferEndpoint {
+  return { origin: payload.origin, connectionId: payload.connectionId ?? null }
+}
+
+function sameEndpoint(a: Pick<DragPayload, 'origin' | 'connectionId'>, b: Pick<PaneState, 'origin' | 'connectionId'>): boolean {
+  if (a.origin !== b.origin) return false
+  if (a.origin === 'local') return true
+  return (a.connectionId ?? null) === (b.connectionId ?? null)
+}
+
+async function copyFile(from: TransferEndpoint, source: string, to: TransferEndpoint, destination: string): Promise<void> {
+  if (from.origin === 'local' && to.origin === 'local') {
     await window.api.local.copy(source, destination)
     return
   }
-  if (from === 'ssh' && to === 'ssh') {
-    await window.api.ssh.exec(connectionId!, `cp ${shellQuote(source)} ${shellQuote(destination)}`)
+  if (from.origin === 'ssh' && to.origin === 'ssh' && from.connectionId === to.connectionId) {
+    await window.api.ssh.exec(requiredConnectionId(from), `cp ${shellQuote(source)} ${shellQuote(destination)}`)
     return
   }
-  if (from === 'local' && to === 'ssh') {
-    await window.api.sftp.upload(connectionId!, source, destination)
+  if (from.origin === 'local' && to.origin === 'ssh') {
+    await window.api.sftp.upload(requiredConnectionId(to), source, destination)
     return
   }
-  await window.api.sftp.download(connectionId!, source, destination)
+  if (from.origin === 'ssh' && to.origin === 'local') {
+    await window.api.sftp.download(requiredConnectionId(from), source, destination)
+    return
+  }
+
+  const tmpPath = temporaryTransferPath(source)
+  try {
+    await window.api.sftp.download(requiredConnectionId(from), source, tmpPath)
+    await window.api.sftp.upload(requiredConnectionId(to), tmpPath, destination)
+  } finally {
+    await window.api.local.delete(tmpPath).catch(() => undefined)
+  }
 }
 
-async function copyDirectory(from: PaneOrigin, source: string, to: PaneOrigin, destination: string, connectionId: string | null | undefined): Promise<void> {
-  if (from === 'ssh' && to === 'ssh') {
-    await window.api.ssh.exec(connectionId!, `cp -R ${shellQuote(source)} ${shellQuote(destination)}`)
+async function copyDirectory(from: TransferEndpoint, source: string, to: TransferEndpoint, destination: string): Promise<void> {
+  if (from.origin === 'ssh' && to.origin === 'ssh' && from.connectionId === to.connectionId) {
+    await window.api.ssh.exec(requiredConnectionId(from), `cp -R ${shellQuote(source)} ${shellQuote(destination)}`)
     return
   }
-  await mkdirForOrigin(to, destination, connectionId)
-  const entries = from === 'local'
+  await mkdirForEndpoint(to, destination)
+  const entries = from.origin === 'local'
     ? await window.api.local.ls(source)
-    : await window.api.sftp.ls(connectionId!, source)
+    : await window.api.sftp.ls(requiredConnectionId(from), source)
   for (const entry of entries) {
     const targetPath = joinPath(destination, entry.name)
     if (entry.isDirectory) {
-      await copyDirectory(from, entry.path, to, targetPath, connectionId)
+      await copyDirectory(from, entry.path, to, targetPath)
     } else {
-      await copyFile(from, entry.path, to, targetPath, connectionId)
+      await copyFile(from, entry.path, to, targetPath)
     }
   }
 }
 
-async function mkdirForOrigin(origin: PaneOrigin, path: string, connectionId: string | null | undefined): Promise<void> {
-  if (origin === 'local') await window.api.local.mkdir(path)
-  else await window.api.sftp.mkdir(connectionId!, path).catch(() => undefined)
+async function mkdirForEndpoint(endpoint: TransferEndpoint, path: string): Promise<void> {
+  if (endpoint.origin === 'local') await window.api.local.mkdir(path)
+  else await window.api.sftp.mkdir(requiredConnectionId(endpoint), path).catch(() => undefined)
 }
 
-async function deleteEntry(origin: PaneOrigin, path: string, isDirectory: boolean, connectionId: string | null | undefined): Promise<void> {
-  if (origin === 'local') {
+async function deleteEntry(endpoint: TransferEndpoint, path: string, isDirectory: boolean): Promise<void> {
+  if (endpoint.origin === 'local') {
     if (isDirectory) await window.api.local.delete(path)
     else await window.api.local.delete(path)
   } else if (isDirectory) {
-    await window.api.ssh.exec(connectionId!, `rm -rf -- ${shellQuote(path)}`)
+    await window.api.ssh.exec(requiredConnectionId(endpoint), `rm -rf -- ${shellQuote(path)}`)
   } else {
-    await window.api.sftp.delete(connectionId!, path)
+    await window.api.sftp.delete(requiredConnectionId(endpoint), path)
   }
+}
+
+function requiredConnectionId(endpoint: TransferEndpoint): string {
+  if (!endpoint.connectionId) throw new Error('No server connection selected for this transfer pane.')
+  return endpoint.connectionId
 }
 
 function pathDir(path: string): string {
@@ -388,6 +476,11 @@ function pathDir(path: string): string {
 
 function joinPath(folder: string, name: string): string {
   return `${folder.replace(/\/+$/, '')}/${name}`
+}
+
+function temporaryTransferPath(source: string): string {
+  const name = source.split('/').pop()?.replace(/[^A-Za-z0-9._-]/g, '_') || 'bioflow-transfer'
+  return `/tmp/bioflow-transfer-${Date.now()}-${Math.random().toString(16).slice(2)}-${name}`
 }
 
 function shellQuote(value: string): string {

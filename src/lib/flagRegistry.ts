@@ -197,10 +197,10 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
     { id: 'pheno-name', flag: '--pheno-name', label: 'Phenotype column', group: 'Input', kind: 'columnRef', sourcePortId: 'pheno', defaultEnabled: true, defaultValue: source('literal', '', 'pheno'), paramName: 'pheno-name', requiredValue: true },
     { id: 'pheno-iid-only', flag: 'iid-only', label: 'Phenotype file uses IID only', group: 'Input', kind: 'toggle', defaultEnabled: false, defaultValue: false, paramName: 'pheno-iid-only', description: 'Add PLINK2\'s iid-only modifier to --pheno when the phenotype file has IID but no FID column.' },
     { id: 'one', flag: '--1', label: '0/1 case-control coding', group: 'Input', kind: 'toggle', defaultEnabled: false, defaultValue: false, paramName: 'one', description: 'Use when binary phenotypes are coded 0=control and 1=case instead of PLINK2 default 1=control and 2=case.' },
-    { id: 'covar', flag: '--covar', label: 'Covariate file', group: 'Input', kind: 'fileInput', sourcePortId: 'covar', defaultEnabled: true, defaultValue: source('upstream-file', undefined, 'covar') },
-    { id: 'covar-name', flag: '--covar-name', label: 'Covariate columns', group: 'Input', kind: 'columnRef', sourcePortId: 'covar', defaultEnabled: true, defaultValue: source('literal', '', 'covar'), paramName: 'covar-name', multiValue: true },
+    { id: 'covar', flag: '--covar', label: 'Covariate file', group: 'Input', kind: 'fileInput', sourcePortId: 'covar', defaultEnabled: false, defaultValue: source('upstream-file', undefined, 'covar') },
+    { id: 'covar-name', flag: '--covar-name', label: 'Covariate columns', group: 'Input', kind: 'columnRef', sourcePortId: 'covar', defaultEnabled: false, defaultValue: source('literal', '', 'covar'), paramName: 'covar-name', multiValue: true },
     { id: 'covar-iid-only', flag: 'iid-only', label: 'Covariate file uses IID only', group: 'Input', kind: 'toggle', defaultEnabled: false, defaultValue: false, paramName: 'covar-iid-only', description: 'Add PLINK2\'s iid-only modifier to --covar when the covariate file has IID but no FID column.' },
-    { id: 'glm', flag: '--glm', label: 'Regression mode', group: 'Model', kind: 'enum', defaultEnabled: true, defaultValue: 'hide-covar', options: ['hide-covar', 'firth-fallback', 'firth', 'no-firth'], paramName: 'glm', requiredValue: true },
+    { id: 'glm', flag: '--glm', label: 'Regression mode', group: 'Model', kind: 'enum', defaultEnabled: true, defaultValue: 'standard', options: ['standard', 'firth-fallback', 'firth', 'no-firth'], paramName: 'glm', requiredValue: false },
     { id: 'hide-covar', flag: 'hide-covar', label: 'Hide covariate rows', group: 'Model', kind: 'toggle', defaultEnabled: true, defaultValue: true, paramName: 'hide-covar' },
     { id: 'allow-no-covars', flag: 'allow-no-covars', label: 'Allow no covariates', group: 'Model', kind: 'toggle', defaultEnabled: false, defaultValue: false, paramName: 'allow-no-covars' },
     { id: 'omit-ref', flag: 'omit-ref', label: 'Omit reference allele row', group: 'Model', kind: 'toggle', defaultEnabled: false, defaultValue: false, paramName: 'omit-ref' },
@@ -253,7 +253,7 @@ const TOOL_FLAG_DEFS: Record<string, ToolFlagDef[]> = {
   'plink2.score': [
     { id: 'score', flag: '--score', label: 'Score file', group: 'Input', kind: 'fileInput', sourcePortId: 'score', defaultEnabled: true, defaultValue: source('upstream-file', undefined, 'score'), requiredValue: true },
     { id: 'score-col-nums', flag: '--score-col-nums', label: 'Score columns', group: 'Input', kind: 'list', defaultEnabled: true, defaultValue: '1 2 3', paramName: 'score-col-nums' },
-    { id: 'extract', flag: '--extract', label: 'Extract ranges', group: 'Filters', kind: 'fileInput', sourcePortId: 'extract', defaultEnabled: true, defaultValue: source('upstream-file', undefined, 'extract') },
+    { id: 'extract', flag: '--extract', label: 'Extract variant IDs', group: 'Filters', kind: 'fileInput', sourcePortId: 'extract', defaultEnabled: true, defaultValue: source('upstream-file', undefined, 'extract') },
     ...plinkCommonSampleFilterDefs(),
     ...plinkCommonFrequencyInputDefs(),
     ...plinkCommonNumericVariantFilterDefs(),
@@ -337,7 +337,7 @@ const FLAG_DESCRIPTIONS: Record<string, string> = {
   'no-input-missing-phenotype': 'Treat -9 as a real numeric phenotype value.',
   'input-missing-phenotype': 'Custom phenotype missing-value token for PLINK input.',
   'read-freq': 'Allele frequency file passed to PLINK2 --read-freq.',
-  extract: 'Variant or range file used to filter prior to scoring.',
+  extract: 'Variant ID file used to keep variants before the PLINK step.',
   pca: 'Number of principal components to compute.',
 }
 
@@ -511,10 +511,19 @@ function migrateFlagBlocks(toolId: string, blocks: ToolFlagBlock[], paramValues:
   const next = [...blocks]
   const glm = next.find((block) => block.flagId === 'glm')
   const legacyGlmValue = glm?.value ?? paramValues.glm
-  if (legacyGlmValue === 'hide-covar' || legacyGlmValue === 'firth-fallback' || legacyGlmValue === 'firth' || legacyGlmValue === 'no-firth') {
+  if (legacyGlmValue === 'hide-covar') {
+    if (glm) glm.value = 'standard'
+    const hideCovar = next.find((block) => block.flagId === 'hide-covar')
+    if (hideCovar) {
+      hideCovar.enabled = true
+      hideCovar.value = true
+    }
     return next
   }
-  if (glm) glm.value = 'hide-covar'
+  if (legacyGlmValue === 'standard' || legacyGlmValue === 'firth-fallback' || legacyGlmValue === 'firth' || legacyGlmValue === 'no-firth') {
+    return next
+  }
+  if (glm) glm.value = 'standard'
   if (legacyGlmValue && typeof legacyGlmValue === 'string') {
     const modifierId = PLINK_ASSOC_GLM_MODIFIER_IDS.find((id) => id === legacyGlmValue)
     if (modifierId) {

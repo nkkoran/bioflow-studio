@@ -37,11 +37,13 @@ async function resolveHomeDir(connectionId: string): Promise<string> {
 
 async function safeStat(connectionId: string, path: string): Promise<FileStatLike | null> {
   try {
-    return connectionId === LOCAL_CONNECTION_ID
+    const stat = connectionId === LOCAL_CONNECTION_ID
       ? await window.api.local.stat(path)
       : await window.api.sftp.stat(connectionId, path)
+    return stat
   } catch {
-    return null
+    if (connectionId === LOCAL_CONNECTION_ID) return null
+    return statRemotePathViaShell(connectionId, path)
   }
 }
 
@@ -56,6 +58,37 @@ async function previewText(connectionId: string, path: string, lines: number): P
     return connectionId === LOCAL_CONNECTION_ID
       ? await window.api.local.head(path, lines)
       : await window.api.sftp.head(connectionId, path, lines)
+  } catch {
+    if (connectionId === LOCAL_CONNECTION_ID) return null
+    return previewRemoteTextViaShell(connectionId, path, lines)
+  }
+}
+
+async function statRemotePathViaShell(connectionId: string, path: string): Promise<FileStatLike | null> {
+  try {
+    const result = await window.api.ssh.exec(
+      connectionId,
+      `p=${shellQuote(path)}; if [ ! -e "$p" ] && [ ! -L "$p" ]; then exit 1; fi; kind=file; [ -d "$p" ] && kind=dir; meta=$(stat -Lc '%s %Y %A' -- "$p" 2>/dev/null) || exit 1; printf '%s %s' "$meta" "$kind"`,
+    )
+    if (result.exitCode !== 0) return null
+    const [sizeRaw, modifiedRaw, permissions = '', kind = 'file'] = result.stdout.trim().split(/\s+/)
+    return {
+      size: Number(sizeRaw) || 0,
+      modified: (Number(modifiedRaw) || 0) * 1000,
+      isDirectory: kind === 'dir',
+      permissions,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function previewRemoteTextViaShell(connectionId: string, path: string, lines: number): Promise<string | null> {
+  try {
+    const count = Math.max(1, Math.floor(lines))
+    const result = await window.api.ssh.exec(connectionId, `head -n ${count} -- ${shellQuote(path)}`)
+    if (result.exitCode !== 0 && !result.stdout) return null
+    return result.stdout
   } catch {
     return null
   }

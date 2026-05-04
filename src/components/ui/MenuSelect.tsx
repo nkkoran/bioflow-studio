@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { ChevronDown } from 'lucide-react'
 import { classNames } from '@/lib/utils'
 
@@ -36,27 +37,56 @@ export function MenuSelect<T extends string = string>({
   emptyLabel = 'None',
 }: MenuSelectProps<T>) {
   const [open, setOpen] = useState(false)
+  const [menuRect, setMenuRect] = useState<{ left: number; top: number; minWidth: number; maxHeight: number } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const activeOption = options.find((option) => option.value === value)
+
+  function updateMenuRect() {
+    const rect = rootRef.current?.getBoundingClientRect()
+    if (!rect) {
+      setMenuRect(null)
+      return
+    }
+    const gap = 4
+    const viewportPadding = 12
+    const preferredMaxHeight = 288
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding
+    const spaceAbove = rect.top - viewportPadding
+    const openAbove = spaceBelow < 160 && spaceAbove > spaceBelow
+    const available = Math.max(120, Math.min(preferredMaxHeight, (openAbove ? spaceAbove : spaceBelow) - gap))
+    setMenuRect({
+      left: Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - rect.width - viewportPadding)),
+      top: openAbove ? Math.max(viewportPadding, rect.top - available - gap) : rect.bottom + gap,
+      minWidth: rect.width,
+      maxHeight: available,
+    })
+  }
 
   useEffect(() => {
     if (!open) return
     function onPointerDown(event: PointerEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+      const target = event.target as Node
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false)
     }
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') setOpen(false)
     }
+    updateMenuRect()
     document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKeyDown)
+    window.addEventListener('resize', updateMenuRect)
+    window.addEventListener('scroll', updateMenuRect, true)
     return () => {
       document.removeEventListener('pointerdown', onPointerDown)
       document.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('resize', updateMenuRect)
+      window.removeEventListener('scroll', updateMenuRect, true)
     }
   }, [open])
 
   return (
-    <div ref={rootRef} className={classNames('relative min-w-0', className)}>
+    <div ref={rootRef} className={classNames('relative min-w-0 overflow-visible', className)}>
       <button
         type="button"
         aria-label={ariaLabel ?? placeholder}
@@ -73,8 +103,18 @@ export function MenuSelect<T extends string = string>({
         </span>
         <ChevronDown size={12} className={classNames('shrink-0 text-text-muted transition-transform', open && 'rotate-180')} />
       </button>
-      {open && (
-        <div className={classNames('surface-popover absolute left-0 top-full z-50 mt-1 max-h-72 min-w-full overflow-y-auto rounded-lg p-1', menuClassName)}>
+      {open && menuRect && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={menuRef}
+          className={classNames('surface-popover fixed z-[1400] overflow-y-auto rounded-lg p-1', menuClassName)}
+          style={{
+            left: menuRect.left,
+            top: menuRect.top,
+            minWidth: menuRect.minWidth,
+            maxHeight: menuRect.maxHeight,
+          }}
+          onWheel={(event) => event.stopPropagation()}
+        >
           {allowEmpty && (
             <MenuSelectItem
               label={emptyLabel}
@@ -97,7 +137,8 @@ export function MenuSelect<T extends string = string>({
               }}
             />
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

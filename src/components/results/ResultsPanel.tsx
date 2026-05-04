@@ -167,10 +167,21 @@ export function ResultsPanel() {
     return true
   }
 
-  const previewOutput = async (path: string, origin: FileOrigin) => {
+  const previewOutput = async (path: string, origin: FileOrigin, siblingPaths: string[] = []) => {
+    const previewPath = previewPathForResult(path, siblingPaths)
+    if (previewPath !== path) {
+      window.dispatchEvent(new CustomEvent('bioflow:toast', { detail: { kind: 'info', message: 'Opening the TSV companion for this Excel table' } }))
+    } else if (path.toLowerCase().endsWith('.xlsx')) {
+      await alertDialog({
+        title: 'Excel preview',
+        message: 'BioFlow cannot preview XLSX directly yet.',
+        detail: 'Use the TSV companion output for in-app preview, or open the Excel file from the results folder.',
+      })
+      return
+    }
     const ready = await activateOutputOrigin(origin, path)
     if (!ready) return
-    openFile(path, pathBasename(path), classifyPreview(path), {
+    openFile(previewPath, pathBasename(previewPath), classifyPreview(previewPath), {
       connectionId: origin === 'local' ? LOCAL_CONNECTION_ID : activeRunConnectionId ?? activeRun?.connectionId,
     })
   }
@@ -289,7 +300,7 @@ export function ResultsPanel() {
                         size="sm"
                         icon={<Eye size={12} />}
                         className="h-6 text-xs"
-                        onClick={() => void previewOutput(path, entry.origin)}
+                        onClick={() => void previewOutput(path, entry.origin, entry.paths)}
                       >
                         Preview
                       </Button>
@@ -334,6 +345,11 @@ function resultKindLabel(kind: NonNullable<RunManifest['resultCards']>[number]['
   if (kind === 'log') return 'Log'
   if (kind === 'tabular') return 'Table'
   return 'Result'
+}
+
+function previewPathForResult(path: string, siblingPaths: string[]): string {
+  if (!path.toLowerCase().endsWith('.xlsx')) return path
+  return siblingPaths.find((candidate) => candidate.toLowerCase().endsWith('.tsv')) ?? path
 }
 
 function resultOrigin(

@@ -43,6 +43,10 @@ export function registerPipelineHandlers(): void {
     return runner.listNodeOutputs(args.runId, args.nodeId, args.connectionId)
   })
 
+  ipcMain.handle('pipeline:refresh-array-tasks', async (_event, args: { runId: string; nodeId: string }) => {
+    return runner.refreshArrayTasks(args.runId, args.nodeId)
+  })
+
   ipcMain.handle('pipeline:generate-scripts-dry', async (
     _event,
     args: { connectionId: string; snapshot: PipelineSnapshot; workDir?: string },

@@ -152,7 +152,7 @@ export function WorkspaceSwitcher() {
       <div className="relative" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <button
           onClick={() => setOpen((value) => !value)}
-          className="flex max-w-[240px] items-center gap-1 rounded px-2 py-1 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+          className="flex max-w-[240px] items-center gap-1 rounded px-2 py-1 text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary"
           title={activeWorkspace?.name ?? 'Set up a workspace'}
         >
           <Briefcase size={13} className="shrink-0" />

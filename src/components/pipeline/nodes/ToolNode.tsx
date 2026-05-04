@@ -22,6 +22,7 @@ import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { useSuccessAnimation } from './useSuccessAnimation'
 import { categoryTone, nodeChromeStyle } from './nodeTones'
 import { PortHandle } from './PortHandle'
+import { useSyncNodeHandles } from './useSyncNodeHandles'
 
 interface StatusBadgeProps {
   status?: ToolNodeData['status']
@@ -121,8 +122,19 @@ function ToolNodeInner({ id, data, selected }: NodeProps) {
   })
   const tone = categoryTone(tool.category)
 
+  useSyncNodeHandles(id, [
+    selected,
+    nodeData.label,
+    nodeData.status,
+    nodeData.backend,
+    nodeData.executionMode,
+    activeInputs.length,
+    tool.outputs.length,
+    outputPreview,
+  ])
+
   return (
-    <ToolHoverCard tool={tool} connectedPorts={connectedInputs.size + connectedOutputs.size}>
+    <ToolHoverCard tool={tool} connectedPorts={connectedInputs.size + connectedOutputs.size} disabled={Boolean(selected)}>
       <div
         className={classNames(
           'animate-fade-up relative min-w-[260px] max-w-[320px] rounded-lg border bg-bg-secondary/95 transition-all duration-150 ease-out',

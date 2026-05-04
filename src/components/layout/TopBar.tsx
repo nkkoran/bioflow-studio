@@ -41,7 +41,7 @@ export function TopBar() {
   return (
     <div
       ref={rootRef}
-      className="bioflow-toolbar surface-panel z-30 flex h-11 items-center gap-2 px-3 select-none"
+      className="bioflow-toolbar surface-panel z-30 flex h-9 items-center gap-2 px-3 select-none"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       {/* macOS traffic light padding */}
@@ -61,11 +61,11 @@ export function TopBar() {
 
       <button
         onClick={() => setSettingsOpen(true)}
-        className="interactive-button p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors shrink-0"
+        className="interactive-button rounded-md p-1.5 text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary shrink-0"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         title="Settings"
       >
-        <Settings size={16} />
+        <Settings size={14} />
       </button>
       <SettingsDialog
         open={settingsOpen}

@@ -10,6 +10,7 @@ import { usePipelineStore } from '@/stores/pipelineStore'
 import type { RunState, NodeRunState } from '@/types/pipeline'
 import { iconForNodeType, iconForTool } from '@/lib/toolIcons'
 import { Loader2, CheckCircle2, XCircle, Clock, CircleSlash, CirclePause } from 'lucide-react'
+import { taskRowsForNode } from './ArrayJobViewer'
 
 interface Props { run: RunState }
 
@@ -103,7 +104,7 @@ export function NodeRunList({ run }: Props) {
               </div>
             ) : null}
             {ns.isArray && (
-              <ArrayTaskStrip size={ns.arraySize ?? 0} status={ns.status} />
+              <ArrayTaskStrip ns={ns} />
             )}
           </div>
           <div className="text-[10px] text-text-muted font-mono shrink-0">
@@ -116,23 +117,29 @@ export function NodeRunList({ run }: Props) {
   )
 }
 
-function ArrayTaskStrip({ size, status }: { size: number; status: NodeRunState['status'] }) {
-  const count = Math.min(Math.max(size, 1), 32)
-  const title = `${size || '?'} Slurm array task${size === 1 ? '' : 's'} tracked as one job by Slurm`
-  const color = status === 'done'
-    ? 'bg-success/70'
-    : status === 'failed'
-      ? 'bg-error/70'
-      : status === 'running'
-        ? 'bg-warning/70'
-        : 'bg-text-muted/40'
+function ArrayTaskStrip({ ns }: { ns: NodeRunState }) {
+  const rows = taskRowsForNode(ns)
+  const shown = rows.slice(0, 32)
+  const title = `${rows.length || '?'} Slurm array task${rows.length === 1 ? '' : 's'}`
   return (
     <div className="mt-1 flex items-center gap-0.5" title={title}>
-      {Array.from({ length: count }).map((_, index) => (
-        <span key={index} className={`h-1.5 flex-1 rounded-sm ${color}`} />
+      {shown.map((row) => (
+        <span key={row.taskId} className={`h-1.5 flex-1 rounded-sm ${taskStripColor(row.status.state)}`} />
       ))}
     </div>
   )
+}
+
+function taskStripColor(state: NonNullable<ReturnType<typeof taskRowsForNode>[number]>['status']['state']): string {
+  switch (state) {
+    case 'completed': return 'bg-success/70'
+    case 'running': return 'bg-accent/70'
+    case 'failed':
+    case 'timeout': return 'bg-error/70'
+    case 'cancelled': return 'bg-text-muted/60'
+    case 'unknown': return 'bg-warning/70'
+    case 'queued': return 'bg-text-muted/35'
+  }
 }
 
 function transferProgressLabel(ns: NodeRunState): string {

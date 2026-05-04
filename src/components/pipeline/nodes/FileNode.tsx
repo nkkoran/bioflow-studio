@@ -13,6 +13,7 @@ import { computeFileOutputPreview } from '@/lib/outputPathPreview'
 import { MiddleEllipsis } from '@/components/ui/MiddleEllipsis'
 import { nodeChromeStyle, nodeTypeTone } from './nodeTones'
 import { PortHandle } from './PortHandle'
+import { useSyncNodeHandles } from './useSyncNodeHandles'
 
 function FileNodeInner({ id, data, selected }: NodeProps) {
   const nodeData = data as FileNodeData
@@ -52,6 +53,18 @@ function FileNodeInner({ id, data, selected }: NodeProps) {
   const fanOutCount = edges.filter((edge) => edge.source === id && (edge.sourceHandle ?? 'output') === 'output').length
   const wireFileNodeToCompatibleInputs = usePipelineStore((s) => s.wireFileNodeToCompatibleInputs)
   const tone = nodeTypeTone('file')
+
+  useSyncNodeHandles(id, [
+    selected,
+    nodeData.label,
+    nodeData.path,
+    nodeData.status,
+    nodeData.outputDir,
+    nodeData.outputFilename,
+    nodeData.split?.items?.length ?? 0,
+    fanOutCount,
+    outputPreview,
+  ])
 
   return (
     <div

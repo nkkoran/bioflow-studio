@@ -87,6 +87,34 @@ describe('splitDetection', () => {
       { key: '2', rawKey: '2', path: '/data/plink/chr2/geno.pgen' },
     ])
   })
+
+  it('prefers primary PGEN files over sidecars in mixed UKB-style folders', async () => {
+    const entries: RemoteFileEntry[] = []
+    for (let chrom = 1; chrom <= 23; chrom++) {
+      entries.push(
+        entry(`ukb22828_c${chrom}_b0_v3.pgen`, `/ukb/genotype/ukb22828_c${chrom}_b0_v3.pgen`, false),
+        entry(`ukb22828_c${chrom}_b0_v3.pvar`, `/ukb/genotype/ukb22828_c${chrom}_b0_v3.pvar`, false),
+        entry(`ukb22828_c${chrom}_b0_v3.psam`, `/ukb/genotype/ukb22828_c${chrom}_b0_v3.psam`, false),
+      )
+    }
+
+    const detected = await detectSplitInFolder({
+      listFolder: async (folder) => {
+        expect(folder).toBe('/ukb/genotype')
+        return entries
+      },
+      folder: '/ukb/genotype',
+      mode: 'auto',
+      axis: 'chromosome',
+      fileType: 'any',
+      seedPath: '/ukb/genotype',
+    })
+
+    expect(detected.items).toHaveLength(23)
+    expect(detected.items.map((item) => item.key)).toEqual(Array.from({ length: 23 }, (_, index) => String(index + 1)))
+    expect(detected.items.every((item) => item.path.endsWith('.pgen'))).toBe(true)
+    expect(detected.summary).toContain('chromosome 1-23')
+  })
 })
 
 function entry(name: string, path: string, isDirectory: boolean): RemoteFileEntry {

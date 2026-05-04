@@ -90,6 +90,8 @@ function RunConfirmDialog({ result, review, snapshot, onRunAnyway, onQuickFix, o
       onClose={onClose}
       title={title}
       icon={<HeaderIcon size={16} className={headerText} />}
+      className="bioflow-run-confirm-dialog"
+      bodyClassName="bioflow-run-confirm-body"
       footer={hasErrors ? (
         <>
           <span className="mr-auto text-xs text-text-muted">Fix the errors above, then try again.</span>
@@ -171,45 +173,51 @@ function ModalIssueRow({
   onApplyModule?: (issue: ValidationIssue, moduleName: string) => void
   onSelectNode?: (issue: ValidationIssue) => void
 }) {
+  const pathDetail = typeof issue.details?.path === 'string' ? issue.details.path : null
   return (
-    <div className="px-4 py-2 border-b border-border-light/50 last:border-0 flex items-start gap-2">
-      <span className={`text-[10px] font-mono shrink-0 mt-px ${color}`}>{issue.code}</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-xs text-text-primary leading-snug">{issue.message}</div>
+    <div data-wrap className="grid grid-cols-[minmax(7.5rem,11rem)_minmax(0,1fr)_auto] items-start gap-3 border-b border-border-light/50 px-4 py-2.5 last:border-0">
+      <span className={`break-all text-[10px] font-mono leading-4 ${color}`}>{issue.code}</span>
+      <div data-wrap className="min-w-0">
+        <div data-wrap className="text-wrap text-xs leading-snug text-text-primary">{issue.message}</div>
         {issue.suggestion && (
-          <div className="text-[10px] text-text-muted mt-0.5 leading-snug">{issue.suggestion}</div>
+          <div data-wrap className="text-wrap mt-0.5 text-[10px] leading-snug text-text-muted">{issue.suggestion}</div>
+        )}
+        {pathDetail && (
+          <div data-wrap className="mt-1 break-all font-mono text-[10px] leading-4 text-text-muted">{pathDetail}</div>
         )}
       </div>
-      {onSelectNode && issue.nodeId && (
-        <button
-          type="button"
-          onClick={() => onSelectNode(issue)}
-          className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
-        >
-          Select
-        </button>
-      )}
-      {onQuickFix && canApplyValidationQuickFix(issue) && (
-        <button
-          type="button"
-          onClick={() => onQuickFix(issue)}
-          className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
-        >
-          {validationQuickFixLabel(issue)}
-        </button>
-      )}
-      {onCreateRemoteFolder && canCreateRemoteFolderQuickFix(issue) && (
-        <button
-          type="button"
-          onClick={() => onCreateRemoteFolder(issue)}
-          className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
-        >
-          Create folder
-        </button>
-      )}
-      {onApplyModule && moduleCandidatesFromIssue(issue).length > 0 && (
-        <ModuleSuggestionPicker issue={issue} onApply={onApplyModule} />
-      )}
+      <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+        {onSelectNode && issue.nodeId && (
+          <button
+            type="button"
+            onClick={() => onSelectNode(issue)}
+            className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
+          >
+            Select
+          </button>
+        )}
+        {onQuickFix && canApplyValidationQuickFix(issue) && (
+          <button
+            type="button"
+            onClick={() => onQuickFix(issue)}
+            className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+          >
+            {validationQuickFixLabel(issue)}
+          </button>
+        )}
+        {onCreateRemoteFolder && canCreateRemoteFolderQuickFix(issue) && (
+          <button
+            type="button"
+            onClick={() => onCreateRemoteFolder(issue)}
+            className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+          >
+            Create folder
+          </button>
+        )}
+        {onApplyModule && moduleCandidatesFromIssue(issue).length > 0 && (
+          <ModuleSuggestionPicker issue={issue} onApply={onApplyModule} />
+        )}
+      </div>
     </div>
   )
 }
@@ -567,17 +575,27 @@ async function moduleIssuesForSnapshot(connectionId: string, snapshot: PipelineS
 }
 
 function requiredModulesForSnapshot(snapshot: PipelineSnapshot): Map<string, Array<{ nodeId: string; label: string }>> {
+  const settings = useSettingsStore.getState().settings
   const out = new Map<string, Array<{ nodeId: string; label: string }>>()
   const add = (moduleName: string | undefined, nodeId: string, label: string) => {
     const value = moduleName?.trim()
     if (!value) return
     out.set(value, [...(out.get(value) ?? []), { nodeId, label }])
   }
+  const moduleDefaultForTool = (tool: ReturnType<typeof getTool>): string | undefined => {
+    if (!tool) return undefined
+    const command = (tool.command || tool.id).toLowerCase()
+    if (command.includes('plink')) return settings.moduleDefaults.plink || tool.module
+    if (command.includes('regenie')) return settings.moduleDefaults.regenie || tool.module
+    if (command.includes('bcftools')) return settings.moduleDefaults.bcftools || tool.module
+    if (command === 'rscript' || tool.id.startsWith('r.') || tool.id.startsWith('plot.') || tool.id === 'custom.r') return settings.moduleDefaults.r || tool.module
+    return tool.module
+  }
   for (const node of snapshot.nodes) {
     if (node.type === 'tool') {
       const data = node.data as ToolNodeData
       const tool = getTool(data.toolId)
-      add(data.moduleOverride || tool?.module, node.id, data.label || tool?.name || data.toolId)
+      add(data.moduleOverride || moduleDefaultForTool(tool), node.id, data.label || tool?.name || data.toolId)
       continue
     }
     if (node.type === 'merge') {
@@ -592,6 +610,39 @@ function defaultMergeModule(data: MergeNodeData): string | undefined {
   if (data.strategy === 'bcftools-concat') return 'bcftools/1.19'
   if (data.strategy === 'plink-pmerge-list') return 'plink/2.00a3'
   return undefined
+}
+
+function rPackageIssueForSnapshot(
+  snapshot: PipelineSnapshot,
+  mode: ReturnType<typeof useSettingsStore.getState>['settings']['rPackageInstallMode'],
+): ValidationIssue | null {
+  const rNodes = snapshot.nodes.filter((node) => {
+    if (node.type !== 'tool') return false
+    const toolId = (node.data as ToolNodeData).toolId
+    return toolId === 'plot.manhattan' ||
+      toolId === 'plot.qq' ||
+      toolId === 'r.plot' ||
+      toolId === 'custom.r' ||
+      toolId === 'table.gtsummary' ||
+      toolId === 'r.regression'
+  })
+  if (rNodes.length === 0 || mode === 'auto-on-run') return null
+  if (mode === 'manual') {
+    return {
+      severity: 'warning',
+      code: 'R_PACKAGES_MANUAL',
+      message: `${rNodes.length} R node${rNodes.length === 1 ? '' : 's'} require R packages that BioFlow will not install automatically.`,
+      suggestion: 'Install the required packages in your R library or switch Settings -> Tools -> R packages to Prompt on run.',
+      details: { category: 'R packages' },
+    }
+  }
+  return {
+    severity: 'info',
+    code: 'R_PACKAGES_PROMPT_ON_RUN',
+    message: `${rNodes.length} R node${rNodes.length === 1 ? '' : 's'} will check and install missing R packages during the run.`,
+    suggestion: 'BioFlow installs only missing packages into the configured BioFlow R library before running the R script.',
+    details: { category: 'R packages' },
+  }
 }
 
 function moduleCandidateNames(suggestions: ClusterModuleSuggestion[]): string[] {
@@ -783,11 +834,13 @@ export function PipelineToolbar() {
         authenticated: dnxAuthenticated,
       },
     })
+    const rPackageIssue = rPackageIssueForSnapshot(snapshot, settings.rPackageInstallMode)
+    if (rPackageIssue) result = appendValidationIssues(result, [rPackageIssue])
 
     if (activeConnectionId && activeConnectionId !== LOCAL_CONNECTION_ID) {
       if (opts.includeFileReadiness) {
         opts.onProgress?.('Checking input files...')
-        const readiness = await evaluateReadiness(activeConnectionId, snapshot)
+        const readiness = await evaluateReadiness(activeConnectionId, snapshot, { force: true })
         result = mergeReadinessIntoValidation(result, readiness)
       }
       if (opts.includeModuleChecks) {
@@ -825,7 +878,7 @@ export function PipelineToolbar() {
       readiness,
       transferPlans,
     }
-  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.vepCachePath, settings.vepPath, skipPreRunDoctorCheck])
+  }, [activeConnectionId, dnxAuthenticated, dnxDefaultProjectId, evaluateReadiness, runDoctorReport, schemas, settings.annovarDbPath, settings.annovarScriptsPath, settings.rPackageInstallMode, settings.vepCachePath, settings.vepPath, skipPreRunDoctorCheck])
 
   const handleNew = useCallback(async () => {
     if (dirty) {
@@ -1315,7 +1368,7 @@ export function PipelineToolbar() {
 
   return (
     <>
-      <div data-tour="run-toolbar" className="bioflow-toolbar surface-panel z-20 flex h-10 shrink-0 items-center gap-2 px-3">
+      <div data-tour="run-toolbar" className="bioflow-toolbar surface-panel z-20 flex h-9 shrink-0 items-center gap-2 px-3">
         {/* Pipeline name */}
         <div className="flex items-center gap-2 min-w-0">
           {editingName ? (
@@ -1330,7 +1383,7 @@ export function PipelineToolbar() {
           ) : (
             <button
               onClick={() => setEditingName(true)}
-              className="text-sm font-medium text-text-primary hover:text-accent transition-colors truncate max-w-[240px]"
+              className="max-w-[240px] truncate text-xs font-medium text-text-primary transition-colors hover:text-accent"
               title="Click to rename"
             >
               {pipelineName}
@@ -1447,46 +1500,48 @@ export function PipelineToolbar() {
                         {group} ({issues.length})
                       </div>
                       {issues.map((issue, index) => (
-                        <div key={`${group}-${index}`} className="px-4 py-2 border-b border-border-light/50 last:border-0 flex items-start gap-2">
-                          <span className={`text-[10px] font-mono shrink-0 mt-px ${issue.severity === 'error' ? 'text-error' : issue.severity === 'warning' ? 'text-warning' : 'text-accent'}`}>
+                        <div key={`${group}-${index}`} data-wrap className="grid grid-cols-[minmax(6.5rem,9.5rem)_minmax(0,1fr)_auto] items-start gap-2 border-b border-border-light/50 px-4 py-2 last:border-0">
+                          <span className={`break-all text-[10px] font-mono leading-4 ${issue.severity === 'error' ? 'text-error' : issue.severity === 'warning' ? 'text-warning' : 'text-accent'}`}>
                             {issue.code}
                           </span>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-xs text-text-primary leading-snug">{issue.message}</div>
+                          <div data-wrap className="min-w-0">
+                            <div data-wrap className="text-wrap text-xs leading-snug text-text-primary">{issue.message}</div>
                             {issue.suggestion && (
-                              <div className="text-[10px] text-text-muted mt-0.5 leading-snug">{issue.suggestion}</div>
+                              <div data-wrap className="text-wrap mt-0.5 text-[10px] leading-snug text-text-muted">{issue.suggestion}</div>
                             )}
                           </div>
-                          {issue.nodeId && (
-                            <button
-                              type="button"
-                              onClick={() => selectValidationIssueNode(issue)}
-                              className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
-                            >
-                              Select
-                            </button>
-                          )}
-                          {canApplyValidationQuickFix(issue) && (
-                            <button
-                              type="button"
-                              onClick={() => applyValidationQuickFix(issue)}
-                              className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
-                            >
-                              {validationQuickFixLabel(issue)}
-                            </button>
-                          )}
-                          {canCreateRemoteFolderQuickFix(issue) && (
-                            <button
-                              type="button"
-                              onClick={() => void createRemoteFolderQuickFix(issue)}
-                              className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
-                            >
-                              Create folder
-                            </button>
-                          )}
-                          {moduleCandidatesFromIssue(issue).length > 0 && (
-                            <ModuleSuggestionPicker issue={issue} onApply={applyModuleSuggestion} />
-                          )}
+                          <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+                            {issue.nodeId && (
+                              <button
+                                type="button"
+                                onClick={() => selectValidationIssueNode(issue)}
+                                className="shrink-0 rounded border border-border bg-bg-tertiary px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
+                              >
+                                Select
+                              </button>
+                            )}
+                            {canApplyValidationQuickFix(issue) && (
+                              <button
+                                type="button"
+                                onClick={() => applyValidationQuickFix(issue)}
+                                className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+                              >
+                                {validationQuickFixLabel(issue)}
+                              </button>
+                            )}
+                            {canCreateRemoteFolderQuickFix(issue) && (
+                              <button
+                                type="button"
+                                onClick={() => void createRemoteFolderQuickFix(issue)}
+                                className="shrink-0 rounded bg-accent px-2 py-1 text-[10px] text-white hover:brightness-110"
+                              >
+                                Create folder
+                              </button>
+                            )}
+                            {moduleCandidatesFromIssue(issue).length > 0 && (
+                              <ModuleSuggestionPicker issue={issue} onApply={applyModuleSuggestion} />
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1524,68 +1579,68 @@ export function PipelineToolbar() {
             onClick={undo}
             disabled={past.length === 0}
             className={classNames(
-              'p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors',
+              'rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary',
               'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
             )}
             title="Undo (Cmd/Ctrl+Z)"
           >
-            <Undo2 size={14} />
+            <Undo2 size={13} />
           </button>
           <button
             onClick={redo}
             disabled={future.length === 0}
             className={classNames(
-              'p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors',
+              'rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary',
               'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
             )}
             title="Redo (Shift+Cmd/Ctrl+Z)"
           >
-            <Redo2 size={14} />
+            <Redo2 size={13} />
           </button>
 
           <div className="w-px h-5 bg-border mx-1" />
 
           <button
             onClick={handleNew}
-            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
             title="New pipeline"
           >
-            <FilePlus2 size={14} />
+            <FilePlus2 size={13} />
           </button>
           <button
             onClick={handleOpen}
-            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
             title="Open pipeline"
           >
-            <FolderOpen size={14} />
+            <FolderOpen size={13} />
           </button>
           <button
             onClick={handleImport}
-            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
             title="Import pipeline JSON"
           >
-            <Download size={14} className="rotate-180" />
+            <Download size={13} className="rotate-180" />
           </button>
           <button
             onClick={handleSave}
-            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
             title="Save pipeline"
           >
-            <Save size={14} />
+            <Save size={13} />
           </button>
           <button
             onClick={handleTemplate}
-            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
             title="Load template"
           >
-            <LayoutTemplate size={14} />
+            <LayoutTemplate size={13} />
           </button>
           <button
             onClick={handleExport}
-            className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="rounded p-1.5 text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
             title="Export as JSON"
           >
-            <Download size={14} />
+            <Download size={13} />
           </button>
 
           <div className="w-px h-5 bg-border mx-1" />
@@ -1595,9 +1650,9 @@ export function PipelineToolbar() {
             size="sm"
             onClick={handlePreviewScripts}
             disabled={previewLoading}
-            className="h-7 px-2.5 text-xs"
+            className="h-6 px-2 text-[11px]"
           >
-            <FileCode2 size={12} className="mr-1" />
+            <FileCode2 size={11} className="mr-1" />
             {previewLoading ? 'Previewing...' : 'Preview'}
           </Button>
 
@@ -1606,10 +1661,10 @@ export function PipelineToolbar() {
             size="sm"
             onClick={handleRun}
             disabled={running}
-            className="h-7 px-2.5 text-xs min-w-[72px] justify-center"
+            className="h-6 min-w-[64px] justify-center px-2 text-[11px]"
             title={runStatus ?? undefined}
           >
-            <Play size={12} className="mr-1 shrink-0" />
+            <Play size={11} className="mr-1 shrink-0" />
             {runStatus
               ? <span className="truncate max-w-[140px]">{runStatus}</span>
               : running ? 'Running...' : 'Run'}
@@ -1619,10 +1674,10 @@ export function PipelineToolbar() {
               variant="ghost"
               size="sm"
               onClick={handleCancelRun}
-              className="h-7 px-2.5 text-xs ml-1 text-red-400 hover:bg-red-500/10"
+              className="ml-1 h-6 px-2 text-[11px] text-red-400 hover:bg-red-500/10"
               title="Cancel active run"
             >
-              <Square size={12} className="mr-1" />
+              <Square size={11} className="mr-1" />
               Cancel
             </Button>
           )}

@@ -35,6 +35,8 @@ import type {
   RunState,
   RunStatus,
   NodeRunState,
+  ArrayTaskMapEntry,
+  ArrayTaskStatus,
   DryRunScript,
   ToolNodeData,
   MergeNodeData,
@@ -224,11 +226,14 @@ export class PipelineRunner {
     const nodes: Record<string, NodeRunState> = {}
     for (const n of snapshot.nodes) {
       if (n.type === 'tool' || n.type === 'merge' || n.type === 'transform' || n.type === 'transfer') {
-        nodes[n.id] = {
+        const ns: NodeRunState = {
           nodeId: n.id,
           toolId: n.type === 'tool' ? (n.data as ToolNodeData).toolId : n.type,
           status: 'idle',
         }
+        const plan = plans.get(n.id)
+        if (plan?.mode === 'array') applyArrayMetadata(ns, plan, plan.keys?.length)
+        nodes[n.id] = ns
       }
     }
     const runState: RunState = {
@@ -380,7 +385,7 @@ export class PipelineRunner {
           summary: tool.description,
           commands: extractCommands(gen.script),
           script: gen.script,
-          outputPaths: collectOutputPaths(plan.outputs),
+          outputPaths: displayOutputPathsForNode(node, plan),
           intermediatePaths: this.collectIntermediatePathsForNode(node, plan),
           arraySize: gen.arraySize,
         })
@@ -648,6 +653,25 @@ export class PipelineRunner {
     return this.runs.get(runId) ?? null
   }
 
+  async refreshArrayTasks(runId: string, nodeId: string): Promise<Record<string, ArrayTaskStatus>> {
+    const run = this.runs.get(runId)
+    if (!run) throw new Error(`Unknown run ${runId}`)
+    const ns = run.nodes[nodeId]
+    if (!ns) throw new Error(`Unknown node ${nodeId}`)
+    if (!ns.jobId || !ns.isArray) throw new Error('Selected node is not a submitted Slurm array job.')
+    const taskMap = ns.arrayTaskMap ?? fallbackArrayTaskMap(ns.arraySize)
+    ns.arrayTaskMap = taskMap
+    const tasks = await this.tracker.refreshArrayJob({
+      connectionId: run.connectionId,
+      jobId: ns.jobId,
+      taskMap,
+      previous: ns.arrayTasks,
+    })
+    ns.arrayTasks = tasks
+    this.emitArrayTaskStatus(runId, nodeId, tasks)
+    return tasks
+  }
+
   async reattachPersistedJobs(): Promise<void> {
     const liveConnections = new Set(this.ssh.listConnections().filter((c) => c.connected).map((c) => c.id))
     for (const run of this.runs.values()) {
@@ -662,10 +686,16 @@ export class PipelineRunner {
           connectionId: run.connectionId,
           jobId: ns.jobId,
           isArray: !!ns.isArray,
+          arrayTaskMap: ns.arrayTaskMap,
+          previousArrayTasks: ns.arrayTasks,
           onStart: () => {
             ns.status = 'running'
             ns.startedAt = ns.startedAt ?? Date.now()
             this.emitNodeStatus(run.runId, ns.nodeId, 'running', ns.jobId)
+          },
+          onTaskUpdate: (tasks) => {
+            ns.arrayTasks = tasks
+            this.emitArrayTaskStatus(run.runId, ns.nodeId, tasks)
           },
           onFinish: (outcome) => {
             ns.finishedAt = Date.now()
@@ -908,7 +938,7 @@ export class PipelineRunner {
         nodeId: node.id, nodeSlug: slug, tool, nodeData: toolData, axisPlan: plan,
         outputDir, logDir, connectionDefaults,
       })
-      return { script: gen.script, outputDir, outputPaths: collectOutputPaths(plan.outputs), arraySize: gen.arraySize }
+      return { script: gen.script, outputDir, outputPaths: displayOutputPathsForNode(node, plan), arraySize: gen.arraySize }
     }
 
     if (node.type === 'merge') {
@@ -995,6 +1025,7 @@ export class PipelineRunner {
       ns.submittedAt = Date.now()
       ns.isArray = firstPlan.mode === 'array'
       ns.arraySize = firstPlan.keys?.length
+      applyArrayMetadata(ns, firstPlan, firstPlan.keys?.length)
     }
 
     const depIds = groupDependencyJobIds(group, run, plans)
@@ -1032,6 +1063,15 @@ export class PipelineRunner {
         connectionId: run.connectionId,
         jobId,
         isArray: firstPlan.mode === 'array',
+        arrayTaskMap: built[0] ? run.nodes[built[0].node.id].arrayTaskMap : undefined,
+        previousArrayTasks: built[0] ? run.nodes[built[0].node.id].arrayTasks : undefined,
+        onTaskUpdate: (tasks) => {
+          for (const entry of built) {
+            const ns = run.nodes[entry.node.id]
+            ns.arrayTasks = tasks
+            this.emitArrayTaskStatus(run.runId, entry.node.id, tasks)
+          }
+        },
         onStart: () => {
           for (const entry of built) {
             const ns = run.nodes[entry.node.id]
@@ -1175,10 +1215,11 @@ export class PipelineRunner {
     await this.sftp.write(run.connectionId, scriptPath, script)
     ns.scriptPath = scriptPath
     ns.outputDir = outputDir
-    ns.outputPaths = collectOutputPaths(plan.outputs)
+    ns.outputPaths = displayOutputPathsForNode(node, plan)
     ns.submittedAt = Date.now()
     ns.isArray = Boolean(arraySize) || plan.mode === 'array'
     ns.arraySize = arraySize
+    applyArrayMetadata(ns, plan, arraySize)
 
     if (node.type === 'tool' && (node.data as ToolNodeData).executionMode === 'login') {
       await this.runLoginNode(run, node.id, ns, scriptPath, plan)
@@ -1225,6 +1266,12 @@ export class PipelineRunner {
         connectionId: run.connectionId,
         jobId,
         isArray: Boolean(ns.isArray),
+        arrayTaskMap: ns.arrayTaskMap,
+        previousArrayTasks: ns.arrayTasks,
+        onTaskUpdate: (tasks) => {
+          ns.arrayTasks = tasks
+          this.emitArrayTaskStatus(run.runId, node.id, tasks)
+        },
         onStart: () => {
           ns.status = 'running'
           ns.startedAt = Date.now()
@@ -1485,6 +1532,14 @@ export class PipelineRunner {
       totalBytes: progress.totalBytes ?? plan?.totalBytes ?? ns.transferProgress?.totalBytes,
       warnings: plan?.warnings,
     }
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      win.webContents.send('pipeline:transfer-progress', {
+        runId: run.runId,
+        nodeId,
+        progress: ns.transferProgress,
+      })
+    }
     this.emitNodeStatus(run.runId, nodeId, ns.status ?? 'idle', ns.jobId, ns.error)
   }
 
@@ -1522,7 +1577,7 @@ export class PipelineRunner {
         const ensure = await this.dnx.ensureApplet(projectId, { appletName: tool.dnxApplet.name })
         ns.status = 'queued'
         ns.outputDir = logicalOutputDir
-        ns.outputPaths = logicalOutputPaths
+        ns.outputPaths = displayOutputPathsForNode(node, plan)
         ns.submittedAt = Date.now()
         const { jobId } = await this.dnx.runSparkExtract({
           projectId,
@@ -1579,7 +1634,7 @@ export class PipelineRunner {
 
     ns.status = 'queued'
     ns.outputDir = logicalOutputDir
-    ns.outputPaths = logicalOutputPaths
+    ns.outputPaths = displayOutputPathsForNode(node, plan)
     ns.submittedAt = Date.now()
     const { jobId } = await this.dnx.runSwissArmyKnife({
       projectId,
@@ -1916,6 +1971,23 @@ export class PipelineRunner {
     this.persistRuns()
   }
 
+  private emitArrayTaskStatus(runId: string, nodeId: string, tasks: Record<string, ArrayTaskStatus>): void {
+    const run = this.runs.get(runId)
+    const ns = run?.nodes[nodeId]
+    if (run) run.updatedAt = Date.now()
+    if (ns) ns.arrayTasks = tasks
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      win.webContents.send('pipeline:array-task-status', {
+        runId,
+        nodeId,
+        tasks,
+        taskMap: ns?.arrayTaskMap,
+      })
+    }
+    this.persistRuns()
+  }
+
   private emitRunStatus(runId: string, status: RunStatus): void {
     const win = BrowserWindow.getAllWindows()[0]
     const run = this.runs.get(runId)
@@ -1974,6 +2046,7 @@ export class PipelineRunner {
         const value = store.get(key)
         return typeof value === 'string' && value.trim() ? value.trim() : undefined
       }
+      const rPackageInstallMode = str('settings:rPackages:installMode')
       const account = typeof rawAccount === 'string' && rawAccount.trim() ? rawAccount.trim() : undefined
       const partition =
         typeof rawDefaultPartition === 'string' && rawDefaultPartition.trim() ? rawDefaultPartition.trim()
@@ -1983,6 +2056,16 @@ export class PipelineRunner {
         account,
         partition,
         modulePreamble: MODULE_PREAMBLE,
+        moduleDefaults: {
+          plink: str('settings:modules:plink'),
+          r: str('settings:modules:r'),
+          bcftools: str('settings:modules:bcftools'),
+          regenie: str('settings:modules:regenie'),
+        },
+        rPackageInstallMode:
+          rPackageInstallMode === 'auto-on-run' || rPackageInstallMode === 'manual'
+            ? rPackageInstallMode
+            : 'prompt-on-run',
         toolsRoot: str('settings:toolsRoot'),
         annovarScriptsPath: str('settings:annovarScriptsPath'),
         annovarDbPath: str('settings:annovarDbPath'),
@@ -2288,6 +2371,24 @@ function collectOutputPaths(outputs: Record<string, { kind: string; path?: strin
   return paths
 }
 
+function displayOutputPathsForNode(node: PipelineSnapshot['nodes'][number], plan: AxisPlan): string[] {
+  const logical = collectOutputPaths(plan.outputs)
+  if (node.type !== 'tool') return logical
+  const data = node.data as ToolNodeData
+  if (data.toolId !== 'plot.manhattan' && data.toolId !== 'plot.qq' && data.toolId !== 'r.plot') return logical
+  return logical.flatMap((path) => physicalPlotOutputPaths(path, data.paramValues?.outputFormats))
+}
+
+function physicalPlotOutputPaths(plotManifestPath: string, rawFormats: unknown): string[] {
+  const base = plotManifestPath.toLowerCase().endsWith('.txt')
+    ? plotManifestPath.slice(0, -4)
+    : plotManifestPath
+  const formats = String(rawFormats ?? 'both').trim().toLowerCase()
+  if (formats === 'png') return [`${base}.png`]
+  if (formats === 'pdf') return [`${base}.pdf`]
+  return [`${base}.png`, `${base}.pdf`]
+}
+
 async function mapAxedValueAsync(
   value: AxisPlan['inputs'][string],
   mapPath: (path: string, index: number) => Promise<string>,
@@ -2423,6 +2524,56 @@ function buildNodeSlugs(snapshot: PipelineSnapshot): Map<string, string> {
     out.set(n.id, candidate)
   }
   return out
+}
+
+function applyArrayMetadata(ns: NodeRunState, plan: AxisPlan, arraySize?: number): void {
+  const taskMap = buildArrayTaskMap(plan, arraySize)
+  if (!taskMap) return
+  ns.isArray = true
+  ns.arraySize = taskMap.length
+  ns.arrayAxis = plan.axis
+  ns.arrayTaskMap = taskMap
+  ns.arrayTasks = ns.arrayTasks ?? Object.fromEntries(taskMap.map((entry) => [entry.taskId, {
+    taskId: entry.taskId,
+    key: entry.key,
+    state: 'queued' as const,
+    updatedAt: Date.now(),
+  }]))
+}
+
+function buildArrayTaskMap(plan: AxisPlan, arraySize?: number): ArrayTaskMapEntry[] | undefined {
+  if (plan.mode === 'array' && plan.keys?.length) {
+    const keys = plan.keys
+    const useKeysAsTaskIds = keysAreSlurmTaskIds(keys)
+    return keys.map((key, index) => ({
+      taskId: useKeysAsTaskIds ? key : String(index),
+      key,
+      label: formatArrayTaskLabel(plan.axis, key),
+      index,
+    }))
+  }
+  if (!arraySize || arraySize <= 0) return undefined
+  return fallbackArrayTaskMap(arraySize)
+}
+
+function fallbackArrayTaskMap(arraySize: number | undefined): ArrayTaskMapEntry[] {
+  const size = Math.max(0, arraySize ?? 0)
+  return Array.from({ length: size }, (_, index) => ({
+    taskId: String(index),
+    key: String(index),
+    label: `task ${index}`,
+    index,
+  }))
+}
+
+function keysAreSlurmTaskIds(keys: string[]): boolean {
+  return keys.length > 0 && keys.every((key) => /^\d+$/.test(key) && Number(key) >= 0)
+}
+
+function formatArrayTaskLabel(axis: string | undefined, key: string): string {
+  if (!axis) return `task ${key}`
+  if (/^(chr|chrom|chromosome)$/i.test(axis)) return `chr ${key}`
+  return `${axis} ${key}`
 }
 
 function downstreamOf(snapshot: PipelineSnapshot, nodeId: string): Set<string> {

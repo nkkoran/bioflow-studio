@@ -126,7 +126,7 @@ export function PipelineSwitcher({ compact = false }: { compact?: boolean }) {
     <div className="relative min-w-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
       <button
         onClick={() => setOpen((value) => !value)}
-        className="flex max-w-[280px] items-center gap-1 rounded px-2 py-1 text-sm font-semibold text-text-primary hover:bg-bg-hover"
+        className="flex max-w-[280px] items-center gap-1 rounded px-2 py-1 text-xs font-semibold text-text-primary hover:bg-bg-hover"
         title={pipelineName}
       >
         <span className="truncate">{compact ? pipelineName : pipelineName || 'Untitled pipeline'}</span>

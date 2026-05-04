@@ -11,7 +11,7 @@
 export type InferredFileType =
   | 'any' | 'vcf' | 'bcf' | 'fastq' | 'fasta' | 'bam' | 'sam' | 'cram'
   | 'bed' | 'gff' | 'gtf' | 'plink' | 'bgen' | 'pgen'
-  | 'tsv' | 'csv' | 'txt' | 'json' | 'yaml'
+  | 'tsv' | 'csv' | 'txt' | 'xlsx' | 'json' | 'yaml'
 
 export function inferFileType(pathOrName: string): InferredFileType {
   const lower = pathOrName.toLowerCase()
@@ -42,6 +42,7 @@ export function inferFileType(pathOrName: string): InferredFileType {
     lower.endsWith('.profile')
   ) return 'tsv'
   if (lower.endsWith('.csv')) return 'csv'
+  if (lower.endsWith('.xlsx')) return 'xlsx'
   if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'txt'
   if (lower.endsWith('.json')) return 'json'
   if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'yaml'

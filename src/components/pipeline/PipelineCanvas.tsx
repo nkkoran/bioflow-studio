@@ -50,10 +50,12 @@ import { edgeAxisChips } from '@/lib/axisPlannerPure'
 import { detectSplitInFolder as detectSmartSplitInFolder } from '@/lib/splitDetection'
 import { pathBasename } from '@/lib/utils'
 import type { FileNodeSplit, FileType, NodeGroup, SplitPattern } from '@/types/pipeline'
+import type { RemoteFileEntry } from '@/types/files'
 import { useDialogStore } from '@/stores/dialogStore'
 
 const FILE_DRAG_MIME = 'application/x-bioflow-path'
 const FILE_DRAG_ENTRY_MIME = 'application/x-bioflow-file-entry'
+const FILE_DRAG_ENTRIES_MIME = 'application/x-bioflow-file-entries'
 
 const nodeTypes: NodeTypes = {
   tool: ToolNode,
@@ -276,7 +278,7 @@ function CanvasInner() {
 
       if (compatible.length === 0) {
         addFileNode(position, { isInput: true, label, path: resolvedPath, fileType, source, origin })
-        setDropMessage(`Added ${label} to the canvas.`)
+        setDropMessage(`Added ${label} to the canvas, but it does not match any open input on ${target.data.label ?? 'that tool'}.`)
         return
       }
 
@@ -382,6 +384,7 @@ function CanvasInner() {
     try {
       setDropMessage('Creating split input from remote folder...')
       const entries = await window.api.sftp.ls(activeConnectionId, folderPath)
+      const listingCache = new Map<string, RemoteFileEntry[]>([[folderPath.replace(/\/+$/, ''), entries]])
       if (entries.length === 0) {
         setDropMessage('Folder is empty.')
         return
@@ -391,7 +394,14 @@ function CanvasInner() {
       const allSameType = fileEntries.length > 0 && fileEntries.every((entry) => inferFileType(entry.name) === firstType)
       const splitFileType = allSameType ? firstType : 'any'
       const detected = await detectSmartSplitInFolder({
-        listFolder: (path) => window.api.sftp.ls(activeConnectionId, path),
+        listFolder: async (path) => {
+          const key = path.replace(/\/+$/, '')
+          const cached = listingCache.get(key)
+          if (cached) return cached
+          const listed = await window.api.sftp.ls(activeConnectionId, path)
+          listingCache.set(key, listed)
+          return listed
+        },
         folder: folderPath,
         mode: 'auto',
         axis: 'file',
@@ -446,14 +456,36 @@ function CanvasInner() {
       const bundlePayload = event.dataTransfer.getData(BUNDLE_DRAG_MIME)
       const filePath = event.dataTransfer.getData(FILE_DRAG_MIME)
       const draggedEntry = parseDraggedFileEntry(event.dataTransfer.getData(FILE_DRAG_ENTRY_MIME))
+      const draggedEntries = parseDraggedFileEntries(event.dataTransfer.getData(FILE_DRAG_ENTRIES_MIME))
       const localDrop = readLocalDrop(event)
       const droppedLocalPaths = localDrop.paths
-      if (!payload && !bundlePayload && !filePath && droppedLocalPaths.length === 0) return
+      if (!payload && !bundlePayload && !filePath && draggedEntries.length === 0 && droppedLocalPaths.length === 0) return
 
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       })
+
+      if (draggedEntries.length > 1) {
+        const origin = activeConnectionId === LOCAL_CONNECTION_ID ? 'local' : 'ssh'
+        const source = origin === 'local' ? 'local' : 'remote'
+        const files = collapsePlinkDraggedEntries(draggedEntries.filter((entry) => !entry.isDirectory))
+        const entries = files.length > 0 ? files : draggedEntries
+        const types = [...new Set(entries.map((entry) => entry.isDirectory ? 'any' : inferFileType(entry.name)))]
+        const items = entries.map((entry) => ({ key: splitKeyFromDraggedName(entry.name), rawKey: splitKeyFromDraggedName(entry.name), path: entry.path }))
+        addFileNode(position, {
+          isInput: true,
+          label: `${items.length} selected files`,
+          path: '',
+          fileType: types.length === 1 ? types[0] as FileType : 'any',
+          source,
+          origin,
+          split: { axis: guessAxisFromSplitItems(items), items, pattern: { kind: 'manual' } },
+        })
+        setDropMessage(`Added ${items.length} selected files as an axis-split input.`)
+        window.setTimeout(() => setDropMessage(null), 3000)
+        return
+      }
 
       if (localDrop.rootDirectory) {
         void handleDroppedFolder(localDrop.rootDirectory, position)
@@ -939,6 +971,50 @@ function parseDraggedFileEntry(raw: string): { path: string; name: string; isDir
   } catch {
     return null
   }
+}
+
+function parseDraggedFileEntries(raw: string): Array<{ path: string; name: string; isDirectory: boolean }> {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((entry) => {
+      const candidate = entry as Partial<{ path: string; name: string; isDirectory: boolean }>
+      return typeof candidate.path === 'string' && typeof candidate.name === 'string' && typeof candidate.isDirectory === 'boolean'
+        ? [{ path: candidate.path, name: candidate.name, isDirectory: candidate.isDirectory }]
+        : []
+    })
+  } catch {
+    return []
+  }
+}
+
+function collapsePlinkDraggedEntries(entries: Array<{ path: string; name: string; isDirectory: boolean }>): Array<{ path: string; name: string; isDirectory: boolean }> {
+  const passthrough: typeof entries = []
+  const byPrefix = new Map<string, typeof entries>()
+  for (const entry of entries) {
+    const match = entry.name.match(/^(.*)\.(pgen|pvar|psam|bed|bim|fam)$/i)
+    if (!match) {
+      passthrough.push(entry)
+      continue
+    }
+    const family = /^(pgen|pvar|psam)$/i.test(match[2]) ? 'pgen' : 'bed'
+    const key = `${family}:${match[1]}`
+    byPrefix.set(key, [...(byPrefix.get(key) ?? []), entry])
+  }
+  return [
+    ...passthrough,
+    ...[...byPrefix.values()].map((group) =>
+      group.find((entry) => /\.pgen$/i.test(entry.name)) ??
+      group.find((entry) => /\.bed$/i.test(entry.name)) ??
+      group[0]),
+  ]
+}
+
+function splitKeyFromDraggedName(name: string): string {
+  const chr = name.match(/(?:^|[^A-Za-z0-9])(?:chr|chrom|chromosome|c)[._-]?([0-9]+|x|y|xy|m|mt)(?=$|[^A-Za-z0-9])/i)
+  if (chr?.[1]) return chr[1].replace(/^0+(\d)/, '$1')
+  return name.match(/(\d+)/)?.[1]?.replace(/^0+(\d)/, '$1') ?? name
 }
 
 async function resolveDroppedFolderPath(paths: string[]): Promise<string> {

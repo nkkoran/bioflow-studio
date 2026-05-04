@@ -1465,7 +1465,11 @@ export function mergeReadinessIntoValidation(
     code: issue.code,
     message: issue.message,
     suggestion: issue.suggestion,
-    details: issue.details,
+    details: {
+      ...(issue.details ?? {}),
+      category: issue.category,
+      path: issue.path ?? null,
+    },
   }))
   const issues = [...base.issues, ...readinessIssues]
   return {
